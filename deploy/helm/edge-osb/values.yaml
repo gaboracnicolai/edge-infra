@@ -1,8 +1,8 @@
 api:
   replicaCount: 2
   image:
-    repository: ghcr.io/YOUR_OWNER/edge-osb
-    tag: "abc1234"  # pin to the SHA you pushed
+    repository: ghcr.io/gaboracnicolai/edge-osb
+    tag: "e51e304cf2cf4bff91a180a650f029ce80ff2ed1"  # pin to the SHA you pushed
     pullPolicy: IfNotPresent
   port: 8080
   resources:
@@ -16,8 +16,8 @@ api:
 worker:
   replicaCount: 2
   image:
-    repository: ghcr.io/YOUR_OWNER/edge-osb
-    tag: "abc1234"  # pin to the SHA you pushed
+    repository: ghcr.io/gaboracnicolai/edge-osb
+    tag: "e51e304cf2cf4bff91a180a650f029ce80ff2ed1"  # pin to the SHA you pushed
     pullPolicy: IfNotPresent
   resources:
     requests:
