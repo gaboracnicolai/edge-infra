@@ -13,6 +13,7 @@ dist/
 
 # Rust
 auth-service/target/
+auth-service/dist/
 **/*.rs.bk
 
 # Go

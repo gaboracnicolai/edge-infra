@@ -61,8 +61,13 @@ docker-build-local:
 	  --target controller -t edge-controller:local .
 	docker build -f osb/Dockerfile \
 	  -t edge-osb:local .
-	docker build -f auth-service/Dockerfile \
-	  -t auth-service:local ./auth-service
+	cd auth-service && \
+	  cargo build --release && \
+	  mkdir -p dist && \
+	  cp target/release/auth-service dist/auth-service && \
+	  docker build -f Dockerfile \
+	    --build-arg BUILD_MODE=local \
+	    -t auth-service:local .
 
 # Diff every managed Application against its in-cluster state.
 argocd-diff:

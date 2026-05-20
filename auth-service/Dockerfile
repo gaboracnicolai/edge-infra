@@ -1,10 +1,19 @@
-# Multi-stage build for the Rust ext_authz service.
-# Build context is auth-service/ (not the repo root) — see Makefile target.
+# Multi-mode build for auth-service.
+#
+#   BUILD_MODE=local (default) — full Rust build inside Docker. Used by
+#       `make docker-build-local` and any one-shot `docker build` without
+#       a pre-compiled binary on disk.
+#   BUILD_MODE=ci — expects the binary pre-staged at `dist/auth-service`
+#       in the build context (CI cross-compiles natively, avoids QEMU).
+#
+# Select with `docker build --build-arg BUILD_MODE={local|ci} …`. BuildKit
+# prunes unreferenced stages, so the Rust toolchain is never pulled in CI
+# mode, and `dist/` is never required in local mode.
 
-# The spec called for rust:1.79-slim, but the Cargo.lock locked in during
-# Phase 4 (under Rust 1.95) pulls transitive deps requiring rustc 1.88+
-# (time, time-core, time-macros). Pinning to 1.95-slim matches the toolchain
-# that produced Cargo.lock — fully reproducible without touching source.
+ARG BUILD_MODE=local
+
+# ---- builder ----------------------------------------------------------
+# Reached only when BUILD_MODE=local.
 FROM rust:1.95-slim AS builder
 WORKDIR /app
 
@@ -15,14 +24,27 @@ RUN mkdir src \
  && cargo build --release \
  && rm -rf src
 
-# Now bring in the real sources and rebuild.
+# Real sources + final build.
 COPY src ./src
 RUN touch src/main.rs \
  && cargo build --release
 
 
-FROM gcr.io/distroless/cc:nonroot
+# ---- source selector --------------------------------------------------
+# Two stages with identical interfaces (a single /auth-service file). The
+# `source` alias picks one based on BUILD_MODE.
+FROM scratch AS local-source
 COPY --from=builder /app/target/release/auth-service /auth-service
+
+FROM scratch AS ci-source
+COPY dist/auth-service /auth-service
+
+FROM ${BUILD_MODE}-source AS source
+
+
+# ---- runtime ----------------------------------------------------------
+FROM gcr.io/distroless/cc:nonroot
+COPY --from=source /auth-service /auth-service
 USER nonroot:nonroot
 EXPOSE 50051 9090
 ENTRYPOINT ["/auth-service"]
