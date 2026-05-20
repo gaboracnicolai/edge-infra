@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Rust
+auth-service/target/
+**/*.rs.bk
+
+# Go
+**/*.test
+**/coverage.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local secrets and CA material
+*.pem
+*.key
+!observability/grafana/dashboards/*.json

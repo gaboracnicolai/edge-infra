@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge-control-plane.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-control-plane.labels" . | nindent 4 }}
+data:
+  xds-listen-addr: {{ .Values.config.xdsListenAddr | quote }}
+  xds-node-id: {{ .Values.config.xdsNodeId | quote }}
+  reconcile-interval-ms: {{ .Values.config.reconcileIntervalMs | quote }}

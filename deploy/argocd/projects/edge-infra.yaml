@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: edge-infra
+  namespace: argocd
+spec:
+  description: Edge infrastructure — xDS control plane, proxies, OSB, auth
+  sourceRepos:
+    - "https://github.com/yourorg/edge-infra"
+  destinations:
+    - namespace: infra
+      server: https://kubernetes.default.svc
+    - namespace: edge
+      server: https://kubernetes.default.svc
+    - namespace: monitoring
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: cert-manager.io
+      kind: ClusterIssuer
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  roles:
+    - name: admin
+      policies:
+        - p, proj:edge-infra:admin, applications, *, edge-infra/*, allow
+      groups:
+        - edge-platform-team

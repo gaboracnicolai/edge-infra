@@ -1,0 +1,31 @@
+groups:
+  - name: edge-recording-rules
+    interval: 30s
+    rules:
+      - record: edge:upstream_error_ratio:rate5m
+        expr: |
+          sum by (cluster_name) (
+            rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+          )
+          /
+          sum by (cluster_name) (
+            rate(envoy_cluster_upstream_rq_total[5m])
+          )
+
+      - record: edge:upstream_rps:rate5m
+        expr: |
+          sum by (cluster_name) (
+            rate(envoy_cluster_upstream_rq_total[5m])
+          )
+
+      - record: edge:auth_denial_ratio:rate5m
+        expr: |
+          sum(rate(auth_requests_total{result="denied"}[5m]))
+          /
+          sum(rate(auth_requests_total[5m]))
+
+      - record: edge:osb_nak_ratio:rate5m
+        expr: |
+          sum(rate(osb_nats_messages_total{result="nak"}[5m]))
+          /
+          sum(rate(osb_nats_messages_total[5m]))

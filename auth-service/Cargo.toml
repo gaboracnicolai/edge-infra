@@ -1,0 +1,27 @@
+[package]
+name = "auth-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+tower = "0.5"
+jsonwebtoken = "9"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+prometheus = { version = "0.13", features = ["process"] }
+axum = "0.7"
+tokio-rustls = "0.26"
+arc-swap = "1"
+thiserror = "1"
+envoy-types = "0.5"
+
+[dev-dependencies]
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+base64 = "0.22"

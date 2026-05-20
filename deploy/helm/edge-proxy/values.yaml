@@ -1,0 +1,37 @@
+image:
+  repository: envoyproxy/envoy
+  tag: v1.30.0
+  pullPolicy: IfNotPresent
+
+hostNetwork: true
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: "10%"
+
+xds:
+  controlPlaneHost: edge-control-plane.infra.svc.cluster.local
+  controlPlanePort: 18000
+
+tls:
+  existingSecret: envoy-serving-tls-secret
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 1Gi
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9901"
+
+nameOverride: ""
+fullnameOverride: ""

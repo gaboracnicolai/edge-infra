@@ -1,0 +1,30 @@
+# Multi-stage build for the Go xDS control plane and Kubernetes controller.
+#
+#   docker build --target server     -t edge-control-plane .
+#   docker build --target controller -t edge-controller    .
+
+FROM golang:1.22-alpine AS builder
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-w -s" -o /bin/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-w -s" -o /bin/controller ./cmd/controller
+
+
+FROM gcr.io/distroless/static:nonroot AS server
+COPY --from=builder /bin/server /server
+USER nonroot:nonroot
+EXPOSE 18000 2112
+ENTRYPOINT ["/server"]
+
+
+FROM gcr.io/distroless/static:nonroot AS controller
+COPY --from=builder /bin/controller /controller
+USER nonroot:nonroot
+ENTRYPOINT ["/controller"]

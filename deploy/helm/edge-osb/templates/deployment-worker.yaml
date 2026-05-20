@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge-osb.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-osb.labels" . | nindent 4 }}
+    component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "edge-osb.workerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "edge-osb.workerSelectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "edge-osb.serviceAccountName" . }}
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command:
+            - python
+            - "-m"
+            - worker
+          envFrom:
+            - secretRef:
+                name: {{ .Values.config.existingSecret }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}

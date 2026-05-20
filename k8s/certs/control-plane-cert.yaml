@@ -1,0 +1,17 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-cp-tls
+  namespace: infra
+spec:
+  secretName: edge-cp-tls-secret
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  duration: 24h
+  renewBefore: 8h
+  dnsNames:
+    - edge-control-plane.infra.svc.cluster.local
+  usages:
+    - server auth
+    - client auth

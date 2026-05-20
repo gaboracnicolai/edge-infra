@@ -1,0 +1,48 @@
+groups:
+  - name: auth-service
+    interval: 30s
+    rules:
+      - alert: AuthServiceHighDenialRate
+        expr: |
+          (
+            sum(rate(auth_requests_total{result="denied"}[5m]))
+            /
+            sum(rate(auth_requests_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "Auth denial rate > 10%"
+          description: >
+            More than 10% of auth checks are being denied. This may
+            indicate a JWKS rotation issue or a credential problem
+            affecting many users.
+
+      - alert: AuthServiceJWKSRefreshFailing
+        expr: |
+          sum(rate(jwks_refresh_total{result="failure"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "JWKS refresh has been failing for 15 minutes"
+          description: >
+            The auth service cannot refresh its JWKS. If the cached
+            keys expire, all JWT validation will fail. Check the
+            JWKS_URL and network connectivity.
+          runbook: https://runbooks.internal/edge/jwks-failure
+
+      - alert: AuthServiceHighValidationLatency
+        expr: |
+          histogram_quantile(0.99,
+            rate(jwt_validation_duration_seconds_bucket[5m])
+          ) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "JWT validation P99 > 10ms"

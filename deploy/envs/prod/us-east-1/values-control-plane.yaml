@@ -1,0 +1,9 @@
+replicaCount: 3
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: edge-control-plane
+        topologyKey: kubernetes.io/hostname

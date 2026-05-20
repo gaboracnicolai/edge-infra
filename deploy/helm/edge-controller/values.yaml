@@ -1,0 +1,30 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/YOUR_OWNER/edge-controller
+  tag: "abc1234"  # pin to the SHA you pushed
+  pullPolicy: IfNotPresent
+
+postgres:
+  existingSecret: edge-control-plane-postgres
+  secretKey: dsn
+
+serviceAccount:
+  create: true
+  name: edge-controller
+
+leaderElection:
+  namespace: infra
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations: {}
+
+nameOverride: ""
+fullnameOverride: ""

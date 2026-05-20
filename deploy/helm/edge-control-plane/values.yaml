@@ -1,0 +1,49 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/YOUR_OWNER/edge-control-plane
+  tag: "abc1234"  # pin to the SHA you pushed
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  grpcPort: 18000
+  metricsPort: 2112
+
+config:
+  xdsListenAddr: "0.0.0.0:18000"
+  xdsNodeId: "edge-proxy"
+  reconcileIntervalMs: 5000
+
+postgres:
+  existingSecret: edge-control-plane-postgres
+  secretKey: dsn
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "2112"
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app: edge-control-plane
+          topologyKey: kubernetes.io/hostname
+
+nameOverride: ""
+fullnameOverride: ""

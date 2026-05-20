@@ -1,0 +1,6 @@
+apiVersion: v2
+name: edge-proxy
+description: Envoy edge proxy fleet, driven by the xDS control plane
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

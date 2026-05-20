@@ -1,0 +1,264 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yaml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 30s
+      external_labels:
+        cluster: "${CLUSTER_NAME}"
+        environment: "${ENVIRONMENT}"
+
+    rule_files:
+      - /etc/prometheus/alerts/*.yaml
+      - /etc/prometheus/recording-rules.yaml
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      - job_name: otel-collector
+        static_configs:
+          - targets: ["otel-collector.monitoring.svc.cluster.local:8888"]
+
+  recording-rules.yaml: |
+    groups:
+      - name: edge-recording-rules
+        interval: 30s
+        rules:
+          - record: edge:upstream_error_ratio:rate5m
+            expr: |
+              sum by (cluster_name) (
+                rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+              )
+              /
+              sum by (cluster_name) (
+                rate(envoy_cluster_upstream_rq_total[5m])
+              )
+
+          - record: edge:upstream_rps:rate5m
+            expr: |
+              sum by (cluster_name) (
+                rate(envoy_cluster_upstream_rq_total[5m])
+              )
+
+          - record: edge:auth_denial_ratio:rate5m
+            expr: |
+              sum(rate(auth_requests_total{result="denied"}[5m]))
+              /
+              sum(rate(auth_requests_total[5m]))
+
+          - record: edge:osb_nak_ratio:rate5m
+            expr: |
+              sum(rate(osb_nats_messages_total{result="nak"}[5m]))
+              /
+              sum(rate(osb_nats_messages_total[5m]))
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+  namespace: monitoring
+data:
+  edge-proxy.yaml: |
+    groups:
+      - name: edge-proxy
+        interval: 30s
+        rules:
+          - alert: EnvoyXDSDisconnected
+            expr: envoy_control_plane_connected_state == 0
+            for: 2m
+            labels:
+              severity: critical
+              team: edge
+            annotations:
+              summary: "Envoy lost xDS connection"
+              runbook: https://runbooks.internal/edge/xds-disconnect
+
+          - alert: EnvoyHighErrorRate
+            expr: |
+              (
+                sum by (cluster_name) (
+                  rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+                )
+                /
+                sum by (cluster_name) (
+                  rate(envoy_cluster_upstream_rq_total[5m])
+                )
+              ) > 0.01
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "High 5xx rate"
+
+          - alert: EnvoyHighP99Latency
+            expr: |
+              histogram_quantile(0.99,
+                sum by (le, cluster_name) (
+                  rate(envoy_cluster_upstream_rq_time_bucket[5m])
+                )
+              ) > 2000
+            for: 10m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "P99 latency > 2s"
+
+          - alert: EnvoyProxyFleetShrinking
+            expr: |
+              count(envoy_control_plane_connected_state == 1)
+              < (count(envoy_control_plane_connected_state) * 0.9)
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "More than 10% of Envoy proxies disconnected"
+
+          - alert: EnvoyCircuitBreakerOpen
+            expr: |
+              sum by (cluster_name) (
+                envoy_cluster_circuit_breakers_default_cx_open
+              ) > 0
+            for: 1m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "Circuit breaker open"
+
+  control-plane.yaml: |
+    groups:
+      - name: edge-control-plane
+        interval: 30s
+        rules:
+          - alert: ControlPlaneReconcileStalled
+            expr: time() - edge_cp_last_reconcile_timestamp_seconds > 60
+            for: 1m
+            labels:
+              severity: critical
+              team: edge
+            annotations:
+              summary: "xDS reconciler has not run in > 60s"
+              runbook: https://runbooks.internal/edge/reconcile-stall
+
+          - alert: ControlPlaneHighReconcileDuration
+            expr: |
+              histogram_quantile(0.99,
+                rate(edge_cp_reconcile_duration_seconds_bucket[5m])
+              ) > 2
+            for: 10m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "Reconcile P99 > 2s"
+
+          - alert: ControlPlaneSnapshotVersionLag
+            expr: |
+              max(edge_cp_snapshot_version) - min(edge_cp_snapshot_version) > 3
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "Snapshot version spread across fleet > 3"
+
+          - alert: ControlPlaneDBConnectionsExhausted
+            expr: edge_cp_db_pool_idle == 0 and edge_cp_db_pool_waiting > 0
+            for: 2m
+            labels:
+              severity: critical
+              team: edge
+            annotations:
+              summary: "DB connection pool exhausted in control plane"
+
+  osb.yaml: |
+    groups:
+      - name: edge-osb
+        interval: 30s
+        rules:
+          - alert: OSBHighProvisionFailureRate
+            expr: |
+              (
+                sum(rate(osb_nats_messages_total{result="nak"}[5m]))
+                /
+                sum(rate(osb_nats_messages_total[5m]))
+              ) > 0.05
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "OSB worker NAK rate > 5%"
+
+          - alert: OSBWebhookDeliveryDegraded
+            expr: |
+              (
+                sum(rate(osb_webhook_deliveries_total{result="failure"}[15m]))
+                /
+                sum(rate(osb_webhook_deliveries_total[15m]))
+              ) > 0.1
+            for: 10m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "OSB webhook delivery failure rate > 10%"
+
+          - alert: OSBNATSConsumerLagHigh
+            expr: nats_consumer_num_pending{consumer="osb-workers"} > 100
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "OSB NATS consumer lag > 100"
+
+  auth-service.yaml: |
+    groups:
+      - name: auth-service
+        interval: 30s
+        rules:
+          - alert: AuthServiceHighDenialRate
+            expr: |
+              (
+                sum(rate(auth_requests_total{result="denied"}[5m]))
+                /
+                sum(rate(auth_requests_total[5m]))
+              ) > 0.1
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "Auth denial rate > 10%"
+
+          - alert: AuthServiceJWKSRefreshFailing
+            expr: sum(rate(jwks_refresh_total{result="failure"}[15m])) > 0
+            for: 15m
+            labels:
+              severity: critical
+              team: edge
+            annotations:
+              summary: "JWKS refresh failing for 15m"
+              runbook: https://runbooks.internal/edge/jwks-failure
+
+          - alert: AuthServiceHighValidationLatency
+            expr: |
+              histogram_quantile(0.99,
+                rate(jwt_validation_duration_seconds_bucket[5m])
+              ) > 0.01
+            for: 10m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "JWT validation P99 > 10ms"

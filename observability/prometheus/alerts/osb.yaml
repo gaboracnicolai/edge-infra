@@ -1,0 +1,43 @@
+groups:
+  - name: edge-osb
+    interval: 30s
+    rules:
+      - alert: OSBHighProvisionFailureRate
+        expr: |
+          (
+            sum(rate(osb_nats_messages_total{result="nak"}[5m]))
+            /
+            sum(rate(osb_nats_messages_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "OSB worker NAK rate > 5%"
+          description: >
+            More than 5% of provision requests are failing in the
+            worker. Check NATS consumer lag and Postgres connectivity.
+
+      - alert: OSBWebhookDeliveryDegraded
+        expr: |
+          (
+            sum(rate(osb_webhook_deliveries_total{result="failure"}[15m]))
+            /
+            sum(rate(osb_webhook_deliveries_total[15m]))
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "OSB webhook delivery failure rate > 10%"
+
+      - alert: OSBNATSConsumerLagHigh
+        expr: nats_consumer_num_pending{consumer="osb-workers"} > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "OSB NATS consumer lag > 100 messages"

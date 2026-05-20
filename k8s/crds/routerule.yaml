@@ -1,0 +1,70 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: routerules.edge.io
+spec:
+  group: edge.io
+  scope: Namespaced
+  names:
+    kind: RouteRule
+    listKind: RouteRuleList
+    plural: routerules
+    singular: routerule
+    shortNames:
+      - rr
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Gateway
+          type: string
+          jsonPath: .spec.gatewayRef
+        - name: Path
+          type: string
+          jsonPath: .spec.pathPrefix
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef
+        - name: Synced
+          type: boolean
+          jsonPath: .status.synced
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [gatewayRef, pathPrefix, clusterRef]
+              properties:
+                gatewayRef:
+                  type: string
+                  minLength: 1
+                hostnames:
+                  type: array
+                  items:
+                    type: string
+                pathPrefix:
+                  type: string
+                  minLength: 1
+                clusterRef:
+                  type: string
+                  minLength: 1
+                timeoutSeconds:
+                  type: integer
+                  minimum: 0
+                  default: 30
+            status:
+              type: object
+              properties:
+                synced:
+                  type: boolean
+                lastSyncedAt:
+                  type: string
+                  format: date-time

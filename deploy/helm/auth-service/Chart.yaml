@@ -1,0 +1,6 @@
+apiVersion: v2
+name: auth-service
+description: Rust ext_authz gRPC service with JWT/JWKS verification
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

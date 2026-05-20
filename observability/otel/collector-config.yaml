@@ -1,0 +1,146 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: envoy
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              regex: edge-proxy
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: "$$1:9901"
+
+        - job_name: edge-control-plane
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              regex: edge-control-plane
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: "$$1:2112"
+
+        - job_name: edge-osb
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              regex: edge-osb
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: "$$1:8080"
+
+        - job_name: auth-service
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              regex: auth-service
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_ip]
+              target_label: __address__
+              replacement: "$$1:9090"
+
+  filelog:
+    include:
+      - /var/log/pods/edge_*/*/*.log
+    start_at: beginning
+    include_file_path: true
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: "%Y-%m-%dT%H:%M:%S.%LZ"
+      - type: move
+        from: attributes.log
+        to: body
+
+processors:
+  batch:
+    send_batch_size: 8192
+    timeout: 5s
+
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  resourcedetection:
+    detectors: [env, k8snode]
+    k8snode:
+      node_from_env_var: KUBE_NODE_NAME
+    timeout: 5s
+
+  attributes:
+    actions:
+      - key: environment
+        value: "${ENVIRONMENT}"
+        action: insert
+      - key: cluster
+        value: "${CLUSTER_NAME}"
+        action: insert
+
+  filter/envoy_noise:
+    metrics:
+      exclude:
+        match_type: regexp
+        metric_names:
+          - "envoy_cluster_upstream_cx_.*_size_bucket"
+          - "envoy_http_downstream_cx_.*_size_bucket"
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://prometheus.monitoring.svc.cluster.local:9090/api/v1/write
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  otlp/tempo:
+    endpoint: tempo.monitoring.svc.cluster.local:4317
+    tls:
+      insecure: true
+
+  loki:
+    endpoint: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resourcedetection, attributes]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors:
+        - memory_limiter
+        - filter/envoy_noise
+        - batch
+        - resourcedetection
+        - attributes
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, batch, resourcedetection, attributes]
+      exporters: [loki]

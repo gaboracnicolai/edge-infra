@@ -1,0 +1,33 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/YOUR_OWNER/auth-service
+  tag: "abc1234"  # pin to the SHA you pushed
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  grpcPort: 50051
+  metricsPort: 9090
+
+config:
+  existingSecret: auth-service-secrets
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 64Mi
+  limits:
+    cpu: 1000m
+    memory: 256Mi
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+
+nameOverride: ""
+fullnameOverride: ""

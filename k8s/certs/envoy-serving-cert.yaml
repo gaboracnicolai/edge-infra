@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: envoy-serving-cert
+  namespace: edge
+spec:
+  secretName: envoy-serving-tls-secret
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  duration: 12h
+  renewBefore: 4h
+  dnsNames:
+    - "*.edge.io"
+  usages:
+    - server auth
