@@ -144,7 +144,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # amd64: untouched — native Rust build inside Docker runs at full speed.
       - uses: docker/build-push-action@v6
+        if: matrix.arch == 'amd64'
         with:
           context: auth-service
           file: auth-service/Dockerfile
@@ -154,6 +156,21 @@ jobs:
             ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=gha,scope=auth-service-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=auth-service-${{ matrix.arch }}
+
+      # arm64: skip Docker's Rust build entirely. The binary was cross-compiled
+      # on the amd64 host above; this step just packages it into distroless via
+      # BUILD_MODE=ci, then pushes with the linux/arm64 platform manifest. No
+      # RUN commands execute, so no QEMU emulation is triggered.
+      - name: Build and push arm64 (cross-compiled, no emulation)
+        if: matrix.arch == 'arm64'
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg BUILD_MODE=ci \
+            -f auth-service/Dockerfile \
+            -t ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-arm64 \
+            --push \
+            auth-service/
 
   auth-service-merge:
     needs: auth-service
