@@ -2,7 +2,7 @@ replicaCount: 2
 
 image:
   repository: ghcr.io/gaboracnicolai/edge-control-plane
-  tag: "e51e304cf2cf4bff91a180a650f029ce80ff2ed1"  # pin to the SHA you pushed
+  tag: "447ceb18980fc02fdc7e28db16354c62e3018850"  # pin to the SHA you pushed
   pullPolicy: IfNotPresent
 
 service:
