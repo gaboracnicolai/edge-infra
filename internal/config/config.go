@@ -20,6 +20,10 @@ type Config struct {
 	RedisAddr     string
 	RedisPassword string
 	InstanceID    string // unique per replica; defaults to POD_NAME or a random ID
+
+	TLSCertFile string
+	TLSKeyFile  string
+	TLSCAFile   string
 }
 
 func FromEnv() (*Config, error) {
@@ -31,6 +35,9 @@ func FromEnv() (*Config, error) {
 		RedisAddr:         os.Getenv("REDIS_ADDR"),
 		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
 		InstanceID:        getenv("XDS_INSTANCE_ID", getenv("POD_NAME", randomID())),
+		TLSCertFile:       os.Getenv("XDS_TLS_CERT"),
+		TLSKeyFile:        os.Getenv("XDS_TLS_KEY"),
+		TLSCAFile:         os.Getenv("XDS_TLS_CA"),
 	}
 	if c.PostgresDSN == "" {
 		return nil, fmt.Errorf("POSTGRES_DSN is required")

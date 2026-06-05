@@ -22,6 +22,7 @@ import (
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/edge-infra/control-plane/internal/config"
@@ -77,6 +78,14 @@ func run(log *slog.Logger) error {
 		log.Info("ha: running in single-instance mode (set REDIS_ADDR to enable HA)")
 	}
 
+	tlsCreds, err := buildTLSCreds(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSCAFile)
+	if err != nil {
+		return fmt.Errorf("tls config: %w", err)
+	}
+	if tlsCreds == nil {
+		log.Warn("xDS gRPC running WITHOUT TLS — set XDS_TLS_CERT/XDS_TLS_KEY to enable")
+	}
+
 	callbacks := &onConnectCallbacks{
 		reconciler: reconciler,
 		cache:      cache,
@@ -84,7 +93,7 @@ func run(log *slog.Logger) error {
 	}
 
 	xdsSrv := serverv3.NewServer(rootCtx, cache, callbacks)
-	grpcSrv := newGRPCServer()
+	grpcSrv := newGRPCServer(tlsCreds)
 	registerXDS(grpcSrv, xdsSrv)
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
@@ -116,8 +125,8 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-func newGRPCServer() *grpc.Server {
-	return grpc.NewServer(
+func newGRPCServer(creds credentials.TransportCredentials) *grpc.Server {
+	opts := []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle:     5 * time.Minute,
 			MaxConnectionAge:      30 * time.Minute,
@@ -129,7 +138,11 @@ func newGRPCServer() *grpc.Server {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	)
+	}
+	if creds != nil {
+		opts = append(opts, grpc.Creds(creds))
+	}
+	return grpc.NewServer(opts...)
 }
 
 func registerXDS(s *grpc.Server, x serverv3.Server) {
