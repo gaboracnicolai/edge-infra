@@ -47,3 +47,18 @@ data:
                         socket_address:
                           address: {{ .Values.xds.controlPlaneHost }}
                           port_value: {{ .Values.xds.controlPlanePort }}
+          {{- if .Values.xds.tls.enabled }}
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain:
+                      filename: {{ .Values.xds.tls.mountPath }}/tls.crt
+                    private_key:
+                      filename: {{ .Values.xds.tls.mountPath }}/tls.key
+                validation_context:
+                  trusted_ca:
+                    filename: {{ .Values.xds.tls.mountPath }}/ca.crt
+          {{- end }}

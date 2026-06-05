@@ -59,6 +59,20 @@ spec:
                   name: {{ .Values.redis.existingSecret }}
                   key: {{ .Values.redis.secretKey }}
             {{- end }}
+            {{- with .Values.tls }}
+            - name: XDS_TLS_CERT
+              value: {{ .mountPath }}/tls.crt
+            - name: XDS_TLS_KEY
+              value: {{ .mountPath }}/tls.key
+            - name: XDS_TLS_CA
+              value: {{ .mountPath }}/ca.crt
+            {{- end }}
+          volumeMounts:
+            {{- with .Values.tls }}
+            - name: xds-tls
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: grpc
@@ -75,6 +89,12 @@ spec:
                 command: ["/bin/sh", "-c", "sleep 5"]
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- with .Values.tls }}
+        - name: xds-tls
+          secret:
+            secretName: {{ .existingSecret }}
+        {{- end }}
       {{- with .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}

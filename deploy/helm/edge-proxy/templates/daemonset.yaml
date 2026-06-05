@@ -85,6 +85,11 @@ spec:
             - name: tls-certs
               mountPath: /etc/envoy/tls
               readOnly: true
+            {{- if .Values.xds.tls.enabled }}
+            - name: xds-client-tls
+              mountPath: {{ .Values.xds.tls.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: bootstrap-src
           configMap:
@@ -95,3 +100,8 @@ spec:
           secret:
             secretName: {{ .Values.tls.existingSecret }}
             optional: true
+        {{- if .Values.xds.tls.enabled }}
+        - name: xds-client-tls
+          secret:
+            secretName: {{ .Values.xds.tls.existingSecret }}
+        {{- end }}

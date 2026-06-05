@@ -27,6 +27,10 @@ redis:
   existingSecret: "" # Secret with key "password"; leave empty if no auth
   secretKey: password
 
+tls:
+  existingSecret: edge-cp-tls-secret  # created by k8s/certs/control-plane-cert.yaml
+  mountPath: /etc/xds-tls
+
 serviceAccount:
   create: true
   name: ""

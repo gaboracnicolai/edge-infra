@@ -13,6 +13,10 @@ updateStrategy:
 xds:
   controlPlaneHost: edge-control-plane.infra.svc.cluster.local
   controlPlanePort: 18000
+  tls:
+    enabled: false
+    existingSecret: envoy-xds-client-tls-secret
+    mountPath: /etc/xds-client-tls
 
 tls:
   existingSecret: envoy-serving-tls-secret
