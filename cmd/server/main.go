@@ -20,10 +20,12 @@ import (
 	secretservice "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/edge-infra/control-plane/internal/config"
+	"github.com/edge-infra/control-plane/internal/ha"
 	"github.com/edge-infra/control-plane/internal/store"
 	"github.com/edge-infra/control-plane/internal/xds"
 )
@@ -58,7 +60,30 @@ func run(log *slog.Logger) error {
 	cache := cachev3.NewSnapshotCache(true, cachev3.IDHash{}, slogCacheLogger{log: log})
 	reconciler := xds.NewReconciler(cache, pgStore, cfg.NodeID, log)
 
-	xdsSrv := serverv3.NewServer(rootCtx, cache, nil)
+	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
+	if cfg.RedisAddr != "" {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     cfg.RedisAddr,
+			Password: cfg.RedisPassword,
+		})
+		coord := ha.NewRedisCoordinator(rdb, cfg.InstanceID)
+		reconciler.WithCoordinator(coord)
+		log.Info("ha: Redis coordinator enabled",
+			"addr", cfg.RedisAddr,
+			"instance_id", cfg.InstanceID,
+		)
+		go coord.Run(rootCtx, log)
+	} else {
+		log.Info("ha: running in single-instance mode (set REDIS_ADDR to enable HA)")
+	}
+
+	callbacks := &onConnectCallbacks{
+		reconciler: reconciler,
+		cache:      cache,
+		log:        log,
+	}
+
+	xdsSrv := serverv3.NewServer(rootCtx, cache, callbacks)
 	grpcSrv := newGRPCServer()
 	registerXDS(grpcSrv, xdsSrv)
 

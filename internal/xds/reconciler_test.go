@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+	"sync/atomic"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -224,6 +225,96 @@ func TestReconcile_EmptySnapshotProducesEmptyResources(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, snap.GetResources(resourcev3.ListenerType))
 	assert.Empty(t, snap.GetResources(resourcev3.ClusterType))
+}
+
+// fakeCoordinator implements ha.Coordinator for tests.
+type fakeCoordinator struct {
+	hash    string
+	version uint64
+	callErr error
+	calls   atomic.Int32
+}
+
+func (f *fakeCoordinator) LoadHash(_ context.Context) (string, uint64, error) {
+	f.calls.Add(1)
+	return f.hash, f.version, f.callErr
+}
+
+func (f *fakeCoordinator) StoreHash(_ context.Context, hash string) (uint64, error) {
+	if f.callErr != nil {
+		return 0, f.callErr
+	}
+	f.hash = hash
+	f.version++
+	return f.version, nil
+}
+
+func (f *fakeCoordinator) Heartbeat(_ context.Context) error { return f.callErr }
+
+func TestReconcile_HACoordinator_UsesSharedVersion(t *testing.T) {
+	cache := newCache()
+	coord := &fakeCoordinator{}
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+	r.WithCoordinator(coord)
+
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	snap, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	// StoreHash was called (no prior hash), version incremented to 1.
+	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
+}
+
+func TestReconcile_HACoordinator_ReuseVersionOnSameHash(t *testing.T) {
+	cache := newCache()
+	coord := &fakeCoordinator{}
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+	r.WithCoordinator(coord)
+
+	// First reconcile — establishes hash + version 1.
+	require.NoError(t, r.Reconcile(context.Background()))
+	firstSnap, _ := cache.GetSnapshot(testNodeID)
+
+	// Simulate another replica having already stored this hash at version 1.
+	// coord.hash and coord.version are already set by the first reconcile.
+	// Reset local state so the reconciler re-evaluates.
+	r.localLast.Store(nil)
+
+	require.NoError(t, r.Reconcile(context.Background()))
+	secondSnap, _ := cache.GetSnapshot(testNodeID)
+
+	// Same config hash → same version, no increment.
+	assert.Equal(t,
+		firstSnap.GetVersion(resourcev3.ClusterType),
+		secondSnap.GetVersion(resourcev3.ClusterType),
+		"same config must not bump the shared version counter",
+	)
+}
+
+func TestReconcile_HACoordinator_ErrorFallsBackToLocal(t *testing.T) {
+	cache := newCache()
+	coord := &fakeCoordinator{callErr: errors.New("redis down")}
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+	r.WithCoordinator(coord)
+
+	// Must not return an error — Redis failure is non-fatal.
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	snap, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	// Falls back to local version counter, which starts at 1.
+	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
+}
+
+func TestReconcile_HACoordinator_NilIsLocalMode(t *testing.T) {
+	cache := newCache()
+	// No WithCoordinator call → nil ha, single-instance mode.
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+
+	require.NoError(t, r.Reconcile(context.Background()))
+	snap, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
 }
 
 func TestRun_StopsOnContextCancel(t *testing.T) {

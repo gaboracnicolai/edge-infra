@@ -44,6 +44,21 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.existingSecret }}
                   key: {{ .Values.postgres.secretKey }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if .Values.redis.addr }}
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            {{- end }}
+            {{- if .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.secretKey }}
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: grpc

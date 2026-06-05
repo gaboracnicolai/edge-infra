@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -12,6 +14,12 @@ type Config struct {
 	PostgresDSN       string
 	NodeID            string
 	ReconcileInterval time.Duration
+
+	// HA — all optional. When RedisAddr is empty the server runs in
+	// single-instance mode with local in-process state.
+	RedisAddr     string
+	RedisPassword string
+	InstanceID    string // unique per replica; defaults to POD_NAME or a random ID
 }
 
 func FromEnv() (*Config, error) {
@@ -20,6 +28,9 @@ func FromEnv() (*Config, error) {
 		PostgresDSN:       os.Getenv("POSTGRES_DSN"),
 		NodeID:            getenv("XDS_NODE_ID", "edge-envoy"),
 		ReconcileInterval: 5 * time.Second,
+		RedisAddr:         os.Getenv("REDIS_ADDR"),
+		RedisPassword:     os.Getenv("REDIS_PASSWORD"),
+		InstanceID:        getenv("XDS_INSTANCE_ID", getenv("POD_NAME", randomID())),
 	}
 	if c.PostgresDSN == "" {
 		return nil, fmt.Errorf("POSTGRES_DSN is required")
@@ -39,4 +50,10 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
