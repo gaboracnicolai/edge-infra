@@ -19,6 +19,14 @@ postgres:
   existingSecret: edge-control-plane-postgres
   secretKey: dsn
 
+# HA — leave redis.addr empty to run in single-instance mode.
+# Set redis.addr to enable shared snapshot hash/version and instance heartbeats
+# across all control-plane replicas.
+redis:
+  addr: ""          # e.g. "redis-master.infra.svc.cluster.local:6379"
+  existingSecret: "" # Secret with key "password"; leave empty if no auth
+  secretKey: password
+
 serviceAccount:
   create: true
   name: ""

@@ -14,6 +14,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/edge-infra/control-plane/internal/ha"
 	"github.com/edge-infra/control-plane/internal/store"
 	"github.com/edge-infra/control-plane/internal/xds/builders"
 )
@@ -26,9 +27,10 @@ type Reconciler struct {
 	nodeID    string
 	log       *slog.Logger
 	triggerCh chan struct{}
+	ha        ha.Coordinator // nil = single-instance mode
 
-	version atomic.Uint64
-	last    atomic.Pointer[reconcileResult]
+	localVersion atomic.Uint64
+	localLast    atomic.Pointer[reconcileResult]
 }
 
 type reconcileResult struct {
@@ -49,6 +51,12 @@ func NewReconciler(c cachev3.SnapshotCache, s store.Store, nodeID string, log *s
 		log:       log,
 		triggerCh: make(chan struct{}, 1),
 	}
+}
+
+// WithCoordinator sets the HA coordinator used for shared hash and version
+// tracking across replicas. Must be called before Run.
+func (r *Reconciler) WithCoordinator(c ha.Coordinator) {
+	r.ha = c
 }
 
 // TriggerNow requests an out-of-band reconcile. It is safe to call from any
@@ -78,11 +86,17 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	hash := hashResources(resources)
-	if prev := r.last.Load(); prev != nil && prev.Hash == hash {
+
+	// Fast path: local state confirms nothing has changed on this replica.
+	if prev := r.localLast.Load(); prev != nil && prev.Hash == hash {
 		return nil
 	}
 
-	version := fmt.Sprintf("v%d", r.version.Add(1))
+	version, err := r.resolveVersion(ctx, hash)
+	if err != nil {
+		return err
+	}
+
 	snap, err := cachev3.NewSnapshot(version, resources)
 	if err != nil {
 		return fmt.Errorf("new snapshot: %w", err)
@@ -98,7 +112,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 	}
 
-	r.last.Store(&reconcileResult{Version: version, Hash: hash})
+	r.localLast.Store(&reconcileResult{Version: version, Hash: hash})
 	r.log.Info("snapshot pushed",
 		"version", version,
 		"listeners", len(resources[resourcev3.ListenerType]),
@@ -109,6 +123,41 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		"nodes", len(nodes),
 	)
 	return nil
+}
+
+// resolveVersion determines the version string to stamp on the current snapshot.
+//
+// In HA mode all replicas share a single version counter via Redis so that
+// Envoy always sees the same version for the same config regardless of which
+// control-plane replica it is connected to. On Redis error the local counter
+// is used as a fallback so the server keeps running.
+//
+// Key invariant: same config hash → same version string across all replicas.
+func (r *Reconciler) resolveVersion(ctx context.Context, hash string) (string, error) {
+	if r.ha == nil {
+		return fmt.Sprintf("v%d", r.localVersion.Add(1)), nil
+	}
+
+	sharedHash, sharedVer, err := r.ha.LoadHash(ctx)
+	if err != nil {
+		r.log.Warn("ha: load hash failed, using local version", "err", err)
+		return fmt.Sprintf("v%d", r.localVersion.Add(1)), nil
+	}
+
+	if sharedHash == hash {
+		// Another replica already recorded and pushed this config. We still
+		// populate our local in-memory cache for the nodes connected to this
+		// instance, but we reuse the existing version so Envoy sees a
+		// consistent picture across replicas on failover.
+		return fmt.Sprintf("v%d", sharedVer), nil
+	}
+
+	newVer, err := r.ha.StoreHash(ctx, hash)
+	if err != nil {
+		r.log.Warn("ha: store hash failed, using local version", "err", err)
+		return fmt.Sprintf("v%d", r.localVersion.Add(1)), nil
+	}
+	return fmt.Sprintf("v%d", newVer), nil
 }
 
 // Run executes an immediate Reconcile, then loops on a ticker plus the
