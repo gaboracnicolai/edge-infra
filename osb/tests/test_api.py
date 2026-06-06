@@ -64,6 +64,30 @@ async def test_provision_nats_error(app_client, mock_pool, mock_js, valid_spec):
     assert mock_pool.execute.call_count == 2
 
 
+async def test_provision_rejects_invalid_host(app_client, valid_spec):
+    valid_spec["host"] = "bad host;rm -rf /"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_accepts_hostname(app_client, valid_spec):
+    valid_spec["host"] = "edge-svc.prod.svc.cluster.local"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
+async def test_provision_rejects_invalid_team(app_client, valid_spec):
+    valid_spec["team"] = "Platform Team!"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_rejects_control_char_node_selector(app_client, valid_spec):
+    valid_spec["node_selector"] = {"zone": "eu-west\n1a"}
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
 async def test_provision_rejects_internal_webhook(app_client, valid_spec):
     valid_spec["webhook_url"] = "http://169.254.169.254/latest/meta-data/"
     response = await app_client.post("/v1/services", json=valid_spec)
