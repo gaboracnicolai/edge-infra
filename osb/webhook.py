@@ -9,6 +9,7 @@ import httpx
 import structlog
 
 import metrics
+import netguard
 from config import Settings
 
 log = structlog.get_logger(__name__)
@@ -21,6 +22,18 @@ async def deliver(url: str, payload: dict[str, Any], cfg: Settings) -> None:
     surfaced via the ``osb_webhook_deliveries_total`` counter and structured
     logs.
     """
+    # SSRF egress guard: refuse to call a target that resolves to an internal /
+    # non-routable address (ISO 27001 A.13/A.14). This is the real boundary —
+    # it runs after DNS resolution, so a hostname cannot smuggle an internal IP
+    # past the ingest literal check. Never raises: a blocked target is a dropped
+    # webhook, not a failed provision.
+    try:
+        await netguard.assert_public_target(url)
+    except (ValueError, OSError) as exc:
+        metrics.webhook_deliveries_total["blocked"] += 1
+        log.error("webhook target blocked by SSRF guard", url=url, error=str(exc))
+        return
+
     last_error: Exception | None = None
     async with httpx.AsyncClient() as client:
         for attempt in range(1, cfg.webhook_max_retries + 1):

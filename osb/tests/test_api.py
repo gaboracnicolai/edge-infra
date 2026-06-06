@@ -64,6 +64,18 @@ async def test_provision_nats_error(app_client, mock_pool, mock_js, valid_spec):
     assert mock_pool.execute.call_count == 2
 
 
+async def test_provision_rejects_internal_webhook(app_client, valid_spec):
+    valid_spec["webhook_url"] = "http://169.254.169.254/latest/meta-data/"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_accepts_public_webhook(app_client, valid_spec):
+    valid_spec["webhook_url"] = "https://hooks.example.com/edge"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
 async def test_deprovision(app_client):
     response = await app_client.delete("/v1/services/my-service")
     assert response.status_code == 202

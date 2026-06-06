@@ -6,6 +6,7 @@ import httpx
 import pytest
 import respx
 
+import metrics
 import webhook
 
 
@@ -19,6 +20,17 @@ def fast_sleep(monkeypatch):
 
     monkeypatch.setattr("asyncio.sleep", fake_sleep)
     return calls
+
+
+@pytest.fixture(autouse=True)
+def allow_resolution(monkeypatch):
+    """Resolve every hostname to a public IP so the SSRF egress guard lets the
+    delivery tests through (example.test is NXDOMAIN in the real resolver)."""
+
+    async def fake_resolve(host: str) -> list[str]:
+        return ["93.184.216.34"]  # public (example.com)
+
+    monkeypatch.setattr("netguard._resolve", fake_resolve)
 
 
 @respx.mock
@@ -57,3 +69,30 @@ async def test_webhook_backoff_sequence(cfg, fast_sleep):
     await webhook.deliver("https://example.test/hook", {}, cfg)
     # 5 attempts with base 2.0 → sleeps of [2, 4, 8, 16] between them.
     assert fast_sleep == [2.0, 4.0, 8.0, 16.0]
+
+
+@respx.mock
+async def test_webhook_blocked_internal_literal(cfg, fast_sleep):
+    """An IP-literal target inside the cluster is dropped before any HTTP call."""
+    route = respx.post("http://169.254.169.254/latest/meta-data/").mock(
+        return_value=httpx.Response(200)
+    )
+    before = metrics.webhook_deliveries_total["blocked"]
+    await webhook.deliver("http://169.254.169.254/latest/meta-data/", {}, cfg)
+    assert not route.called
+    assert metrics.webhook_deliveries_total["blocked"] == before + 1
+
+
+@respx.mock
+async def test_webhook_blocked_hostname_resolving_internal(cfg, fast_sleep, monkeypatch):
+    """A hostname that resolves to an internal IP (rebinding) is dropped."""
+
+    async def resolve_internal(host: str) -> list[str]:
+        return ["10.0.0.5"]
+
+    monkeypatch.setattr("netguard._resolve", resolve_internal)
+    route = respx.post("https://hook.evil.test/x").mock(return_value=httpx.Response(200))
+    before = metrics.webhook_deliveries_total["blocked"]
+    await webhook.deliver("https://hook.evil.test/x", {}, cfg)
+    assert not route.called
+    assert metrics.webhook_deliveries_total["blocked"] == before + 1
