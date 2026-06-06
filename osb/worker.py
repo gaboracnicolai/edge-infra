@@ -17,6 +17,7 @@ import webhook
 from config import Settings
 from db import create_pool
 from models import ServiceSpec
+from tls import build_nats_tls
 
 log = structlog.get_logger(__name__)
 
@@ -156,8 +157,9 @@ async def run_worker(cfg: Settings, pool, js) -> None:
 async def main() -> None:
     """Wire up the pool + JetStream and run the worker loop."""
     cfg = Settings()
-    pool = await create_pool(cfg.database_url)
-    nc = await nats.connect(cfg.nats_url)
+    pool = await create_pool(cfg.database_url, ssl_mode=cfg.db_ssl_mode, ca_path=cfg.db_tls_ca)
+    nats_tls = build_nats_tls(cfg.nats_tls_ca, cfg.nats_tls_cert, cfg.nats_tls_key)
+    nc = await nats.connect(cfg.nats_url, tls=nats_tls)
     js = nc.jetstream()
     try:
         await run_worker(cfg, pool, js)

@@ -11,11 +11,24 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: str = "postgresql://localhost/edge_osb"
+    # Postgres TLS (ISO 27001 A.13). Mirrors Lens LENS_DB_SSL_MODE: defaults to
+    # `require` (encrypted, no cert verification). Production sets `verify-full`
+    # plus DB_TLS_CA to verify the server against the internal cert-manager CA.
+    db_ssl_mode: str = "require"
+    db_tls_ca: str | None = None  # CA cert path; required for verify-ca / verify-full
+
     nats_url: str = "nats://localhost:4222"
     nats_stream: str = "EDGE"
     nats_subject_provision: str = "edge.provision.create"
     nats_subject_deprovision: str = "edge.provision.delete"
     nats_consumer_durable: str = "osb-workers"
+    # NATS TLS (ISO 27001 A.13). When NATS_TLS_CA is set the client verifies the
+    # server and the connection refuses to fall back to plaintext. NATS_TLS_CERT
+    # + NATS_TLS_KEY additionally enable mutual TLS.
+    nats_tls_ca: str | None = None
+    nats_tls_cert: str | None = None
+    nats_tls_key: str | None = None
+
     webhook_timeout_s: float = 5.0
     webhook_max_retries: int = 5
     webhook_retry_base_s: float = 2.0
