@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Annotated
 from uuid import UUID
 
 import nats
 import structlog
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from nats.js.api import RetentionPolicy, StorageType, StreamConfig
 
 import broker
@@ -16,6 +17,7 @@ import metrics
 from config import Settings
 from db import create_pool
 from models import ProvisionRequest, ProvisionResponse, ServiceSpec
+from security import RequestIDMiddleware, SecurityHeadersMiddleware, admin_key_ok
 from tls import build_nats_tls
 
 log = structlog.get_logger(__name__)
@@ -50,6 +52,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="edge-osb", version="0.1.0", lifespan=lifespan)
+
+# Edge-of-stack middleware: stamp a request ID first (so it's bound for every
+# downstream log line), then defensive headers on the way out. Starlette runs
+# middleware in reverse-add order, so add headers last to wrap outermost.
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIDMiddleware)
+
+
+async def require_admin(
+    x_admin_key: Annotated[str | None, Header()] = None,
+) -> None:
+    """Gate a route on the shared admin key (ISO 27001 A.9 — access control).
+
+    No-op when ``ADMIN_API_KEY`` is unset (open mode for local dev / an
+    unconfigured scraper). When set, callers must send a matching ``X-Admin-Key``
+    header: 401 when absent, 403 when present but wrong — a clear signal to a
+    Prometheus scraper that is missing its credential.
+    """
+    if not cfg.admin_api_key:
+        return
+    if x_admin_key is None:
+        raise HTTPException(status_code=401, detail="admin credentials required")
+    if not admin_key_ok(x_admin_key, cfg.admin_api_key):
+        raise HTTPException(status_code=403, detail="invalid admin credentials")
 
 
 @app.post("/v1/services", status_code=202, response_model=ProvisionResponse)
@@ -95,7 +121,7 @@ async def healthz() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/metrics", response_class=Response)
+@app.get("/metrics", response_class=Response, dependencies=[Depends(require_admin)])
 async def get_metrics() -> Response:
-    """Prometheus text-format counters for this broker process."""
+    """Prometheus text-format counters for this broker process (admin-gated)."""
     return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")

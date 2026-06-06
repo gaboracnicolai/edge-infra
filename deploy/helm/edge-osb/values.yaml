@@ -28,6 +28,11 @@ worker:
       memory: 256Mi
 
 config:
+  # All process config (DATABASE_URL, NATS_URL, …) is pulled from this secret
+  # via envFrom. To lock down /metrics (ISO 27001 A.9), add an ADMIN_API_KEY
+  # entry to this secret: callers (incl. Prometheus) must then send a matching
+  # X-Admin-Key header. Leave it unset to keep /metrics open. NOTE: enabling it
+  # requires the scrape job to inject the header (see podAnnotations below).
   existingSecret: edge-osb-secrets
 
 # Transport security (ISO 27001 A.13). When `tls` is set, the OSB mounts its
@@ -42,6 +47,10 @@ serviceAccount:
   create: true
   name: ""
 
+# Annotation-based scraping cannot attach the X-Admin-Key header. If you set
+# ADMIN_API_KEY in the config secret, switch to a Prometheus ServiceMonitor
+# whose endpoint carries `headers: {X-Admin-Key: <key from secret>}`, otherwise
+# the scrape will get 401. /healthz stays open for kubelet probes either way.
 podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: "8080"
