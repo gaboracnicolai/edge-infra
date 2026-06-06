@@ -13,6 +13,10 @@ service:
 config:
   existingSecret: auth-service-secrets
 
+tls:
+  existingSecret: auth-service-tls-secret  # created by k8s/certs/auth-service-cert.yaml
+  mountPath: /etc/auth-tls
+
 serviceAccount:
   create: true
   name: ""

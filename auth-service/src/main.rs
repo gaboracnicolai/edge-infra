@@ -18,8 +18,8 @@ use axum::{
 };
 use envoy_types::ext_authz::v3::pb::AuthorizationServer;
 use jsonwebtoken::{Algorithm, Validation};
-use tonic::transport::Server;
-use tracing::{error, info};
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -31,6 +31,8 @@ async fn main() -> Result<(), AppError> {
         grpc_addr = %cfg.grpc_addr,
         metrics_addr = %cfg.metrics_addr,
         jwks_url = %cfg.jwks_url,
+        tls = cfg.tls_cert_file.is_some(),
+        mtls = cfg.tls_ca_file.is_some(),
         "auth-service starting"
     );
 
@@ -54,16 +56,55 @@ async fn main() -> Result<(), AppError> {
         metrics: Arc::clone(&metrics),
     };
 
-    let grpc_addr: SocketAddr = cfg.grpc_addr.parse()?;
-    info!(addr = %grpc_addr, "grpc server listening");
+    let tls_cfg = build_tls_config(&cfg)?;
+    if tls_cfg.is_none() {
+        warn!("auth-service gRPC running WITHOUT TLS — set AUTH_TLS_CERT/AUTH_TLS_KEY to enable");
+    }
 
-    Server::builder()
+    let grpc_addr: SocketAddr = cfg.grpc_addr.parse()?;
+    info!(addr = %grpc_addr, tls = tls_cfg.is_some(), "grpc server listening");
+
+    let mut builder = Server::builder();
+    if let Some(tls) = tls_cfg {
+        builder = builder.tls_config(tls)?;
+    }
+    builder
         .add_service(AuthorizationServer::new(auth_service))
         .serve_with_shutdown(grpc_addr, shutdown_signal())
         .await?;
 
     info!("auth-service shut down cleanly");
     Ok(())
+}
+
+/// Load TLS credentials from the paths in `cfg`.
+/// Returns `None` when `AUTH_TLS_CERT` is unset (plaintext mode).
+/// Returns `Some(ServerTlsConfig)` for TLS, with client CA verification
+/// added when `AUTH_TLS_CA` is also set (mTLS).
+fn build_tls_config(cfg: &Config) -> Result<Option<ServerTlsConfig>, AppError> {
+    let cert_path = match &cfg.tls_cert_file {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    // tls_key_file presence already validated in Config::from_env
+    let key_path = cfg.tls_key_file.as_ref().unwrap();
+
+    let cert = std::fs::read(cert_path)
+        .map_err(|e| AppError::Tls(format!("read cert {cert_path}: {e}")))?;
+    let key = std::fs::read(key_path)
+        .map_err(|e| AppError::Tls(format!("read key {key_path}: {e}")))?;
+
+    let identity = Identity::from_pem(cert, key);
+    let mut tls = ServerTlsConfig::new().identity(identity);
+
+    if let Some(ca_path) = &cfg.tls_ca_file {
+        let ca = std::fs::read(ca_path)
+            .map_err(|e| AppError::Tls(format!("read CA {ca_path}: {e}")))?;
+        tls = tls.client_ca_root(Certificate::from_pem(ca));
+        info!(ca = %ca_path, "mTLS client verification enabled");
+    }
+
+    Ok(Some(tls))
 }
 
 fn init_tracing() {
