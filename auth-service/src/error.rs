@@ -32,4 +32,8 @@ pub enum AppError {
     /// Prometheus registration or encoding failure.
     #[error("metrics: {0}")]
     Metrics(#[from] prometheus::Error),
+
+    /// TLS certificate or key could not be read or parsed.
+    #[error("tls: {0}")]
+    Tls(String),
 }

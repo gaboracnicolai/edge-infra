@@ -51,6 +51,20 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: JWT_ISSUER
+            {{- with .Values.tls }}
+            - name: AUTH_TLS_CERT
+              value: {{ .mountPath }}/tls.crt
+            - name: AUTH_TLS_KEY
+              value: {{ .mountPath }}/tls.key
+            - name: AUTH_TLS_CA
+              value: {{ .mountPath }}/ca.crt
+            {{- end }}
+          volumeMounts:
+            {{- with .Values.tls }}
+            - name: auth-tls
+              mountPath: {{ .mountPath }}
+              readOnly: true
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: grpc
@@ -64,3 +78,9 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- with .Values.tls }}
+        - name: auth-tls
+          secret:
+            secretName: {{ .existingSecret }}
+        {{- end }}
