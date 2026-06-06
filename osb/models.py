@@ -6,7 +6,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, Field, field_validator, model_validator
+
+import netguard
 
 
 class RateLimitSpec(BaseModel):
@@ -37,6 +39,15 @@ class ServiceSpec(BaseModel):
     health_check: HealthCheckSpec | None = None
     node_selector: dict[str, str] = Field(default_factory=dict)
     webhook_url: AnyHttpUrl | None = None
+
+    @field_validator("webhook_url")
+    @classmethod
+    def _webhook_url_not_internal(cls, v: AnyHttpUrl | None) -> AnyHttpUrl | None:
+        """Reject an IP-literal webhook target that points at an internal host
+        (SSRF, ISO 27001 A.13/A.14). Hostnames are re-checked at delivery time."""
+        if v is not None:
+            netguard.validate_webhook_url(str(v))
+        return v
 
     @model_validator(mode="after")
     def _https_requires_tls_secret(self) -> ServiceSpec:
