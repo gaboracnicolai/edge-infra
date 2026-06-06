@@ -30,6 +30,14 @@ worker:
 config:
   existingSecret: edge-osb-secrets
 
+# Transport security (ISO 27001 A.13). When `tls` is set, the OSB mounts its
+# cert-manager-issued secret and is told to use verify-full Postgres TLS and
+# mutual NATS TLS. Leave unset for local/plaintext dev.
+tls:
+  existingSecret: osb-client-tls-secret  # created by k8s/certs/osb-client-cert.yaml
+  mountPath: /etc/osb-tls
+  dbSslMode: verify-full
+
 serviceAccount:
   create: true
   name: ""

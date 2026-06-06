@@ -16,6 +16,7 @@ import metrics
 from config import Settings
 from db import create_pool
 from models import ProvisionRequest, ProvisionResponse, ServiceSpec
+from tls import build_nats_tls
 
 log = structlog.get_logger(__name__)
 cfg = Settings()
@@ -24,8 +25,9 @@ cfg = Settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open the DB pool and NATS JetStream connection for the app's lifetime."""
-    pool = await create_pool(cfg.database_url)
-    nc = await nats.connect(cfg.nats_url)
+    pool = await create_pool(cfg.database_url, ssl_mode=cfg.db_ssl_mode, ca_path=cfg.db_tls_ca)
+    nats_tls = build_nats_tls(cfg.nats_tls_ca, cfg.nats_tls_cert, cfg.nats_tls_key)
+    nc = await nats.connect(cfg.nats_url, tls=nats_tls)
     js = nc.jetstream()
     await js.add_stream(
         StreamConfig(

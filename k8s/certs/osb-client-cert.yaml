@@ -1,0 +1,24 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: osb-client-cert
+  namespace: infra
+spec:
+  secretName: osb-client-tls-secret
+  duration: 2160h   # 90 days
+  renewBefore: 360h # 15 days
+  commonName: edge-osb
+  dnsNames:
+    - edge-osb
+    - edge-osb.infra.svc.cluster.local
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  usages:
+    # OSB is a TLS client to Postgres and NATS (mutual TLS); it also serves the
+    # broker HTTP API. The issued secret carries ca.crt, which the OSB mounts to
+    # verify the Postgres and NATS server certificates (sslmode=verify-full).
+    - client auth
+    - server auth
+    - digital signature
+    - key encipherment

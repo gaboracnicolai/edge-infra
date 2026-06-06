@@ -20,6 +20,7 @@ dev = [
   "pytest-cov>=5.0",
   "respx>=0.21",
   "ruff>=0.5",
+  "cryptography>=42.0",  # throwaway cert generation in test_tls.py
 ]
 
 [build-system]
@@ -27,7 +28,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["config", "models", "db", "broker", "main", "worker", "webhook", "metrics"]
+py-modules = ["config", "models", "db", "broker", "main", "worker", "webhook", "metrics", "tls"]
 
 [tool.ruff]
 line-length = 100

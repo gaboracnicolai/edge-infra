@@ -28,5 +28,30 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.config.existingSecret }}
+          {{- with .Values.tls }}
+          env:
+            - name: DB_SSL_MODE
+              value: {{ .dbSslMode | default "verify-full" | quote }}
+            - name: DB_TLS_CA
+              value: {{ .mountPath }}/ca.crt
+            - name: NATS_TLS_CA
+              value: {{ .mountPath }}/ca.crt
+            - name: NATS_TLS_CERT
+              value: {{ .mountPath }}/tls.crt
+            - name: NATS_TLS_KEY
+              value: {{ .mountPath }}/tls.key
+          {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- with .Values.tls }}
+          volumeMounts:
+            - name: osb-tls
+              mountPath: {{ .mountPath }}
+              readOnly: true
+          {{- end }}
+      {{- with .Values.tls }}
+      volumes:
+        - name: osb-tls
+          secret:
+            secretName: {{ .existingSecret }}
+      {{- end }}
