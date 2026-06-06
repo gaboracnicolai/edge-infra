@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     nats_tls_cert: str | None = None
     nats_tls_key: str | None = None
 
+    admin_api_key: str | None = None  # gates /metrics; unset = open (local dev)
     webhook_timeout_s: float = 5.0
     webhook_max_retries: int = 5
     webhook_retry_base_s: float = 2.0
