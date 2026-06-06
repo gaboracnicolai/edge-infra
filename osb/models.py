@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import AnyHttpUrl, BaseModel, Field, field_validator, model_validator
 
 import netguard
+import specvalidation
 
 
 class RateLimitSpec(BaseModel):
@@ -29,8 +30,8 @@ class ServiceSpec(BaseModel):
     """Tenant-supplied desired state for a service registration."""
 
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{1,62}$")
-    team: str
-    host: str
+    team: str = Field(pattern=r"^[a-z][a-z0-9-]{1,62}$")
+    host: str = Field(min_length=1, max_length=253)
     port: int = Field(ge=1, le=65535)
     protocol: Literal["HTTP", "HTTPS"] = "HTTP"
     tls_secret_name: str | None = None
@@ -48,6 +49,20 @@ class ServiceSpec(BaseModel):
         if v is not None:
             netguard.validate_webhook_url(str(v))
         return v
+
+    @field_validator("host")
+    @classmethod
+    def _host_is_ip_or_hostname(cls, v: str) -> str:
+        """Constrain host to an IP literal or RFC-1123 hostname — it is
+        interpolated into Envoy/xDS cluster config (ISO 27001 A.14)."""
+        return specvalidation.validate_host(v)
+
+    @field_validator("node_selector")
+    @classmethod
+    def _node_selector_bounded(cls, v: dict[str, str]) -> dict[str, str]:
+        """Bound node_selector size and reject control chars. Charset semantics
+        stay with the xDS layer (see specvalidation.validate_node_selector)."""
+        return specvalidation.validate_node_selector(v)
 
     @model_validator(mode="after")
     def _https_requires_tls_secret(self) -> ServiceSpec:
