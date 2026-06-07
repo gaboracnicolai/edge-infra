@@ -46,6 +46,22 @@ def sanitize_request_id(raw: str) -> str:
     return "".join(out)
 
 
+def bearer_token(authorization: str | None) -> str | None:
+    """Extract the token from an ``Authorization: Bearer <token>`` header.
+
+    Returns ``None`` when the header is absent, malformed, or not a Bearer
+    scheme, so callers can answer 401 uniformly. The scheme match is
+    case-insensitive per RFC 7235.
+    """
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
+
+
 def admin_key_ok(provided: str | None, configured: str | None) -> bool:
     """Whether ``provided`` satisfies the admin gate.
 
@@ -59,6 +75,11 @@ def admin_key_ok(provided: str | None, configured: str | None) -> bool:
     if not provided:
         return False
     return hmac.compare_digest(provided, configured)
+
+
+# Same generic gate ("unset config = open, else constant-time equality"), aliased
+# for readability at the provisioning-API-key call site.
+secret_matches = admin_key_ok
 
 
 class SecurityHeadersMiddleware:

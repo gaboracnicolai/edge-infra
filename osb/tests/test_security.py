@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from security import REQUEST_ID_MAX_LEN, admin_key_ok, sanitize_request_id
+from security import (
+    REQUEST_ID_MAX_LEN,
+    admin_key_ok,
+    bearer_token,
+    sanitize_request_id,
+    secret_matches,
+)
 
 # ─── sanitize_request_id ─────────────────────────────
 
@@ -58,6 +64,41 @@ def test_admin_wrong_key():
 def test_admin_missing_key_when_configured():
     assert admin_key_ok(None, "s3cret") is False
     assert admin_key_ok("", "s3cret") is False
+
+
+# ─── bearer_token ────────────────────────────────────
+
+
+def test_bearer_extracts_token():
+    assert bearer_token("Bearer abc123") == "abc123"
+
+
+def test_bearer_scheme_case_insensitive():
+    assert bearer_token("bearer abc123") == "abc123"
+    assert bearer_token("BEARER abc123") == "abc123"
+
+
+def test_bearer_strips_surrounding_whitespace():
+    assert bearer_token("Bearer   abc123  ") == "abc123"
+
+
+def test_bearer_none_when_absent():
+    assert bearer_token(None) is None
+    assert bearer_token("") is None
+
+
+def test_bearer_none_for_other_scheme():
+    assert bearer_token("Basic abc123") is None
+
+
+def test_bearer_none_when_token_empty():
+    assert bearer_token("Bearer") is None
+    assert bearer_token("Bearer ") is None
+
+
+def test_secret_matches_is_admin_key_ok_alias():
+    # the provisioning gate reuses the same constant-time check as /metrics
+    assert secret_matches is admin_key_ok
 
 
 # ─── middleware integration through the ASGI app ─────
