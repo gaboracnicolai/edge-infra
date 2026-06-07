@@ -17,7 +17,13 @@ import metrics
 from config import Settings
 from db import create_pool
 from models import ProvisionRequest, ProvisionResponse, ServiceSpec
-from security import RequestIDMiddleware, SecurityHeadersMiddleware, admin_key_ok
+from security import (
+    RequestIDMiddleware,
+    SecurityHeadersMiddleware,
+    admin_key_ok,
+    bearer_token,
+    secret_matches,
+)
 from tls import build_nats_tls
 
 log = structlog.get_logger(__name__)
@@ -43,6 +49,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pool = pool
     app.state.js = js
     app.state.nc = nc
+    if not cfg.api_key:
+        log.warning(
+            "provisioning API is unauthenticated (API_KEY unset) — "
+            "intended for local dev only; set API_KEY in production"
+        )
     log.info("osb broker ready", listen_port=cfg.listen_port)
     try:
         yield
@@ -58,6 +69,28 @@ app = FastAPI(title="edge-osb", version="0.1.0", lifespan=lifespan)
 # middleware in reverse-add order, so add headers last to wrap outermost.
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
+
+
+async def require_api_key(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Gate the provisioning API on the shared API key (ISO 27001 A.9 — access control).
+
+    No-op when ``API_KEY`` is unset (open mode for local dev). When set, callers
+    must send ``Authorization: Bearer <key>``: 401 when the header is absent or
+    not a Bearer scheme, 403 when present but wrong.
+
+    NOTE: a shared bearer key is the lightest credential that fits the existing
+    secret plumbing; whether the real provisioning callers want this, per-tenant
+    keys, or mTLS (like auth-service) is Nicolai's call — this is reversible.
+    """
+    if not cfg.api_key:
+        return
+    token = bearer_token(authorization)
+    if token is None:
+        raise HTTPException(status_code=401, detail="API key required")
+    if not secret_matches(token, cfg.api_key):
+        raise HTTPException(status_code=403, detail="invalid API key")
 
 
 async def require_admin(
@@ -78,7 +111,12 @@ async def require_admin(
         raise HTTPException(status_code=403, detail="invalid admin credentials")
 
 
-@app.post("/v1/services", status_code=202, response_model=ProvisionResponse)
+@app.post(
+    "/v1/services",
+    status_code=202,
+    response_model=ProvisionResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def create_service(spec: ServiceSpec, request: Request) -> ProvisionResponse:
     """Enqueue a CREATE request for an edge service."""
     try:
@@ -88,7 +126,12 @@ async def create_service(spec: ServiceSpec, request: Request) -> ProvisionRespon
         raise HTTPException(status_code=500, detail="failed to queue provision") from exc
 
 
-@app.delete("/v1/services/{name}", status_code=202, response_model=ProvisionResponse)
+@app.delete(
+    "/v1/services/{name}",
+    status_code=202,
+    response_model=ProvisionResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def delete_service(name: str, request: Request) -> ProvisionResponse:
     """Enqueue a DELETE request for an edge service."""
     try:
@@ -98,7 +141,11 @@ async def delete_service(name: str, request: Request) -> ProvisionResponse:
         raise HTTPException(status_code=500, detail="failed to queue deprovision") from exc
 
 
-@app.get("/v1/requests/{request_id}", response_model=ProvisionRequest)
+@app.get(
+    "/v1/requests/{request_id}",
+    response_model=ProvisionRequest,
+    dependencies=[Depends(require_api_key)],
+)
 async def get_request(request_id: UUID, request: Request) -> ProvisionRequest:
     """Return the current state of a provisioning request."""
     row = await request.app.state.pool.fetchrow(
