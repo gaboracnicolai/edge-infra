@@ -30,12 +30,34 @@ def _operation_for(subject: str, cfg: Settings) -> str:
     return "UNKNOWN"
 
 
+# Strong references to in-flight webhook deliveries. asyncio keeps only a weak
+# reference to a bare create_task() result, so without this set a fire-and-forget
+# delivery can be garbage-collected mid-flight. Each task drops itself when done.
+_webhook_tasks: set[asyncio.Task[None]] = set()
+
+
+def _spawn_webhook(url: str, payload: dict[str, Any], cfg: Settings) -> None:
+    """Schedule a detached webhook delivery, decoupled from the ack path.
+
+    Delivery used to be awaited inline before ``msg.ack()``; a slow or retrying
+    target (worst case ~55s across retries) could exceed the consumer's
+    ``ack_wait`` and make JetStream redeliver the message — re-writing the
+    service row and re-firing the webhook. Running it as a background task lets
+    us ack as soon as the durable state is committed. ``deliver()`` is
+    best-effort and never raises, so the task needs no result handling.
+    """
+    task = asyncio.create_task(webhook.deliver(url, payload, cfg))
+    _webhook_tasks.add(task)
+    task.add_done_callback(_webhook_tasks.discard)
+
+
 async def process_message(msg: Any, pool, cfg: Settings) -> None:
     """Apply a single NATS message: write services row, ack on success, nak on failure."""
     headers = msg.headers or {}
     request_id = headers.get("Nats-Msg-Id")
     operation = _operation_for(msg.subject, cfg)
     service_name: str | None = None
+    pending_webhook: tuple[str, dict[str, Any]] | None = None
 
     try:
         if msg.subject == cfg.nats_subject_provision:
@@ -100,7 +122,9 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
                 request_id,
             )
             if row is not None and row["webhook_url"]:
-                await webhook.deliver(
+                # Capture the delivery; fire it only after the ack below so a
+                # slow webhook can't hold the message past ack_wait.
+                pending_webhook = (
                     row["webhook_url"],
                     {
                         "request_id": str(request_id),
@@ -108,7 +132,6 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
                         "service": service_name,
                         "timestamp": datetime.now(tz=UTC).isoformat(),
                     },
-                    cfg,
                 )
 
         await msg.ack()
@@ -131,6 +154,14 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
                 log.exception("failed to mark provision_requests FAILED", request_id=request_id)
         await msg.nak(delay=30)
         metrics.nats_messages_total[(operation, "nak")] += 1
+        return
+
+    # Reached only on the success path (the except above returns). The message
+    # is already acked, so this detached delivery can never hold it past
+    # ack_wait or cause a redelivery.
+    if pending_webhook is not None:
+        url, payload = pending_webhook
+        _spawn_webhook(url, payload, cfg)
 
 
 async def run_worker(cfg: Settings, pool, js) -> None:

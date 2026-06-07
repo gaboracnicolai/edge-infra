@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -144,3 +145,53 @@ async def test_worker_duplicate_is_idempotent(mock_pool, cfg, service_spec_dict)
         if "INSERT INTO services" in call.args[0]
     ]
     assert len(insert_sqls) == 2
+
+
+async def test_worker_webhook_does_not_block_ack(mock_pool, cfg, service_spec_dict, monkeypatch):
+    """A slow webhook must not delay the ack.
+
+    Regression: delivery used to be awaited inline before ``msg.ack()``, so a
+    target slow enough to cross ``ack_wait`` triggered a JetStream redelivery
+    storm (duplicate service writes + repeat webhooks). Delivery now runs as a
+    detached task scheduled *after* the ack.
+    """
+    request_id = str(uuid4())
+    msg = make_msg(
+        cfg.nats_subject_provision,
+        service_spec_dict,
+        headers={"Nats-Msg-Id": request_id},
+    )
+    mock_pool.fetchrow.return_value = {"webhook_url": "https://hooks.example.test/edge"}
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    captured: dict = {}
+
+    async def blocking_deliver(url, payload, cfg):
+        captured["url"] = url
+        captured["payload"] = payload
+        started.set()
+        await release.wait()  # hold the "delivery" open well past ack_wait
+
+    monkeypatch.setattr(worker.webhook, "deliver", blocking_deliver)
+
+    # Before the fix this awaited blocking_deliver inline and never returned,
+    # so wait_for would time out.
+    await asyncio.wait_for(worker.process_message(msg, mock_pool, cfg), timeout=1.0)
+
+    # Acked exactly once, with the webhook still in flight (not nak'd).
+    msg.ack.assert_awaited_once()
+    msg.nak.assert_not_called()
+
+    # Delivery was scheduled (decoupled, not dropped) and is running detached.
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert worker._webhook_tasks  # task is held (no GC mid-flight)
+    assert captured["url"] == "https://hooks.example.test/edge"
+    assert captured["payload"]["request_id"] == request_id
+    assert captured["payload"]["status"] == "COMPLETED"
+    assert captured["payload"]["service"] == "api-svc"
+
+    # Let the detached task finish so it doesn't outlive the test.
+    release.set()
+    for task in list(worker._webhook_tasks):
+        await task
