@@ -14,6 +14,7 @@ from nats.js.api import RetentionPolicy, StorageType, StreamConfig
 
 import broker
 import metrics
+import specvalidation
 from config import Settings
 from db import create_pool
 from models import ProvisionRequest, ProvisionResponse, ServiceSpec
@@ -134,6 +135,12 @@ async def create_service(spec: ServiceSpec, request: Request) -> ProvisionRespon
 )
 async def delete_service(name: str, request: Request) -> ProvisionResponse:
     """Enqueue a DELETE request for an edge service."""
+    # The {name} path param skips ServiceSpec validation, so enforce the same
+    # name shape here — it flows into SQL params and the NATS payload (A.14).
+    try:
+        specvalidation.validate_service_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         return await broker.deprovision(name, request.app.state.pool, request.app.state.js, cfg)
     except Exception as exc:  # noqa: BLE001
