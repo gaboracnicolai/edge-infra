@@ -29,14 +29,19 @@ async def deliver(url: str, payload: dict[str, Any], cfg: Settings) -> None:
     # past the ingest literal check. Never raises: a blocked target is a dropped
     # webhook, not a failed provision.
     try:
-        await netguard.assert_public_target(url)
+        pinned_ip = await netguard.assert_public_target(url)
     except (ValueError, OSError) as exc:
         metrics.webhook_deliveries_total["blocked"] += 1
         log.error("webhook target blocked by SSRF guard", url=url, error=str(exc))
         return
 
+    # Pin the TCP connect to the IP we just validated. Without this, httpx would
+    # re-resolve the hostname at connect time and a rebinding DNS answer could
+    # still steer the socket at an internal address (TOCTOU). The URL keeps its
+    # hostname, so TLS SNI / cert verification are unaffected.
+    transport = netguard.pinned_async_transport(pinned_ip)
     last_error: Exception | None = None
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(transport=transport) as client:
         for attempt in range(1, cfg.webhook_max_retries + 1):
             try:
                 response = await client.post(url, json=payload, timeout=cfg.webhook_timeout_s)

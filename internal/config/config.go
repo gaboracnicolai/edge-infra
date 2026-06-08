@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	ListenAddr        string
+	HealthAddr        string
 	PostgresDSN       string
 	NodeID            string
 	ReconcileInterval time.Duration
@@ -29,6 +30,7 @@ type Config struct {
 func FromEnv() (*Config, error) {
 	c := &Config{
 		ListenAddr:        getenv("XDS_LISTEN_ADDR", ":18000"),
+		HealthAddr:        getenv("XDS_HEALTH_ADDR", ":18001"),
 		PostgresDSN:       os.Getenv("POSTGRES_DSN"),
 		NodeID:            getenv("XDS_NODE_ID", "edge-envoy"),
 		ReconcileInterval: 5 * time.Second,

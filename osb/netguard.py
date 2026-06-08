@@ -16,9 +16,14 @@ Two layers, used at two points:
     address is internal. Runs at *delivery* (webhook.deliver), which is the real
     egress boundary and the only place a hostname's true IPs are known. This
     also defends against a hostname that resolved cleanly at ingest but now
-    points inward (DNS rebinding); a narrow TOCTOU window remains between this
-    check and httpx's own connect — pinning the connection to the validated IP
-    is a possible follow-up.
+    points inward (DNS rebinding). It returns the validated IP so the caller can
+    pin the connection to it.
+
+The DNS-rebinding TOCTOU between that check and httpx's own connect is closed by
+``pinned_async_transport``: httpx/httpcore would otherwise re-resolve the
+hostname at connect time, reopening the window. The pinned transport forces the
+TCP connect to the already-validated IP while leaving the hostname in the URL,
+so TLS SNI and certificate verification still run against the hostname.
 """
 
 from __future__ import annotations
@@ -26,8 +31,11 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
+import httpcore
+import httpx
 import structlog
 
 log = structlog.get_logger(__name__)
@@ -91,12 +99,16 @@ async def _resolve(host: str) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-async def assert_public_target(url: str) -> None:
-    """Delivery-time SSRF check. Raises ValueError when the target is unsafe.
+async def assert_public_target(url: str) -> str:
+    """Delivery-time SSRF check. Returns the validated IP, or raises ValueError.
 
-    For an IP literal the address is checked directly (no DNS). For a hostname,
-    *every* resolved address must be public — a single internal answer rejects
-    the whole target.
+    For an IP literal the address is checked directly (no DNS) and returned. For
+    a hostname, *every* resolved address must be public — a single internal
+    answer rejects the whole target — and the first resolved address is returned.
+
+    The returned IP is the address the caller must pin the connection to (via
+    ``pinned_async_transport``): connecting to anything else would re-resolve the
+    hostname and reopen the DNS-rebinding window this check just closed.
     """
     host = _parse_target(url)
     try:
@@ -106,7 +118,7 @@ async def assert_public_target(url: str) -> None:
     if literal is not None:
         if _ip_blocked(literal):
             raise ValueError(f"webhook_url points at a non-routable/internal address: {host}")
-        return
+        return host
 
     addresses = await _resolve(host)
     if not addresses:
@@ -116,3 +128,64 @@ async def assert_public_target(url: str) -> None:
             raise ValueError(
                 f"webhook_url host {host} resolves to a non-routable/internal address: {addr}"
             )
+    return addresses[0]
+
+
+class _PinnedBackend(httpcore.AsyncNetworkBackend):
+    """An httpcore backend that forces every TCP connect to a fixed IP.
+
+    httpx/httpcore re-resolves the hostname at connect time, which would reopen
+    the DNS-rebinding window that ``assert_public_target`` just closed. Pinning
+    ``connect_tcp`` to the IP we already vetted removes that TOCTOU gap. The
+    hostname stays in the URL, so TLS SNI and certificate verification still run
+    against the hostname (not the bare IP). Unix-socket connects and sleeps are
+    delegated unchanged.
+    """
+
+    def __init__(self, pinned_ip: str) -> None:
+        self._pinned_ip = pinned_ip
+        self._inner = httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[object] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        # Ignore the requested host; dial the pre-validated address instead.
+        return await self._inner.connect_tcp(
+            self._pinned_ip,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[object] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        return await self._inner.connect_unix_socket(
+            path, timeout=timeout, socket_options=socket_options
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def pinned_async_transport(pinned_ip: str, *, verify: bool = True) -> httpx.AsyncHTTPTransport:
+    """An httpx transport whose TCP connections are pinned to ``pinned_ip``.
+
+    The URL keeps its hostname (so TLS SNI / cert verification use the hostname),
+    but the socket always connects to the IP that ``assert_public_target`` vetted
+    as public — eliminating the DNS-rebinding TOCTOU between the check and the
+    connect. ``transport._pool`` is httpcore's private connection pool; swapping
+    its network backend is the supported extension point for custom dialing.
+    """
+    transport = httpx.AsyncHTTPTransport(verify=verify)
+    transport._pool._network_backend = _PinnedBackend(pinned_ip)
+    return transport
