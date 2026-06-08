@@ -88,6 +88,38 @@ async def test_provision_rejects_control_char_node_selector(app_client, valid_sp
     assert response.status_code == 422
 
 
+async def test_provision_rejects_invalid_tls_secret_name(app_client, valid_spec):
+    valid_spec["protocol"] = "HTTPS"
+    valid_spec["tls_secret_name"] = "Bad_Secret Name"  # uppercase + underscore + space
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_accepts_valid_tls_secret_name(app_client, valid_spec):
+    valid_spec["protocol"] = "HTTPS"
+    valid_spec["tls_secret_name"] = "edge-tls.cert"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
+async def test_provision_rejects_invalid_health_path(app_client, valid_spec):
+    valid_spec["health_check"] = {"path": "not-rooted", "interval_seconds": 5}
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_rejects_control_char_health_path(app_client, valid_spec):
+    valid_spec["health_check"] = {"path": "/health\ninject", "interval_seconds": 5}
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_accepts_valid_health_path(app_client, valid_spec):
+    valid_spec["health_check"] = {"path": "/api/healthz", "interval_seconds": 5}
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
 async def test_provision_rejects_internal_webhook(app_client, valid_spec):
     valid_spec["webhook_url"] = "http://169.254.169.254/latest/meta-data/"
     response = await app_client.post("/v1/services", json=valid_spec)
@@ -107,6 +139,13 @@ async def test_deprovision(app_client):
     assert body["status"] == "PENDING"
     assert "DELETE" in body["message"]
     assert "my-service" in body["message"]
+
+
+async def test_deprovision_rejects_invalid_name(app_client):
+    # The {name} path param skips ServiceSpec validation, so the endpoint must
+    # reject a malformed name (injection vector) before queueing anything.
+    response = await app_client.delete("/v1/services/Bad_Name!")
+    assert response.status_code == 422
 
 
 async def test_get_request_found(app_client, mock_pool):

@@ -64,11 +64,43 @@ async def test_webhook_retries_on_timeout(cfg, fast_sleep):
 
 
 @respx.mock
-async def test_webhook_backoff_sequence(cfg, fast_sleep):
+async def test_webhook_backoff_sequence(cfg, fast_sleep, monkeypatch):
+    # Pin jitter off so the backoff is deterministic: base 2.0 → [2, 4, 8, 16].
+    monkeypatch.setattr(cfg, "webhook_retry_jitter", 0.0)
     respx.post("https://example.test/hook").mock(return_value=httpx.Response(500, text="boom"))
     await webhook.deliver("https://example.test/hook", {}, cfg)
     # 5 attempts with base 2.0 → sleeps of [2, 4, 8, 16] between them.
     assert fast_sleep == [2.0, 4.0, 8.0, 16.0]
+
+
+@respx.mock
+async def test_webhook_backoff_jitter_within_bounds(cfg, fast_sleep):
+    # With jitter enabled each delay must sit in [base**n, base**n * (1 + jitter)].
+    assert cfg.webhook_retry_jitter > 0
+    respx.post("https://example.test/hook").mock(return_value=httpx.Response(500, text="boom"))
+    await webhook.deliver("https://example.test/hook", {}, cfg)
+    base_delays = [cfg.webhook_retry_base_s**n for n in range(1, cfg.webhook_max_retries)]
+    assert len(fast_sleep) == len(base_delays)
+    for delay, base in zip(fast_sleep, base_delays, strict=True):
+        assert base <= delay <= base * (1 + cfg.webhook_retry_jitter)
+    # Jitter is additive, so the delays must still be strictly increasing here
+    # (base growth dominates the bounded jitter for base 2.0).
+    assert fast_sleep == sorted(fast_sleep)
+
+
+@respx.mock
+async def test_webhook_treats_3xx_as_failure(cfg, fast_sleep):
+    """A 3xx response is a failed delivery, not a success: the client doesn't
+    follow redirects (that would be an SSRF hole), so a redirected hook never
+    received the payload. It must retry to exhaustion and count as a failure."""
+    route = respx.post("https://example.test/hook").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://elsewhere.test/"})
+    )
+    before = metrics.webhook_deliveries_total["failure"]
+    await webhook.deliver("https://example.test/hook", {}, cfg)
+    assert route.call_count == cfg.webhook_max_retries
+    assert len(fast_sleep) == cfg.webhook_max_retries - 1
+    assert metrics.webhook_deliveries_total["failure"] == before + 1
 
 
 @respx.mock

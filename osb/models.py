@@ -25,12 +25,19 @@ class HealthCheckSpec(BaseModel):
     path: str = "/healthz"
     interval_seconds: int = Field(default=5, ge=1)
 
+    @field_validator("path")
+    @classmethod
+    def _path_is_rooted(cls, v: str) -> str:
+        """Constrain path to a rooted, single-line string — it is interpolated
+        into Envoy/xDS health-check config (ISO 27001 A.14)."""
+        return specvalidation.validate_health_path(v)
+
 
 class ServiceSpec(BaseModel):
     """Tenant-supplied desired state for a service registration."""
 
-    name: str = Field(pattern=r"^[a-z][a-z0-9-]{1,62}$")
-    team: str = Field(pattern=r"^[a-z][a-z0-9-]{1,62}$")
+    name: str = Field(pattern=specvalidation.SERVICE_NAME_PATTERN)
+    team: str = Field(pattern=specvalidation.SERVICE_NAME_PATTERN)
     host: str = Field(min_length=1, max_length=253)
     port: int = Field(ge=1, le=65535)
     protocol: Literal["HTTP", "HTTPS"] = "HTTP"
@@ -56,6 +63,15 @@ class ServiceSpec(BaseModel):
         """Constrain host to an IP literal or RFC-1123 hostname — it is
         interpolated into Envoy/xDS cluster config (ISO 27001 A.14)."""
         return specvalidation.validate_host(v)
+
+    @field_validator("tls_secret_name")
+    @classmethod
+    def _tls_secret_name_valid(cls, v: str | None) -> str | None:
+        """Constrain tls_secret_name to a lowercase RFC-1123 subdomain — it is
+        interpolated into the SDS/xDS secret reference (ISO 27001 A.14)."""
+        if v is not None:
+            specvalidation.validate_secret_name(v)
+        return v
 
     @field_validator("node_selector")
     @classmethod

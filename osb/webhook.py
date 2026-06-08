@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from typing import Any
 
 import httpx
@@ -39,7 +40,16 @@ async def deliver(url: str, payload: dict[str, Any], cfg: Settings) -> None:
         for attempt in range(1, cfg.webhook_max_retries + 1):
             try:
                 response = await client.post(url, json=payload, timeout=cfg.webhook_timeout_s)
-                response.raise_for_status()
+                # Treat anything that isn't 2xx as a failed delivery. raise_for_status()
+                # only fires on 4xx/5xx, so a 3xx would otherwise count as success — but
+                # the client doesn't follow redirects (following one would be an SSRF
+                # hole), so a redirected hook never actually received the payload.
+                if not response.is_success:
+                    raise httpx.HTTPStatusError(
+                        f"non-success webhook status {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
                 metrics.webhook_deliveries_total["success"] += 1
                 log.info("webhook delivered", url=url, attempt=attempt)
                 return
@@ -53,7 +63,11 @@ async def deliver(url: str, payload: dict[str, Any], cfg: Settings) -> None:
                 )
                 if attempt >= cfg.webhook_max_retries:
                     break
+                # Exponential backoff with optional random jitter so many workers
+                # retrying at once don't hammer a recovering endpoint in lockstep.
                 delay = cfg.webhook_retry_base_s**attempt
+                if cfg.webhook_retry_jitter > 0:
+                    delay += random.uniform(0, cfg.webhook_retry_jitter * delay)
                 await asyncio.sleep(delay)
 
     metrics.webhook_deliveries_total["failure"] += 1

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import nats
 import structlog
@@ -28,6 +30,24 @@ def _operation_for(subject: str, cfg: Settings) -> str:
     if subject == cfg.nats_subject_deprovision:
         return "DELETE"
     return "UNKNOWN"
+
+
+def _parse_request_id(raw: str | None) -> UUID | None:
+    """Parse the ``Nats-Msg-Id`` header into a UUID.
+
+    The broker always stamps a uuid4, but a malformed or spoofed value would
+    otherwise blow up the ``provision_requests`` queries (and the FAILED-status
+    write in the except handler, looping until ``max_deliver``). Treat an
+    unparseable id as absent: the services write still applies and the message is
+    acked — we just can't correlate it back to a ``provision_requests`` row.
+    """
+    if raw is None:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        log.warning("dropping unparseable Nats-Msg-Id", raw=raw)
+        return None
 
 
 # Strong references to in-flight webhook deliveries. asyncio keeps only a weak
@@ -54,7 +74,7 @@ def _spawn_webhook(url: str, payload: dict[str, Any], cfg: Settings) -> None:
 async def process_message(msg: Any, pool, cfg: Settings) -> None:
     """Apply a single NATS message: write services row, ack on success, nak on failure."""
     headers = msg.headers or {}
-    request_id = headers.get("Nats-Msg-Id")
+    request_id = _parse_request_id(headers.get("Nats-Msg-Id"))
     operation = _operation_for(msg.subject, cfg)
     service_name: str | None = None
     pending_webhook: tuple[str, dict[str, Any]] | None = None
@@ -185,6 +205,38 @@ async def run_worker(cfg: Settings, pool, js) -> None:
         await process_message(msg, pool, cfg)
 
 
+async def _sweep_once(cfg: Settings, pool) -> str | None:
+    """Delete terminal provision_requests older than the retention window.
+
+    Returns the asyncpg status tag (e.g. ``"DELETE 12"``) or None when retention
+    is disabled. Only COMPLETED/FAILED rows are pruned — PENDING is never touched.
+    """
+    if cfg.provision_retention_days <= 0:
+        return None
+    return await pool.execute(
+        """
+        DELETE FROM provision_requests
+        WHERE status IN ('COMPLETED', 'FAILED')
+          AND created_at < NOW() - make_interval(days => $1)
+        """,
+        cfg.provision_retention_days,
+    )
+
+
+async def run_retention_sweep(cfg: Settings, pool) -> None:
+    """Periodically prune provision_requests so the audit table stays bounded."""
+    if cfg.provision_retention_days <= 0:
+        log.info("provision_requests retention sweep disabled")
+        return
+    while True:
+        try:
+            result = await _sweep_once(cfg, pool)
+            log.info("provision_requests retention sweep", result=result)
+        except Exception:  # noqa: BLE001 — housekeeping must never crash the worker
+            log.exception("provision_requests retention sweep failed")
+        await asyncio.sleep(cfg.provision_sweep_interval_s)
+
+
 async def main() -> None:
     """Wire up the pool + JetStream and run the worker loop."""
     cfg = Settings()
@@ -192,9 +244,13 @@ async def main() -> None:
     nats_tls = build_nats_tls(cfg.nats_tls_ca, cfg.nats_tls_cert, cfg.nats_tls_key)
     nc = await nats.connect(cfg.nats_url, tls=nats_tls)
     js = nc.jetstream()
+    sweep = asyncio.create_task(run_retention_sweep(cfg, pool))
     try:
         await run_worker(cfg, pool, js)
     finally:
+        sweep.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep
         await nc.drain()
         await pool.close()
 

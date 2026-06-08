@@ -14,6 +14,7 @@ fields that flow outward are constrained to predictable shapes here.
 from __future__ import annotations
 
 import ipaddress
+import re
 
 # RFC 1123 hostname: dot-separated labels, each 1-63 chars of [A-Za-z0-9-] not
 # starting/ending with a hyphen; total length <= 253.
@@ -25,6 +26,17 @@ _LABEL_MAX = 63
 _NODE_SELECTOR_MAX_ENTRIES = 32
 _NODE_SELECTOR_KEY_MAX = 253
 _NODE_SELECTOR_VALUE_MAX = 63
+
+# Service/team identifier: starts with a lowercase letter, then 1-62 chars of
+# lowercase alnum or hyphen (2..63 total). Single source of truth shared by the
+# ServiceSpec.name/team Field patterns and the deprovision path-param check, so
+# the API can't accept a name shape the worker/xDS layer would later choke on.
+SERVICE_NAME_PATTERN = r"^[a-z][a-z0-9-]{1,62}$"
+_SERVICE_NAME_RE = re.compile(SERVICE_NAME_PATTERN)
+
+# Health-check path bound. The path is interpolated into Envoy/xDS health-check
+# config, so it must be a rooted, single-line, control-char-free string.
+_HEALTH_PATH_MAX = 2048
 
 
 def _is_valid_hostname(host: str) -> bool:
@@ -85,3 +97,54 @@ def validate_node_selector(selector: dict[str, str]) -> dict[str, str]:
         if _has_control_chars(key) or _has_control_chars(value):
             raise ValueError(f"node_selector entry {key!r} contains control characters")
     return selector
+
+
+def validate_service_name(name: str) -> str:
+    """Return ``name`` if it matches :data:`SERVICE_NAME_PATTERN`, else ValueError.
+
+    Shared by the ServiceSpec ingest validators and the DELETE path-param check
+    so both reject the same shapes — the name flows into SQL params and xDS
+    cluster identifiers downstream.
+    """
+    if not _SERVICE_NAME_RE.match(name):
+        raise ValueError(
+            f"name must match {SERVICE_NAME_PATTERN} (lowercase, 2..63 chars), got {name!r}"
+        )
+    return name
+
+
+def validate_secret_name(secret_name: str) -> str:
+    """Return ``secret_name`` if it is a valid lowercase RFC-1123 subdomain.
+
+    A Kubernetes Secret name must be a DNS subdomain (lowercase alnum, '-', '.',
+    no leading/trailing hyphen per label, <=253 chars). It is interpolated into
+    the SDS/xDS reference, so reject anything that isn't a real Secret name
+    rather than passing a config-injection vector downstream.
+    """
+    if secret_name != secret_name.lower():
+        raise ValueError(f"tls_secret_name must be lowercase, got {secret_name!r}")
+    if not _is_valid_hostname(secret_name):
+        raise ValueError(
+            f"tls_secret_name must be an RFC-1123 subdomain, got {secret_name!r}"
+        )
+    return secret_name
+
+
+def validate_health_path(path: str) -> str:
+    """Return ``path`` if it is a rooted, single-line, control-char-free URL path.
+
+    The health-check path is interpolated into Envoy/xDS health-check config, so
+    constrain it: must start with '/', no control chars or whitespace, bounded
+    length. Charset beyond that is left to Envoy's own URL handling.
+    """
+    if not path.startswith("/"):
+        raise ValueError(f"health_check.path must start with '/', got {path!r}")
+    if len(path) > _HEALTH_PATH_MAX:
+        raise ValueError(
+            f"health_check.path exceeds {_HEALTH_PATH_MAX} chars ({len(path)})"
+        )
+    if _has_control_chars(path):
+        raise ValueError("health_check.path contains control characters")
+    if any(c.isspace() for c in path):
+        raise ValueError("health_check.path contains whitespace")
+    return path

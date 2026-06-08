@@ -94,6 +94,30 @@ async def test_worker_db_error_naks(mock_pool, cfg, service_spec_dict):
     msg.ack.assert_not_called()
 
 
+async def test_worker_malformed_request_id_acks_without_status(mock_pool, cfg, service_spec_dict):
+    """A non-UUID Nats-Msg-Id is treated as absent: the services write still
+    applies and the message is acked, but no provision_requests row is touched
+    (a malformed id would otherwise blow up the UUID-typed queries and loop to
+    max_deliver)."""
+    msg = make_msg(
+        cfg.nats_subject_provision,
+        service_spec_dict,
+        headers={"Nats-Msg-Id": "not-a-uuid"},
+    )
+
+    await worker.process_message(msg, mock_pool, cfg)
+
+    msg.ack.assert_awaited_once()
+    msg.nak.assert_not_called()
+
+    # Only the services upsert ran — no provision_requests UPDATE / fetchrow,
+    # since the id couldn't be correlated.
+    executed_sqls = [call.args[0] for call in mock_pool.execute.call_args_list]
+    assert any("INSERT INTO services" in sql for sql in executed_sqls)
+    assert not any("provision_requests" in sql for sql in executed_sqls)
+    mock_pool.fetchrow.assert_not_called()
+
+
 async def test_worker_no_webhook_when_url_none(mock_pool, cfg, service_spec_dict, monkeypatch):
     request_id = str(uuid4())
     msg = make_msg(
@@ -195,3 +219,34 @@ async def test_worker_webhook_does_not_block_ack(mock_pool, cfg, service_spec_di
     release.set()
     for task in list(worker._webhook_tasks):
         await task
+
+
+async def test_sweep_once_deletes_terminal_rows(mock_pool, cfg):
+    mock_pool.execute.return_value = "DELETE 7"
+
+    result = await worker._sweep_once(cfg, mock_pool)
+
+    assert result == "DELETE 7"
+    sql = mock_pool.execute.call_args.args[0]
+    assert "DELETE FROM provision_requests" in sql
+    assert "status IN ('COMPLETED', 'FAILED')" in sql  # PENDING is never pruned
+    assert "make_interval(days => $1)" in sql
+    # retention window is passed as a bound parameter, not interpolated
+    assert mock_pool.execute.call_args.args[1] == cfg.provision_retention_days
+
+
+async def test_sweep_once_noop_when_disabled(mock_pool, cfg, monkeypatch):
+    monkeypatch.setattr(cfg, "provision_retention_days", 0)
+
+    result = await worker._sweep_once(cfg, mock_pool)
+
+    assert result is None
+    mock_pool.execute.assert_not_called()
+
+
+async def test_run_retention_sweep_returns_when_disabled(mock_pool, cfg, monkeypatch):
+    monkeypatch.setattr(cfg, "provision_retention_days", 0)
+
+    # Must return promptly instead of entering the periodic loop.
+    await asyncio.wait_for(worker.run_retention_sweep(cfg, mock_pool), timeout=1.0)
+    mock_pool.execute.assert_not_called()
