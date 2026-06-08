@@ -32,9 +32,14 @@ spec:
             - name: metrics
               containerPort: 2112
               protocol: TCP
+            - name: health
+              containerPort: 18001
+              protocol: TCP
           env:
             - name: XDS_LISTEN_ADDR
               value: {{ .Values.config.xdsListenAddr | quote }}
+            - name: XDS_HEALTH_ADDR
+              value: {{ .Values.config.xdsHealthAddr | quote }}
             - name: XDS_NODE_ID
               value: {{ .Values.config.xdsNodeId | quote }}
             - name: XDS_RECONCILE_INTERVAL_MS
@@ -73,11 +78,18 @@ spec:
               mountPath: {{ .mountPath }}
               readOnly: true
             {{- end }}
+          # Readiness gates traffic/rollout on the server having published its
+          # first xDS snapshot (/readyz → 503 until then), so a replica that is
+          # up but not yet serving config is held out of rotation.
           readinessProbe:
-            tcpSocket:
-              port: grpc
+            httpGet:
+              path: /readyz
+              port: health
             initialDelaySeconds: 5
             periodSeconds: 5
+          # Liveness stays on the gRPC socket: it tracks the critical xDS port
+          # directly and must not depend on the secondary health server, so a
+          # health-server hiccup never restarts a working xDS process.
           livenessProbe:
             tcpSocket:
               port: grpc

@@ -12,6 +12,7 @@ service:
 
 config:
   xdsListenAddr: "0.0.0.0:18000"
+  xdsHealthAddr: "0.0.0.0:18001"  # /healthz + /readyz HTTP server (probe target)
   xdsNodeId: "edge-proxy"
   reconcileIntervalMs: 5000
 

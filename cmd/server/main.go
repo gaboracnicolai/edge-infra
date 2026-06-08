@@ -101,13 +101,22 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	errCh := make(chan error, 2)
+	// Buffered for all long-lived goroutines (gRPC, reconciler, health) so each
+	// can report its exit without blocking even when the select below has
+	// already returned on another's error or on shutdown.
+	errCh := make(chan error, 3)
 	go func() {
 		log.Info("xds gRPC listening", "addr", cfg.ListenAddr, "node_id", cfg.NodeID)
 		errCh <- grpcSrv.Serve(lis)
 	}()
 	go func() {
 		errCh <- reconciler.Run(rootCtx, cfg.ReconcileInterval)
+	}()
+
+	// Health/readiness HTTP server (additive; read-only view of the xDS cache).
+	healthSrv := newHealthServer(cfg.HealthAddr, cache, cfg.NodeID)
+	go func() {
+		errCh <- runHealthServer(rootCtx, healthSrv, log)
 	}()
 
 	select {
