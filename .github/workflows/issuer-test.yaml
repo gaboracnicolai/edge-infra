@@ -1,0 +1,55 @@
+name: Issuer Test
+
+# Runs the token-issuer test suite against a real Postgres. The DB-backed
+# store tests skip when ISSUER_TEST_DATABASE_URL is unset, so this is the job
+# that actually exercises them.
+on:
+  push:
+    paths:
+      - 'internal/issuer/**'
+      - 'cmd/issuer/**'
+      - 'issuer/migrations/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/issuer-test.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'internal/issuer/**'
+      - 'cmd/issuer/**'
+      - 'issuer/migrations/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/issuer-test.yaml'
+
+jobs:
+  issuer:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: issuer
+          POSTGRES_PASSWORD: issuer
+          POSTGRES_DB: issuer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U issuer"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ISSUER_TEST_DATABASE_URL: postgres://issuer:issuer@localhost:5432/issuer?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Apply migrations
+        env:
+          PGPASSWORD: issuer
+        run: psql -h localhost -U issuer -d issuer -f issuer/migrations/0001_users.sql
+      - name: go test
+        run: go test ./internal/issuer/... ./cmd/issuer/... -count=1
