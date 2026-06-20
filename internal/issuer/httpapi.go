@@ -64,6 +64,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	login, err := s.store.GetLogin(r.Context(), req.Email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			// Verify against a throwaway hash so an unknown email takes the
+			// same time as a known one — no user-enumeration oracle.
+			_, _ = VerifyPassword(s.dummyHash, req.Password)
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
@@ -72,9 +75,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// NOTE: credential verification (disabled check + password verify) is
-	// intentionally absent in this commit so the fail-closed tests prove the
-	// hole. The next commit inserts it here.
+	// Fail closed: a disabled account or any password mismatch is denied with
+	// the same generic message, so the response never reveals which check
+	// failed.
+	if login.Disabled {
+		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	ok, err := VerifyPassword(login.PasswordHash, req.Password)
+	if err != nil || !ok {
+		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
 
 	token, err := s.minter.Mint(time.Now(), login.ID, login.Email, login.Teams)
 	if err != nil {
