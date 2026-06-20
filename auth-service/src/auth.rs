@@ -131,6 +131,15 @@ impl Authorization for AuthService {
                 claims.iss.clone(),
                 Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
                 false,
+            )
+            // Transit-proof: stamp the shared secret so a backend can verify
+            // this request actually came through the gateway. Overwrite (not
+            // append) strips any value a client tried to smuggle in.
+            .add_header(
+                "x-gateway-auth",
+                self.gateway_secret.clone(),
+                Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
+                false,
             );
 
         let mut response = CheckResponse::with_status(Status::ok("ok"));
