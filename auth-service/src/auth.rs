@@ -41,6 +41,9 @@ pub struct AuthService {
     pub validation: Validation,
     /// Metrics handle shared with the metrics HTTP server.
     pub metrics: Arc<Metrics>,
+    /// Shared transit-proof secret injected as `x-gateway-auth` so backends
+    /// can verify a request actually passed through this gateway.
+    pub gateway_secret: String,
 }
 
 #[tonic::async_trait]

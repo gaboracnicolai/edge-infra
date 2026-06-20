@@ -1,0 +1,53 @@
+name: Test
+
+# Runs the unit + integration test suites. The existing images.yaml only
+# *builds* the binaries, so before this workflow nothing actually executed
+# the auth-service integration tests or the control-plane Go tests on a PR.
+on:
+  push:
+    paths:
+      - 'auth-service/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'auth-service/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/test.yaml'
+
+jobs:
+  auth-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            auth-service/target
+          key: cargo-test-${{ hashFiles('auth-service/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-
+      - name: cargo test
+        working-directory: auth-service
+        run: cargo test --locked
+
+  control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: go test
+        run: go test ./... -count=1
