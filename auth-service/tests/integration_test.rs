@@ -45,6 +45,8 @@ struct TestClaims {
     iss: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     teams: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
 }
 
 struct Fixture {
@@ -181,6 +183,7 @@ fn valid_claims(sub: &str, teams: Option<Vec<String>>) -> TestClaims {
         aud: vec![TEST_AUDIENCE.to_string()],
         iss: TEST_ISSUER.to_string(),
         teams,
+        email: None,
     }
 }
 
@@ -287,6 +290,74 @@ async fn test_gateway_auth_overwrites_client_supplied_value() {
 }
 
 #[tokio::test]
+async fn test_email_header_forwarded() {
+    // The issuer puts the verified email in the JWT; the gateway forwards it
+    // as x-user-email so Track can join the identity to its per-workspace
+    // member (members are unique by email within a workspace).
+    let fix = make_fixture(TEST_KID);
+    let (svc, _metrics) = build_service(fix.jwks.clone());
+
+    let claims = TestClaims {
+        email: Some("ada@example.com".into()),
+        ..valid_claims("user-9", None)
+    };
+    let token = sign_jwt(&fix.private_pem, TEST_KID, &claims);
+    let auth = format!("Bearer {token}");
+
+    let response = svc
+        .check(build_check_request(Some(&auth)))
+        .await
+        .expect("rpc")
+        .into_inner();
+    let ok = match response.http_response {
+        Some(HttpResponse::OkResponse(ok)) => ok,
+        other => panic!("expected OkResponse, got {other:?}"),
+    };
+    assert_eq!(
+        header_value(&ok.headers, "x-user-email"),
+        Some("ada@example.com"),
+        "verified email must be forwarded for the workspace-member join"
+    );
+}
+
+#[tokio::test]
+async fn test_email_absent_overwrites_client_supplied_value() {
+    // No email claim in the token: the gateway must STILL overwrite any
+    // client-supplied x-user-email (to empty) so a caller cannot forge one.
+    let fix = make_fixture(TEST_KID);
+    let (svc, _metrics) = build_service(fix.jwks.clone());
+
+    let claims = valid_claims("user-10", None); // email: None
+    let token = sign_jwt(&fix.private_pem, TEST_KID, &claims);
+    let auth = format!("Bearer {token}");
+
+    let response = svc
+        .check(build_check_request_with(
+            Some(&auth),
+            &[("x-user-email", "forged@evil.com")],
+        ))
+        .await
+        .expect("rpc")
+        .into_inner();
+    let ok = match response.http_response {
+        Some(HttpResponse::OkResponse(ok)) => ok,
+        other => panic!("expected OkResponse, got {other:?}"),
+    };
+    let opt = header_opt(&ok.headers, "x-user-email")
+        .expect("x-user-email must be present, overwriting any client value");
+    assert_eq!(
+        opt.header.as_ref().map(|h| h.value.as_str()),
+        Some(""),
+        "absent email must overwrite the client's forgery with empty"
+    );
+    assert_eq!(
+        opt.append_action,
+        HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+        "x-user-email must overwrite, never append"
+    );
+}
+
+#[tokio::test]
 async fn test_missing_auth_header_denied() {
     let fix = make_fixture(TEST_KID);
     let (svc, _metrics) = build_service(fix.jwks);
@@ -314,6 +385,7 @@ async fn test_expired_jwt_denied() {
         aud: vec![TEST_AUDIENCE.into()],
         iss: TEST_ISSUER.into(),
         teams: None,
+        email: None,
     };
     let token = sign_jwt(&fix.private_pem, TEST_KID, &claims);
     let auth = format!("Bearer {token}");
@@ -339,6 +411,7 @@ async fn test_wrong_audience_denied() {
         aud: vec!["someone-else".into()],
         iss: TEST_ISSUER.into(),
         teams: None,
+        email: None,
     };
     let token = sign_jwt(&fix.private_pem, TEST_KID, &claims);
     let auth = format!("Bearer {token}");

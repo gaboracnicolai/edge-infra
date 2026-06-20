@@ -30,6 +30,9 @@ pub struct Claims {
     pub iss: String,
     /// Optional team membership; forwarded as `x-user-teams`.
     pub teams: Option<Vec<String>>,
+    /// Optional verified email; forwarded as `x-user-email` so backends can
+    /// join the identity to their own per-workspace member records.
+    pub email: Option<String>,
 }
 
 /// gRPC ext_authz service: validates a Bearer JWT and forwards identity headers.
@@ -109,6 +112,7 @@ impl Authorization for AuthService {
         timer.observe_duration();
 
         let teams = claims.teams.clone().unwrap_or_default().join(",");
+        let email = claims.email.clone().unwrap_or_default();
 
         let mut builder = OkHttpResponseBuilder::new();
         builder
@@ -131,6 +135,15 @@ impl Authorization for AuthService {
                 claims.iss.clone(),
                 Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
                 false,
+            )
+            // Verified email for the backend's workspace-member join. Always
+            // overwrite (keep_empty_value = true) so a missing claim still
+            // strips any x-user-email a client tried to smuggle in.
+            .add_header(
+                "x-user-email",
+                email,
+                Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
+                true,
             )
             // Transit-proof: stamp the shared secret so a backend can verify
             // this request actually came through the gateway. Overwrite (not
