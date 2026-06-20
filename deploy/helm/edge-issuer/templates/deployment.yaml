@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge-issuer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-issuer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "edge-issuer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "edge-issuer.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "edge-issuer.serviceAccountName" . }}
+      containers:
+        - name: issuer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: https
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: ISSUER_LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.service.port }}"
+            - name: ISSUER_KEYS_DIR
+              value: {{ .Values.signingKeys.mountPath }}
+            - name: ISSUER_ACTIVE_KID
+              value: {{ required "config.activeKid is required" .Values.config.activeKid | quote }}
+            - name: ISSUER_TOKEN_TTL
+              value: {{ .Values.config.tokenTTL | quote }}
+            - name: ISSUER_TLS_CERT
+              value: {{ .Values.tls.mountPath }}/tls.crt
+            - name: ISSUER_TLS_KEY
+              value: {{ .Values.tls.mountPath }}/tls.key
+            - name: ISSUER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: ISSUER_URL
+            - name: ISSUER_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: ISSUER_AUDIENCE
+            - name: ISSUER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: ISSUER_DATABASE_URL
+          volumeMounts:
+            - name: signing-keys
+              mountPath: {{ .Values.signingKeys.mountPath }}
+              readOnly: true
+            - name: issuer-tls
+              mountPath: {{ .Values.tls.mountPath }}
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: signing-keys
+          secret:
+            secretName: {{ .Values.signingKeys.existingSecret }}
+        - name: issuer-tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}

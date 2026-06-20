@@ -1,0 +1,47 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/gaboracnicolai/edge-issuer
+  tag: "latest"  # pin to the SHA you pushed
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP   # never publicly routable; reached only via the gateway
+  port: 8081
+
+config:
+  # Secret holding ISSUER_URL, ISSUER_AUDIENCE, ISSUER_DATABASE_URL.
+  existingSecret: issuer-secrets
+  # kid of the signing key to mint with — must match a <kid>.pem in the
+  # signing-keys Secret below. Required.
+  activeKid: ""
+  tokenTTL: 1h
+
+signingKeys:
+  # Secret whose data keys are "<kid>.pem" PEM-encoded RSA private keys.
+  # Publish current + next here to rotate without downtime.
+  existingSecret: issuer-signing-keys
+  mountPath: /etc/issuer-keys
+
+tls:
+  # Serving cert (TLS is required — the auth-service fetches JWKS over https).
+  # Created by k8s/certs/issuer-cert.yaml.
+  existingSecret: issuer-tls-secret
+  mountPath: /etc/issuer-tls
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations: {}
+
+nameOverride: ""
+fullnameOverride: ""
