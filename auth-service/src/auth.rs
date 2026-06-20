@@ -41,6 +41,9 @@ pub struct AuthService {
     pub validation: Validation,
     /// Metrics handle shared with the metrics HTTP server.
     pub metrics: Arc<Metrics>,
+    /// Shared transit-proof secret injected as `x-gateway-auth` so backends
+    /// can verify a request actually passed through this gateway.
+    pub gateway_secret: String,
 }
 
 #[tonic::async_trait]
@@ -126,6 +129,15 @@ impl Authorization for AuthService {
             .add_header(
                 "x-auth-iss",
                 claims.iss.clone(),
+                Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
+                false,
+            )
+            // Transit-proof: stamp the shared secret so a backend can verify
+            // this request actually came through the gateway. Overwrite (not
+            // append) strips any value a client tried to smuggle in.
+            .add_header(
+                "x-gateway-auth",
+                self.gateway_secret.clone(),
                 Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
                 false,
             );

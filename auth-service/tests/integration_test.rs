@@ -14,7 +14,7 @@ use auth_service::metrics::Metrics;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoy_types::ext_authz::v3::pb::{
-    Authorization, CheckRequest, HeaderValueOption, HttpResponse,
+    Authorization, CheckRequest, HeaderAppendAction, HeaderValueOption, HttpResponse,
 };
 use envoy_types::pb::envoy::service::auth::v3::AttributeContext;
 use envoy_types::pb::envoy::service::auth::v3::attribute_context::{
@@ -34,6 +34,7 @@ use tonic::Request;
 const TEST_AUDIENCE: &str = "edge.example.com";
 const TEST_ISSUER: &str = "https://auth.example.com";
 const TEST_KID: &str = "test-kid";
+const TEST_GATEWAY_SECRET: &str = "test-gateway-shared-secret";
 
 #[derive(Debug, Serialize)]
 struct TestClaims {
@@ -101,9 +102,21 @@ fn sign_jwt(private_pem: &str, kid: &str, claims: &TestClaims) -> String {
 }
 
 fn build_check_request(authorization: Option<&str>) -> Request<CheckRequest> {
+    build_check_request_with(authorization, &[])
+}
+
+/// Like `build_check_request` but lets a test seed extra client-supplied
+/// headers — used to prove the gateway overwrites smuggled identity headers.
+fn build_check_request_with(
+    authorization: Option<&str>,
+    extra: &[(&str, &str)],
+) -> Request<CheckRequest> {
     let mut headers = HashMap::new();
     if let Some(value) = authorization {
         headers.insert("authorization".to_string(), value.to_string());
+    }
+    for (key, value) in extra {
+        headers.insert((*key).to_string(), (*value).to_string());
     }
     let req = CheckRequest {
         attributes: Some(AttributeContext {
@@ -133,6 +146,7 @@ fn build_service(jwks: JwkSet) -> (AuthService, Arc<Metrics>) {
         jwks: JwksCache::from_jwk_set(jwks),
         validation,
         metrics: Arc::clone(&metrics),
+        gateway_secret: TEST_GATEWAY_SECRET.to_string(),
     };
     (service, metrics)
 }
@@ -143,6 +157,19 @@ fn header_value<'a>(headers: &'a [HeaderValueOption], key: &str) -> Option<&'a s
         .filter_map(|opt| opt.header.as_ref())
         .find(|h| h.key.eq_ignore_ascii_case(key))
         .map(|h| h.value.as_str())
+}
+
+/// Returns the full HeaderValueOption (not just the value) so a test can
+/// assert the append action Envoy will apply.
+fn header_opt<'a>(
+    headers: &'a [HeaderValueOption],
+    key: &str,
+) -> Option<&'a HeaderValueOption> {
+    headers.iter().find(|opt| {
+        opt.header
+            .as_ref()
+            .is_some_and(|h| h.key.eq_ignore_ascii_case(key))
+    })
 }
 
 fn valid_claims(sub: &str, teams: Option<Vec<String>>) -> TestClaims {
@@ -187,6 +214,75 @@ async fn test_valid_jwt_returns_ok() {
     assert_eq!(
         header_value(&ok.headers, "x-auth-iss"),
         Some(TEST_ISSUER)
+    );
+}
+
+#[tokio::test]
+async fn test_gateway_auth_header_injected() {
+    // The transit-proof header is what lets a backend (e.g. Track) trust
+    // x-user-id: without it, an exposed backend port lets anyone forge
+    // identity. Every authenticated request must carry the shared secret.
+    let fix = make_fixture(TEST_KID);
+    let (svc, _metrics) = build_service(fix.jwks.clone());
+
+    let claims = valid_claims("user-7", None);
+    let token = sign_jwt(&fix.private_pem, TEST_KID, &claims);
+    let auth = format!("Bearer {token}");
+
+    let response = svc
+        .check(build_check_request(Some(&auth)))
+        .await
+        .expect("rpc")
+        .into_inner();
+
+    let ok = match response.http_response {
+        Some(HttpResponse::OkResponse(ok)) => ok,
+        other => panic!("expected OkResponse, got {other:?}"),
+    };
+    assert_eq!(
+        header_value(&ok.headers, "x-gateway-auth"),
+        Some(TEST_GATEWAY_SECRET),
+        "gateway must inject the shared transit-proof secret"
+    );
+}
+
+#[tokio::test]
+async fn test_gateway_auth_overwrites_client_supplied_value() {
+    // A malicious client tries to smuggle its own transit-proof header in
+    // alongside the request. The gateway must overwrite it with the real
+    // secret, never append, so the backend never sees the forgery.
+    let fix = make_fixture(TEST_KID);
+    let (svc, _metrics) = build_service(fix.jwks.clone());
+
+    let claims = valid_claims("user-8", None);
+    let token = sign_jwt(&fix.private_pem, TEST_KID, &claims);
+    let auth = format!("Bearer {token}");
+
+    let response = svc
+        .check(build_check_request_with(
+            Some(&auth),
+            &[("x-gateway-auth", "forged-by-client")],
+        ))
+        .await
+        .expect("rpc")
+        .into_inner();
+
+    let ok = match response.http_response {
+        Some(HttpResponse::OkResponse(ok)) => ok,
+        other => panic!("expected OkResponse, got {other:?}"),
+    };
+
+    let opt = header_opt(&ok.headers, "x-gateway-auth")
+        .expect("x-gateway-auth must be present");
+    assert_eq!(
+        opt.header.as_ref().map(|h| h.value.as_str()),
+        Some(TEST_GATEWAY_SECRET),
+        "value must be the real secret, not the client's forgery"
+    );
+    assert_eq!(
+        opt.append_action,
+        HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+        "transit-proof header must overwrite, never append"
     );
 }
 

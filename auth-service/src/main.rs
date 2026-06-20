@@ -54,6 +54,7 @@ async fn main() -> Result<(), AppError> {
         jwks: Arc::clone(&jwks),
         validation,
         metrics: Arc::clone(&metrics),
+        gateway_secret: cfg.gateway_auth_secret.clone(),
     };
 
     let tls_cfg = build_tls_config(&cfg)?;
