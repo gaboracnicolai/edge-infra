@@ -1,0 +1,6 @@
+apiVersion: v2
+name: edge-issuer
+description: Talyvor token issuer — login, RS256 JWT minting, and JWKS
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

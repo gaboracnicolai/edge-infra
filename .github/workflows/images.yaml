@@ -65,6 +65,18 @@ jobs:
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-controller:latest', env.OWNER) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.control-plane
+          target: issuer
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ env.OWNER }}/edge-issuer:${{ github.sha }}
+            ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-issuer:latest', env.OWNER) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   osb:
     runs-on: ubuntu-latest
