@@ -13,6 +13,11 @@ pub struct Config {
     pub jwks_url: String,
     /// Background JWKS refresh interval in seconds.
     pub jwks_refresh_s: u64,
+    /// Optional PEM CA file (JWKS_CA_FILE) the HTTPS JWKS fetch trusts in
+    /// addition to the system roots. Needed when the JWKS endpoint (the token
+    /// issuer) serves an internal-CA certificate that the default webpki root
+    /// set does not trust.
+    pub jwks_ca_file: Option<String>,
     /// Expected JWT audience.
     pub jwt_audience: String,
     /// Expected JWT issuer.
@@ -79,6 +84,7 @@ impl Config {
             metrics_addr: optional("METRICS_ADDR", "0.0.0.0:9090"),
             jwks_url,
             jwks_refresh_s,
+            jwks_ca_file: optional_some("JWKS_CA_FILE"),
             jwt_audience: required("JWT_AUDIENCE")?,
             jwt_issuer: required("JWT_ISSUER")?,
             gateway_auth_secret,
@@ -107,6 +113,20 @@ mod tests {
         std::env::remove_var("AUTH_TLS_CERT");
         std::env::remove_var("AUTH_TLS_KEY");
         std::env::remove_var("AUTH_TLS_CA");
+        std::env::remove_var("JWKS_CA_FILE");
+    }
+
+    #[test]
+    fn test_jwks_ca_file_optional() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        base_env();
+        assert!(Config::from_env().unwrap().jwks_ca_file.is_none());
+        std::env::set_var("JWKS_CA_FILE", "/etc/auth-tls/ca.crt");
+        assert_eq!(
+            Config::from_env().unwrap().jwks_ca_file.as_deref(),
+            Some("/etc/auth-tls/ca.crt")
+        );
+        std::env::remove_var("JWKS_CA_FILE");
     }
 
     #[test]
