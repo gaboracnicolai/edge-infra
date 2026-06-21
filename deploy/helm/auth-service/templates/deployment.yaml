@@ -63,6 +63,10 @@ spec:
               value: {{ .mountPath }}/tls.key
             - name: AUTH_TLS_CA
               value: {{ .mountPath }}/ca.crt
+            # Trust the same internal CA for the https JWKS fetch, so the
+            # auth-service can reach the token issuer's JWKS endpoint.
+            - name: JWKS_CA_FILE
+              value: {{ .mountPath }}/ca.crt
             {{- end }}
           volumeMounts:
             {{- with .Values.tls }}

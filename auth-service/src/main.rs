@@ -37,7 +37,7 @@ async fn main() -> Result<(), AppError> {
     );
 
     let metrics = Metrics::new()?;
-    let jwks = JwksCache::new(&cfg.jwks_url).await?;
+    let jwks = JwksCache::new(&cfg.jwks_url, cfg.jwks_ca_file.as_deref()).await?;
     let _refresh = Arc::clone(&jwks).start_refresh(
         cfg.jwks_url.clone(),
         cfg.jwks_refresh_s,

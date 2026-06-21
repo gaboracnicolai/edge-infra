@@ -20,10 +20,8 @@ pub struct JwksCache {
 
 impl JwksCache {
     /// Fetch the JWKS once and build a cache. Fails fast if the upstream is unreachable.
-    pub async fn new(url: &str) -> Result<Arc<Self>, AppError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+    pub async fn new(url: &str, ca_file: Option<&str>) -> Result<Arc<Self>, AppError> {
+        let client = build_client(ca_file)?;
         let set = fetch_jwks(&client, url).await?;
         Ok(Arc::new(Self {
             inner: ArcSwap::new(Arc::new(set)),
@@ -87,4 +85,54 @@ async fn fetch_jwks(client: &reqwest::Client, url: &str) -> Result<JwkSet, AppEr
     let body = resp.text().await?;
     serde_json::from_str::<JwkSet>(&body)
         .map_err(|e| AppError::JwksParse(e.to_string()))
+}
+
+/// Build the reqwest client used to fetch the JWKS. When `ca_file` is set, the
+/// PEM CA is added to the trust roots so an internal-CA JWKS endpoint (the
+/// token issuer) is trusted. Fails closed: a missing or unparseable CA file is
+/// an error, never a silent fall back to the default roots.
+fn build_client(ca_file: Option<&str>) -> Result<reqwest::Client, AppError> {
+    const BEGIN_CERT: &[u8] = b"-----BEGIN CERTIFICATE-----";
+
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    if let Some(path) = ca_file {
+        let pem = std::fs::read(path)
+            .map_err(|e| AppError::Config(format!("read JWKS_CA_FILE {path}: {e}")))?;
+        // reqwest's from_pem is lenient about input with no PEM blocks, so
+        // guard explicitly — a CA file with no certificate must fail closed.
+        if !pem.windows(BEGIN_CERT.len()).any(|w| w == BEGIN_CERT) {
+            return Err(AppError::Config(format!(
+                "JWKS_CA_FILE {path} contains no PEM certificate"
+            )));
+        }
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .map_err(|e| AppError::Config(format!("parse JWKS_CA_FILE {path}: {e}")))?;
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_no_ca_builds_client() {
+        assert!(build_client(None).is_ok());
+    }
+
+    #[test]
+    fn test_missing_ca_file_fails_closed() {
+        let err = build_client(Some("/nonexistent/path/to/ca.pem")).unwrap_err();
+        assert!(err.to_string().contains("JWKS_CA_FILE"), "error was: {err}");
+    }
+
+    #[test]
+    fn test_garbage_ca_file_fails_closed() {
+        let path = std::env::temp_dir().join("auth_jwks_ca_garbage.pem");
+        std::fs::write(&path, b"this is not a certificate").unwrap();
+        let err = build_client(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("JWKS_CA_FILE"), "error was: {err}");
+        let _ = std::fs::remove_file(&path);
+    }
 }
