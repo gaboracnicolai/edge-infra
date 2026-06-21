@@ -91,11 +91,25 @@ async fn fetch_jwks(client: &reqwest::Client, url: &str) -> Result<JwkSet, AppEr
 /// PEM CA is added to the trust roots so an internal-CA JWKS endpoint (the
 /// token issuer) is trusted. Fails closed: a missing or unparseable CA file is
 /// an error, never a silent fall back to the default roots.
-fn build_client(_ca_file: Option<&str>) -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(AppError::from)
+fn build_client(ca_file: Option<&str>) -> Result<reqwest::Client, AppError> {
+    const BEGIN_CERT: &[u8] = b"-----BEGIN CERTIFICATE-----";
+
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    if let Some(path) = ca_file {
+        let pem = std::fs::read(path)
+            .map_err(|e| AppError::Config(format!("read JWKS_CA_FILE {path}: {e}")))?;
+        // reqwest's from_pem is lenient about input with no PEM blocks, so
+        // guard explicitly — a CA file with no certificate must fail closed.
+        if !pem.windows(BEGIN_CERT.len()).any(|w| w == BEGIN_CERT) {
+            return Err(AppError::Config(format!(
+                "JWKS_CA_FILE {path} contains no PEM certificate"
+            )));
+        }
+        let cert = reqwest::Certificate::from_pem(&pem)
+            .map_err(|e| AppError::Config(format!("parse JWKS_CA_FILE {path}: {e}")))?;
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().map_err(AppError::from)
 }
 
 #[cfg(test)]
