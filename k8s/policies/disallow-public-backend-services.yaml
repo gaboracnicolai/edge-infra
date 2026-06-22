@@ -29,10 +29,17 @@ spec:
               namespaceSelector:
                 matchLabels:
                   talyvor.io/allow-public-services: "true"
-      # RED placeholder: only requires a name, so it does NOT yet block
-      # LoadBalancer / NodePort. The real type restriction lands next.
       validate:
-        message: placeholder
-        pattern:
-          metadata:
-            name: "?*"
+        message: >-
+          Service type "{{ request.object.spec.type || 'ClusterIP' }}" is not
+          allowed: backends must be ClusterIP so they are reachable only
+          through the gateway. Label the namespace
+          talyvor.io/allow-public-services=true to opt out.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.type || 'ClusterIP' }}"
+                operator: AnyIn
+                value:
+                  - LoadBalancer
+                  - NodePort
