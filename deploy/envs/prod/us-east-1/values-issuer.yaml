@@ -1,0 +1,6 @@
+replicaCount: 2
+
+config:
+  # kid of the active signing key — must match a <kid>.pem entry in the
+  # issuer-signing-keys Secret. Rotate by adding the next key then bumping this.
+  activeKid: "2026-06"

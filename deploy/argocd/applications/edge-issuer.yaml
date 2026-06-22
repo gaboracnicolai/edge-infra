@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: edge-controller
+  name: edge-issuer
   namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -10,10 +10,11 @@ spec:
   source:
     repoURL: https://github.com/gaboracnicolai/edge-infra
     targetRevision: HEAD
-    path: deploy/helm/edge-controller
+    path: deploy/helm/edge-issuer
     helm:
       valueFiles:
         - values.yaml
+        - ../../../envs/prod/eu-west-1/values-issuer.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: infra
