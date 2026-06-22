@@ -1,0 +1,45 @@
+# Defense-in-depth network isolation for a backend namespace, applied ALONGSIDE
+# the disallow-public-backend-services admission policy. Copy into each backend
+# namespace and replace the two placeholders (<backend-ns>, <NODE_CIDR>).
+#
+# The admission policy guarantees backends are never LoadBalancer/NodePort;
+# these NetworkPolicies further ensure backend pods accept ingress only from
+# the gateway.
+#
+# IMPORTANT — the gateway (edge-proxy) runs with hostNetwork: true, so its
+# traffic to a backend pod carries the NODE IP as source, not the Envoy pod IP.
+# A podSelector/namespaceSelector "allow from gateway" therefore does NOT match
+# gateway traffic; you must allow the node network via ipBlock. Set <NODE_CIDR>
+# to the CIDR of the nodes running edge-proxy.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: <backend-ns>
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  # No ingress rules => all ingress to pods in this namespace is denied.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-gateway
+  namespace: <backend-ns>
+spec:
+  podSelector: {} # all backend pods; narrow with matchLabels if desired
+  policyTypes:
+    - Ingress
+  ingress:
+    # The hostNetwork edge-proxy reaches backends from the node network.
+    - from:
+        - ipBlock:
+            cidr: <NODE_CIDR>
+      ports:
+        - protocol: TCP
+          port: 8080 # backend container port
+    # Intra-namespace traffic (e.g. the app reaching its own database).
+    - from:
+        - podSelector: {}

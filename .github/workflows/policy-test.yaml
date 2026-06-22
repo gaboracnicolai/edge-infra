@@ -1,0 +1,34 @@
+name: Policy Test
+
+# Validates the Kyverno admission policies offline with the Kyverno CLI — no
+# cluster needed. This proves the gateway-only guarantee (LoadBalancer /
+# NodePort backend Services are denied) before it ever reaches a cluster.
+on:
+  push:
+    paths:
+      - 'k8s/policies/**'
+      - '.github/workflows/policy-test.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'k8s/policies/**'
+      - '.github/workflows/policy-test.yaml'
+
+jobs:
+  kyverno:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Kyverno CLI
+        run: |
+          set -euo pipefail
+          VERSION=$(curl -fsSL https://api.github.com/repos/kyverno/kyverno/releases/latest \
+            | grep -oP '"tag_name":\s*"\K[^"]+')
+          echo "Installing Kyverno CLI ${VERSION}"
+          curl -fsSL -o kyverno.tar.gz \
+            "https://github.com/kyverno/kyverno/releases/download/${VERSION}/kyverno-cli_${VERSION}_linux_x86_64.tar.gz"
+          tar -xzf kyverno.tar.gz kyverno
+          sudo install -m 0755 kyverno /usr/local/bin/kyverno
+          kyverno version
+      - name: Run policy tests
+        run: kyverno test k8s/policies/tests

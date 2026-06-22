@@ -1,0 +1,45 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-public-backend-services
+  annotations:
+    policies.kyverno.io/title: Disallow public Services
+    policies.kyverno.io/category: Talyvor Edge Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Backends behind the Talyvor gateway must be reachable only through it.
+      A Service of type LoadBalancer or NodePort exposes a backend port
+      directly, letting a caller bypass the gateway and forge identity
+      headers (x-user-id, x-user-email, x-gateway-auth). This denies such
+      Services cluster-wide; a namespace can opt out with the label
+      talyvor.io/allow-public-services=true (e.g. an external ingress).
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: no-loadbalancer-nodeport
+      match:
+        any:
+          - resources:
+              kinds:
+                - Service
+      exclude:
+        any:
+          - resources:
+              namespaceSelector:
+                matchLabels:
+                  talyvor.io/allow-public-services: "true"
+      validate:
+        message: >-
+          Service type "{{ request.object.spec.type || 'ClusterIP' }}" is not
+          allowed: backends must be ClusterIP so they are reachable only
+          through the gateway. Label the namespace
+          talyvor.io/allow-public-services=true to opt out.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.type || 'ClusterIP' }}"
+                operator: AnyIn
+                value:
+                  - LoadBalancer
+                  - NodePort

@@ -1,0 +1,47 @@
+# Fixtures for the Kyverno CLI test: a normal backend namespace (no public
+# opt-out label) with one ClusterIP Service (allowed) and a LoadBalancer +
+# NodePort Service (must be denied).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backend
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clusterip-backend
+  namespace: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: track
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lb-backend
+  namespace: backend
+spec:
+  type: LoadBalancer
+  selector:
+    app: track
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nodeport-backend
+  namespace: backend
+spec:
+  type: NodePort
+  selector:
+    app: track
+  ports:
+    - port: 80
+      targetPort: 8080
+      nodePort: 30080
