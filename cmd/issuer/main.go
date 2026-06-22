@@ -6,6 +6,7 @@
 //
 //	issuer            # serve (default)
 //	issuer serve      # serve
+//	issuer migrate    # apply the embedded DB migrations
 //	issuer adduser --email a@b.com --password '...' [--display-name N] [--team eng --team platform]
 package main
 
@@ -38,10 +39,12 @@ func main() {
 	switch cmd {
 	case "serve":
 		err = runServe(log)
+	case "migrate":
+		err = runMigrate()
 	case "adduser":
 		err = runAddUser(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (want: serve | adduser)", cmd)
+		err = fmt.Errorf("unknown command %q (want: serve | migrate | adduser)", cmd)
 	}
 	if err != nil {
 		log.Error("issuer exited with error", "cmd", cmd, "err", err)
@@ -111,6 +114,20 @@ func runServe(log *slog.Logger) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	return httpSrv.Shutdown(shutdownCtx)
+}
+
+func runMigrate() error {
+	dsn := os.Getenv("ISSUER_DATABASE_URL")
+	if dsn == "" {
+		return errors.New("ISSUER_DATABASE_URL must be set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := issuer.Migrate(ctx, dsn); err != nil {
+		return err
+	}
+	fmt.Println("migrations applied")
+	return nil
 }
 
 // teamList collects repeated --team flags.
