@@ -1,0 +1,24 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: disallow-public-backend-services
+policies:
+  - ../disallow-public-backend-services.yaml
+resources:
+  - resources.yaml
+results:
+  # A ClusterIP backend is allowed.
+  - policy: disallow-public-backend-services
+    rule: no-loadbalancer-nodeport
+    kind: Service
+    result: pass
+    resources:
+      - backend/clusterip-backend
+  # LoadBalancer and NodePort backends must be blocked.
+  - policy: disallow-public-backend-services
+    rule: no-loadbalancer-nodeport
+    kind: Service
+    result: fail
+    resources:
+      - backend/lb-backend
+      - backend/nodeport-backend
