@@ -67,6 +67,14 @@ func run(log *slog.Logger) error {
 		TokensPerFill: cfg.RateLimitTokensPerFill,
 		FillInterval:  cfg.RateLimitFillInterval,
 	})
+	reconciler.WithExtAuthz(builders.ExtAuthzOptions{
+		Enabled:  cfg.ExtAuthzEnabled,
+		Address:  cfg.ExtAuthzAddress,
+		Port:     cfg.ExtAuthzPort,
+		CAFile:   cfg.ExtAuthzCAFile,
+		CertFile: cfg.ExtAuthzCertFile,
+		KeyFile:  cfg.ExtAuthzKeyFile,
+	})
 
 	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
 	if cfg.RedisAddr != "" {

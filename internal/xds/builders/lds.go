@@ -30,15 +30,15 @@ type RateLimitOptions struct {
 	FillInterval  time.Duration // refill period (must be > 0)
 }
 
-func BuildListeners(gateways []store.Gateway, rl RateLimitOptions) []types.Resource {
+func BuildListeners(gateways []store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions) []types.Resource {
 	out := make([]types.Resource, 0, len(gateways))
 	for _, g := range gateways {
-		out = append(out, listenerForGateway(g, rl))
+		out = append(out, listenerForGateway(g, rl, ea))
 	}
 	return out
 }
 
-func listenerForGateway(g store.Gateway, rl RateLimitOptions) *listenerv3.Listener {
+func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions) *listenerv3.Listener {
 	hcm := &hcmv3.HttpConnectionManager{
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
 		StatPrefix: g.Name,
@@ -48,7 +48,7 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions) *listenerv3.Listen
 				RouteConfigName: RouteConfigName(g.Name),
 			},
 		},
-		HttpFilters: httpFilters(rl),
+		HttpFilters: httpFilters(rl, ea),
 	}
 
 	filterChain := &listenerv3.FilterChain{
@@ -71,12 +71,17 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions) *listenerv3.Listen
 	}
 }
 
-// httpFilters returns the HCM filter chain. The local_ratelimit filter (when
-// enabled) runs before the router, which must always be last.
-func httpFilters(rl RateLimitOptions) []*hcmv3.HttpFilter {
+// httpFilters returns the HCM filter chain in order: local_ratelimit (a coarse
+// pre-auth IP throttle that shields the auth-service from unauthenticated
+// floods) → ext_authz → router (always last). Phase B's identity-keyed limiter
+// will sit after ext_authz, once x-user-id flows.
+func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions) []*hcmv3.HttpFilter {
 	var filters []*hcmv3.HttpFilter
 	if rl.Enabled {
 		filters = append(filters, localRateLimitFilter(rl))
+	}
+	if ea.Enabled {
+		filters = append(filters, extAuthzFilter(ea))
 	}
 	return append(filters, routerFilter())
 }

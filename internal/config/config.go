@@ -33,6 +33,17 @@ type Config struct {
 	RateLimitMaxTokens     uint32        // burst size
 	RateLimitTokensPerFill uint32        // tokens added each fill interval
 	RateLimitFillInterval  time.Duration // refill period (must be > 0)
+
+	// Gateway ext_authz (Envoy → auth-service over gRPC). FAIL-CLOSED: if the
+	// auth-service is unreachable Envoy denies. Opt-in, because enabling it
+	// without a reachable auth-service denies all traffic suite-wide — flip it
+	// on at cutover once the auth front is deployed and verified.
+	ExtAuthzEnabled  bool
+	ExtAuthzAddress  string // auth-service DNS name
+	ExtAuthzPort     uint32
+	ExtAuthzCAFile   string // upstream TLS trust CA (presence enables TLS)
+	ExtAuthzCertFile string // upstream mTLS client cert (optional)
+	ExtAuthzKeyFile  string // upstream mTLS client key (optional)
 }
 
 func FromEnv() (*Config, error) {
@@ -68,6 +79,13 @@ func FromEnv() (*Config, error) {
 		fillMS = 1000 // Envoy requires fill_interval > 0
 	}
 	c.RateLimitFillInterval = time.Duration(fillMS) * time.Millisecond
+
+	c.ExtAuthzEnabled = getenvBool("EXT_AUTHZ_ENABLED", false)
+	c.ExtAuthzAddress = getenv("EXT_AUTHZ_ADDRESS", "auth-service.infra.svc.cluster.local")
+	c.ExtAuthzPort = getenvU32("EXT_AUTHZ_PORT", 50051)
+	c.ExtAuthzCAFile = os.Getenv("EXT_AUTHZ_CA_FILE")
+	c.ExtAuthzCertFile = os.Getenv("EXT_AUTHZ_CERT_FILE")
+	c.ExtAuthzKeyFile = os.Getenv("EXT_AUTHZ_KEY_FILE")
 
 	return c, nil
 }
