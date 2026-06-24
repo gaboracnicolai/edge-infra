@@ -16,6 +16,15 @@ config:
   xdsNodeId: "edge-proxy"
   reconcileIntervalMs: 5000
 
+# Gateway HTTP rate limiting (Envoy local_ratelimit, per listener, per Envoy
+# instance). Fail-open: a limiter problem never blocks traffic. Defaults are
+# generous (100 req/s, burst 200) so only floods are throttled.
+rateLimit:
+  enabled: true
+  maxTokens: 200       # burst size
+  tokensPerFill: 100   # tokens refilled each interval
+  fillIntervalMs: 1000
+
 postgres:
   existingSecret: edge-control-plane-postgres
   secretKey: dsn

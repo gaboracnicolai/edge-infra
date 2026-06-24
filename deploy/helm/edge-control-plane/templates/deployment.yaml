@@ -44,6 +44,14 @@ spec:
               value: {{ .Values.config.xdsNodeId | quote }}
             - name: XDS_RECONCILE_INTERVAL_MS
               value: {{ .Values.config.reconcileIntervalMs | quote }}
+            - name: GW_RATELIMIT_ENABLED
+              value: {{ .Values.rateLimit.enabled | quote }}
+            - name: GW_RATELIMIT_MAX_TOKENS
+              value: {{ .Values.rateLimit.maxTokens | quote }}
+            - name: GW_RATELIMIT_TOKENS_PER_FILL
+              value: {{ .Values.rateLimit.tokensPerFill | quote }}
+            - name: GW_RATELIMIT_FILL_INTERVAL_MS
+              value: {{ .Values.rateLimit.fillIntervalMs | quote }}
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

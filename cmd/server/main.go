@@ -29,6 +29,7 @@ import (
 	"github.com/edge-infra/control-plane/internal/ha"
 	"github.com/edge-infra/control-plane/internal/store"
 	"github.com/edge-infra/control-plane/internal/xds"
+	"github.com/edge-infra/control-plane/internal/xds/builders"
 )
 
 func main() {
@@ -60,6 +61,12 @@ func run(log *slog.Logger) error {
 
 	cache := cachev3.NewSnapshotCache(true, cachev3.IDHash{}, slogCacheLogger{log: log})
 	reconciler := xds.NewReconciler(cache, pgStore, cfg.NodeID, log)
+	reconciler.WithRateLimit(builders.RateLimitOptions{
+		Enabled:       cfg.RateLimitEnabled,
+		MaxTokens:     cfg.RateLimitMaxTokens,
+		TokensPerFill: cfg.RateLimitTokensPerFill,
+		FillInterval:  cfg.RateLimitFillInterval,
+	})
 
 	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
 	if cfg.RedisAddr != "" {
