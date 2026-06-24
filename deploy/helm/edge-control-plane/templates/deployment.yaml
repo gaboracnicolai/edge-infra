@@ -70,6 +70,26 @@ spec:
             - name: EXT_AUTHZ_KEY_FILE
               value: {{ .Values.extAuthz.keyFile | quote }}
             {{- end }}
+            - name: RLS_ENABLED
+              value: {{ .Values.rateLimitService.enabled | quote }}
+            - name: RLS_ADDRESS
+              value: {{ .Values.rateLimitService.address | quote }}
+            - name: RLS_PORT
+              value: {{ .Values.rateLimitService.port | quote }}
+            - name: RLS_DOMAIN
+              value: {{ .Values.rateLimitService.domain | quote }}
+            {{- if .Values.rateLimitService.caFile }}
+            - name: RLS_CA_FILE
+              value: {{ .Values.rateLimitService.caFile | quote }}
+            {{- end }}
+            {{- if .Values.rateLimitService.certFile }}
+            - name: RLS_CERT_FILE
+              value: {{ .Values.rateLimitService.certFile | quote }}
+            {{- end }}
+            {{- if .Values.rateLimitService.keyFile }}
+            - name: RLS_KEY_FILE
+              value: {{ .Values.rateLimitService.keyFile | quote }}
+            {{- end }}
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

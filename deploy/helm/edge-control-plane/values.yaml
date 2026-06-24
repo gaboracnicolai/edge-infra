@@ -40,6 +40,20 @@ extAuthz:
   certFile: ""
   keyFile: ""
 
+# Gateway rate-limit service (Envoy global ratelimit → RLS over gRPC) — the
+# cross-instance, identity-keyed shared layer. FAIL-OPEN: if the RLS is
+# unreachable Envoy allows and the per-instance local_ratelimit floor still
+# applies. Opt-in (default off; needs the auth front so x-user-id flows).
+rateLimitService:
+  enabled: false
+  address: edge-ratelimit.infra.svc.cluster.local
+  port: 8082
+  domain: edge
+  # Upstream (m)TLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD.
+  caFile: ""
+  certFile: ""
+  keyFile: ""
+
 postgres:
   existingSecret: edge-control-plane-postgres
   secretKey: dsn

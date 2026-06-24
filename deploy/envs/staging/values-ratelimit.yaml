@@ -1,0 +1,5 @@
+replicaCount: 1
+
+# Set redis.addr to make the limiter cross-instance; empty = in-process only.
+redis:
+  addr: ""

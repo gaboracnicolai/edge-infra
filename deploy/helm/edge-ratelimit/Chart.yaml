@@ -1,0 +1,6 @@
+apiVersion: v2
+name: edge-ratelimit
+description: Talyvor gateway rate-limit service (Envoy RLS, Redis token bucket)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -10,7 +10,7 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
-func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route) []types.Resource {
+func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route, rls RateLimitServiceOptions) []types.Resource {
 	byGateway := make(map[string][]store.Route, len(gateways))
 	for _, r := range routes {
 		byGateway[r.GatewayID] = append(byGateway[r.GatewayID], r)
@@ -20,13 +20,18 @@ func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route) []types.R
 	for _, g := range gateways {
 		out = append(out, &routev3.RouteConfiguration{
 			Name:         RouteConfigName(g.Name),
-			VirtualHosts: virtualHostsFor(g, byGateway[g.ID]),
+			VirtualHosts: virtualHostsFor(g, byGateway[g.ID], rls),
 		})
 	}
 	return out
 }
 
-func virtualHostsFor(g store.Gateway, routes []store.Route) []*routev3.VirtualHost {
+func virtualHostsFor(g store.Gateway, routes []store.Route, rls RateLimitServiceOptions) []*routev3.VirtualHost {
+	var rlActions []*routev3.RateLimit
+	if rls.Enabled {
+		rlActions = rateLimitActions()
+	}
+
 	type bucket struct {
 		hosts  []string
 		routes []store.Route
@@ -50,8 +55,9 @@ func virtualHostsFor(g store.Gateway, routes []store.Route) []*routev3.VirtualHo
 
 	if len(keys) == 0 {
 		return []*routev3.VirtualHost{{
-			Name:    g.Name + "_default",
-			Domains: []string{"*"},
+			Name:       g.Name + "_default",
+			Domains:    []string{"*"},
+			RateLimits: rlActions,
 		}}
 	}
 
@@ -59,9 +65,10 @@ func virtualHostsFor(g store.Gateway, routes []store.Route) []*routev3.VirtualHo
 	for _, k := range keys {
 		b := byHosts[k]
 		vhs = append(vhs, &routev3.VirtualHost{
-			Name:    g.Name + "_" + k,
-			Domains: b.hosts,
-			Routes:  routesFor(b.routes),
+			Name:       g.Name + "_" + k,
+			Domains:    b.hosts,
+			Routes:     routesFor(b.routes),
+			RateLimits: rlActions,
 		})
 	}
 	return vhs

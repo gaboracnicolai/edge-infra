@@ -16,7 +16,7 @@ import (
 func TestBuildListeners_ExtAuthz_FailClosedAndOrdered(t *testing.T) {
 	rl := RateLimitOptions{Enabled: true, MaxTokens: 10, TokensPerFill: 10, FillInterval: time.Second}
 	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ea)[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ea, RateLimitServiceOptions{})[0])
 
 	// Order: local_ratelimit (pre-auth IP throttle) → ext_authz → router.
 	got := filterNames(hcm)
@@ -43,7 +43,7 @@ func TestBuildListeners_ExtAuthz_FailClosedAndOrdered(t *testing.T) {
 }
 
 func TestBuildListeners_ExtAuthzDisabled_NoFilter(t *testing.T) {
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{}, ExtAuthzOptions{Enabled: false})[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{}, ExtAuthzOptions{Enabled: false}, RateLimitServiceOptions{})[0])
 	if slices.Contains(filterNames(hcm), extAuthzFilterName) {
 		t.Fatal("ext_authz filter must not be emitted when disabled")
 	}
@@ -52,7 +52,7 @@ func TestBuildListeners_ExtAuthzDisabled_NoFilter(t *testing.T) {
 func TestBuildClusters_ExtAuthz_AuthServiceClusterEmitted(t *testing.T) {
 	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
 	var found *clusterv3.Cluster
-	for _, r := range BuildClusters(nil, ea) {
+	for _, r := range BuildClusters(nil, ea, RateLimitServiceOptions{}) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
 			found = c
 		}
@@ -67,7 +67,7 @@ func TestBuildClusters_ExtAuthz_AuthServiceClusterEmitted(t *testing.T) {
 }
 
 func TestBuildClusters_ExtAuthzDisabled_NoAuthServiceCluster(t *testing.T) {
-	for _, r := range BuildClusters(nil, ExtAuthzOptions{Enabled: false}) {
+	for _, r := range BuildClusters(nil, ExtAuthzOptions{Enabled: false}, RateLimitServiceOptions{}) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
 			t.Fatal("auth_service cluster must not be emitted when disabled")
 		}

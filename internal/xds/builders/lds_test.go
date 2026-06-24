@@ -44,7 +44,7 @@ func sampleGateway() store.Gateway {
 }
 
 func TestBuildListeners_RateLimitDisabled_RouterOnly(t *testing.T) {
-	res := BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{Enabled: false}, ExtAuthzOptions{})
+	res := BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{Enabled: false}, ExtAuthzOptions{}, RateLimitServiceOptions{})
 	got := filterNames(hcmFromListener(t, res[0]))
 	if len(got) != 1 || got[0] != wellknown.Router {
 		t.Fatalf("filters = %v; want [%s]", got, wellknown.Router)
@@ -53,7 +53,7 @@ func TestBuildListeners_RateLimitDisabled_RouterOnly(t *testing.T) {
 
 func TestBuildListeners_RateLimitEnabled_FilterPresentAndOrdered(t *testing.T) {
 	rl := RateLimitOptions{Enabled: true, MaxTokens: 200, TokensPerFill: 100, FillInterval: time.Second}
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ExtAuthzOptions{})[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
 
 	// local_ratelimit must precede the router (router is always last).
 	got := filterNames(hcm)

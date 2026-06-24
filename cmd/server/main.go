@@ -75,6 +75,15 @@ func run(log *slog.Logger) error {
 		CertFile: cfg.ExtAuthzCertFile,
 		KeyFile:  cfg.ExtAuthzKeyFile,
 	})
+	reconciler.WithRateLimitService(builders.RateLimitServiceOptions{
+		Enabled:  cfg.RateLimitServiceEnabled,
+		Address:  cfg.RateLimitServiceAddress,
+		Port:     cfg.RateLimitServicePort,
+		Domain:   cfg.RateLimitServiceDomain,
+		CAFile:   cfg.RateLimitServiceCAFile,
+		CertFile: cfg.RateLimitServiceCertFile,
+		KeyFile:  cfg.RateLimitServiceKeyFile,
+	})
 
 	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
 	if cfg.RedisAddr != "" {

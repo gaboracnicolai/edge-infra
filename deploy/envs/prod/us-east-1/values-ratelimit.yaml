@@ -1,0 +1,8 @@
+replicaCount: 2
+
+# Cross-instance limiting: point at the regional Redis. On any Redis error the
+# limiter degrades to its in-process bucket — it never blocks traffic.
+redis:
+  addr: redis-master.infra.svc.cluster.local:6379
+  existingSecret: edge-redis
+  secretKey: password
