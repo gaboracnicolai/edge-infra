@@ -1,9 +1,10 @@
-# Multi-stage build for the Go xDS control plane, Kubernetes controller, and
-# token issuer.
+# Multi-stage build for the Go xDS control plane, Kubernetes controller, token
+# issuer, and rate-limit service.
 #
 #   docker build --target server     -t edge-control-plane .
 #   docker build --target controller -t edge-controller    .
 #   docker build --target issuer     -t edge-issuer        .
+#   docker build --target ratelimit  -t edge-ratelimit     .
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 WORKDIR /app
@@ -22,6 +23,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/controller ./cmd/controller
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/issuer ./cmd/issuer
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -o /bin/ratelimit ./cmd/ratelimit
 
 
 FROM gcr.io/distroless/static:nonroot AS server
@@ -42,3 +45,10 @@ COPY --from=builder /bin/issuer /issuer
 USER nonroot:nonroot
 EXPOSE 8081
 ENTRYPOINT ["/issuer"]
+
+
+FROM gcr.io/distroless/static:nonroot AS ratelimit
+COPY --from=builder /bin/ratelimit /ratelimit
+USER nonroot:nonroot
+EXPOSE 8082 8083
+ENTRYPOINT ["/ratelimit"]

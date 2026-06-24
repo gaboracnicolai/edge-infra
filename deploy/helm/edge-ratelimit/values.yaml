@@ -1,0 +1,40 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/gaboracnicolai/edge-ratelimit
+  tag: "latest"  # pin to the SHA you pushed
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP   # gateway-only; reached by Envoy over gRPC
+  grpcPort: 8082
+  healthPort: 8083
+
+config:
+  rpm: 60    # requests per minute per descriptor (per user / per IP)
+  burst: 90  # token-bucket capacity
+
+# Redis makes the limiter cross-instance. Leave addr empty for in-process
+# limiting only (per replica). On any Redis error the limiter degrades to the
+# in-process bucket — it never blocks.
+redis:
+  addr: ""           # e.g. redis-master.infra.svc.cluster.local:6379
+  existingSecret: "" # Secret with key "password"; empty = no auth
+  secretKey: password
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations: {}
+
+nameOverride: ""
+fullnameOverride: ""

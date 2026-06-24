@@ -34,6 +34,7 @@ helm-lint:
 	helm lint --strict deploy/helm/edge-osb
 	helm lint --strict deploy/helm/auth-service
 	helm lint --strict deploy/helm/edge-issuer
+	helm lint --strict deploy/helm/edge-ratelimit
 
 # Render each chart with its staging values to verify templates produce valid YAML.
 helm-template-dry-run:
@@ -49,6 +50,8 @@ helm-template-dry-run:
 	  --values deploy/envs/staging/values-auth-service.yaml
 	helm template edge-issuer deploy/helm/edge-issuer \
 	  --values deploy/envs/staging/values-issuer.yaml
+	helm template edge-ratelimit deploy/helm/edge-ratelimit \
+	  --values deploy/envs/staging/values-ratelimit.yaml
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:
@@ -75,6 +78,6 @@ docker-build-local:
 # Diff every managed Application against its in-cluster state.
 argocd-diff:
 	@for app in edge-control-plane edge-controller edge-proxy \
-	            edge-osb auth-service edge-issuer edge-policies monitoring; do \
+	            edge-osb auth-service edge-issuer edge-ratelimit edge-policies monitoring; do \
 	    argocd app diff $$app --local; \
 	done
