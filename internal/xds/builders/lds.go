@@ -1,15 +1,21 @@
 package builders
 
 import (
+	"math"
+	"strconv"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/edge-infra/control-plane/internal/store"
 )
@@ -65,10 +71,14 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions) *listenerv3.Listen
 	}
 }
 
-// httpFilters returns the HCM filter chain. The router must always be last.
+// httpFilters returns the HCM filter chain. The local_ratelimit filter (when
+// enabled) runs before the router, which must always be last.
 func httpFilters(rl RateLimitOptions) []*hcmv3.HttpFilter {
-	// RED: the local_ratelimit filter is not added yet — only the router.
-	return []*hcmv3.HttpFilter{routerFilter()}
+	var filters []*hcmv3.HttpFilter
+	if rl.Enabled {
+		filters = append(filters, localRateLimitFilter(rl))
+	}
+	return append(filters, routerFilter())
 }
 
 func routerFilter() *hcmv3.HttpFilter {
@@ -76,6 +86,53 @@ func routerFilter() *hcmv3.HttpFilter {
 		Name: wellknown.Router,
 		ConfigType: &hcmv3.HttpFilter_TypedConfig{
 			TypedConfig: mustAny(&routerv3.Router{}),
+		},
+	}
+}
+
+// localRateLimitFilter builds a per-listener Envoy local_ratelimit filter: a
+// token bucket that returns 429 + Retry-After when exhausted. It is enforced
+// at 100% (not shadow mode). Being an in-Envoy filter it is inherently
+// fail-open — it can throttle, but a problem with it cannot 503 the gateway.
+func localRateLimitFilter(rl RateLimitOptions) *hcmv3.HttpFilter {
+	fill := rl.FillInterval
+	if fill <= 0 {
+		fill = time.Second
+	}
+	retryAfter := strconv.Itoa(int(math.Ceil(fill.Seconds())))
+
+	cfg := &lrlv3.LocalRateLimit{
+		StatPrefix: "http_local_rate_limit",
+		Status:     &typev3.HttpStatus{Code: typev3.StatusCode_TooManyRequests},
+		TokenBucket: &typev3.TokenBucket{
+			MaxTokens:     rl.MaxTokens,
+			TokensPerFill: wrapperspb.UInt32(rl.TokensPerFill),
+			FillInterval:  durationpb.New(fill),
+		},
+		FilterEnabled:  fullPercent(),
+		FilterEnforced: fullPercent(),
+		ResponseHeadersToAdd: []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   "Retry-After",
+				Value: retryAfter,
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}},
+	}
+	return &hcmv3.HttpFilter{
+		Name: "envoy.filters.http.local_ratelimit",
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{
+			TypedConfig: mustAny(cfg),
+		},
+	}
+}
+
+// fullPercent is 100% — the filter applies to and enforces every request.
+func fullPercent() *corev3.RuntimeFractionalPercent {
+	return &corev3.RuntimeFractionalPercent{
+		DefaultValue: &typev3.FractionalPercent{
+			Numerator:   100,
+			Denominator: typev3.FractionalPercent_HUNDRED,
 		},
 	}
 }
