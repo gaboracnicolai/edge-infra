@@ -10,7 +10,7 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
-func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route) []types.Resource {
+func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route, rls RateLimitServiceOptions) []types.Resource {
 	byGateway := make(map[string][]store.Route, len(gateways))
 	for _, r := range routes {
 		byGateway[r.GatewayID] = append(byGateway[r.GatewayID], r)
@@ -20,13 +20,13 @@ func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route) []types.R
 	for _, g := range gateways {
 		out = append(out, &routev3.RouteConfiguration{
 			Name:         RouteConfigName(g.Name),
-			VirtualHosts: virtualHostsFor(g, byGateway[g.ID]),
+			VirtualHosts: virtualHostsFor(g, byGateway[g.ID], rls),
 		})
 	}
 	return out
 }
 
-func virtualHostsFor(g store.Gateway, routes []store.Route) []*routev3.VirtualHost {
+func virtualHostsFor(g store.Gateway, routes []store.Route, rls RateLimitServiceOptions) []*routev3.VirtualHost {
 	type bucket struct {
 		hosts  []string
 		routes []store.Route

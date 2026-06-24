@@ -44,6 +44,18 @@ type Config struct {
 	ExtAuthzCAFile   string // upstream TLS trust CA (presence enables TLS)
 	ExtAuthzCertFile string // upstream mTLS client cert (optional)
 	ExtAuthzKeyFile  string // upstream mTLS client key (optional)
+
+	// Gateway rate-limit service (Envoy global ratelimit → RLS over gRPC) —
+	// the cross-instance, identity-keyed shared layer that further-restricts
+	// the per-instance local_ratelimit floor. FAIL-OPEN: if the RLS is
+	// unreachable Envoy allows (the floor still applies). Opt-in.
+	RateLimitServiceEnabled  bool
+	RateLimitServiceAddress  string
+	RateLimitServicePort     uint32
+	RateLimitServiceDomain   string
+	RateLimitServiceCAFile   string
+	RateLimitServiceCertFile string
+	RateLimitServiceKeyFile  string
 }
 
 func FromEnv() (*Config, error) {
@@ -86,6 +98,14 @@ func FromEnv() (*Config, error) {
 	c.ExtAuthzCAFile = os.Getenv("EXT_AUTHZ_CA_FILE")
 	c.ExtAuthzCertFile = os.Getenv("EXT_AUTHZ_CERT_FILE")
 	c.ExtAuthzKeyFile = os.Getenv("EXT_AUTHZ_KEY_FILE")
+
+	c.RateLimitServiceEnabled = getenvBool("RLS_ENABLED", false)
+	c.RateLimitServiceAddress = getenv("RLS_ADDRESS", "ratelimit.infra.svc.cluster.local")
+	c.RateLimitServicePort = getenvU32("RLS_PORT", 8082)
+	c.RateLimitServiceDomain = getenv("RLS_DOMAIN", "edge")
+	c.RateLimitServiceCAFile = os.Getenv("RLS_CA_FILE")
+	c.RateLimitServiceCertFile = os.Getenv("RLS_CERT_FILE")
+	c.RateLimitServiceKeyFile = os.Getenv("RLS_KEY_FILE")
 
 	return c, nil
 }

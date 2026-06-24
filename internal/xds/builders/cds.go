@@ -8,8 +8,8 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
-func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions) []types.Resource {
-	out := make([]types.Resource, 0, len(clusters)+1)
+func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
+	out := make([]types.Resource, 0, len(clusters)+2)
 	for _, c := range clusters {
 		out = append(out, &clusterv3.Cluster{
 			Name:                 c.Name,
@@ -24,6 +24,7 @@ func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions) []types.Resourc
 	if ea.Enabled {
 		out = append(out, authServiceCluster(ea))
 	}
+	// RED: the rate-limit service cluster is not emitted yet.
 	return out
 }
 

@@ -30,6 +30,7 @@ type Reconciler struct {
 	ha        ha.Coordinator // nil = single-instance mode
 	rateLimit builders.RateLimitOptions
 	extAuthz  builders.ExtAuthzOptions
+	rls       builders.RateLimitServiceOptions
 
 	localVersion atomic.Uint64
 	localLast    atomic.Pointer[reconcileResult]
@@ -76,6 +77,14 @@ func (r *Reconciler) WithExtAuthz(opts builders.ExtAuthzOptions) {
 	r.extAuthz = opts
 }
 
+// WithRateLimitService configures the Envoy global ratelimit filter, its RLS
+// cluster, and per-route descriptors. Must be called before Run. The zero
+// value (Enabled=false) leaves listeners/clusters/routes unchanged. The filter
+// is fail-open.
+func (r *Reconciler) WithRateLimitService(opts builders.RateLimitServiceOptions) {
+	r.rls = opts
+}
+
 // TriggerNow requests an out-of-band reconcile. It is safe to call from any
 // goroutine and never blocks: if a trigger is already pending the call is a
 // no-op (coalescing semantics).
@@ -95,9 +104,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, r.rateLimit, r.extAuthz),
-		resourcev3.RouteType:    builders.BuildRouteConfigs(domain.Gateways, domain.Routes),
-		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters, r.extAuthz),
+		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, r.rateLimit, r.extAuthz, r.rls),
+		resourcev3.RouteType:    builders.BuildRouteConfigs(domain.Gateways, domain.Routes, r.rls),
+		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters, r.extAuthz, r.rls),
 		resourcev3.EndpointType: builders.BuildEndpoints(domain.Clusters, domain.Endpoints),
 		resourcev3.SecretType:   builders.BuildSecrets(domain.Secrets),
 	}

@@ -30,15 +30,15 @@ type RateLimitOptions struct {
 	FillInterval  time.Duration // refill period (must be > 0)
 }
 
-func BuildListeners(gateways []store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions) []types.Resource {
+func BuildListeners(gateways []store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
 	out := make([]types.Resource, 0, len(gateways))
 	for _, g := range gateways {
-		out = append(out, listenerForGateway(g, rl, ea))
+		out = append(out, listenerForGateway(g, rl, ea, rls))
 	}
 	return out
 }
 
-func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions) *listenerv3.Listener {
+func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) *listenerv3.Listener {
 	hcm := &hcmv3.HttpConnectionManager{
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
 		StatPrefix: g.Name,
@@ -48,7 +48,7 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions
 				RouteConfigName: RouteConfigName(g.Name),
 			},
 		},
-		HttpFilters: httpFilters(rl, ea),
+		HttpFilters: httpFilters(rl, ea, rls),
 	}
 
 	filterChain := &listenerv3.FilterChain{
@@ -75,7 +75,7 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions
 // pre-auth IP throttle that shields the auth-service from unauthenticated
 // floods) → ext_authz → router (always last). Phase B's identity-keyed limiter
 // will sit after ext_authz, once x-user-id flows.
-func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions) []*hcmv3.HttpFilter {
+func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) []*hcmv3.HttpFilter {
 	var filters []*hcmv3.HttpFilter
 	if rl.Enabled {
 		filters = append(filters, localRateLimitFilter(rl))
@@ -83,6 +83,8 @@ func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions) []*hcmv3.HttpFilter {
 	if ea.Enabled {
 		filters = append(filters, extAuthzFilter(ea))
 	}
+	// RED: the global ratelimit filter (the shared identity-keyed layer) is
+	// not emitted yet. It lands next, after ext_authz and before the router.
 	return append(filters, routerFilter())
 }
 
