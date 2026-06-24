@@ -83,8 +83,9 @@ func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOp
 	if ea.Enabled {
 		filters = append(filters, extAuthzFilter(ea))
 	}
-	// RED: the global ratelimit filter (the shared identity-keyed layer) is
-	// not emitted yet. It lands next, after ext_authz and before the router.
+	if rls.Enabled {
+		filters = append(filters, rateLimitFilter(rls))
+	}
 	return append(filters, routerFilter())
 }
 

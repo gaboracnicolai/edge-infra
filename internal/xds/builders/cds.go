@@ -24,7 +24,9 @@ func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions, rls RateLimitSe
 	if ea.Enabled {
 		out = append(out, authServiceCluster(ea))
 	}
-	// RED: the rate-limit service cluster is not emitted yet.
+	if rls.Enabled {
+		out = append(out, rlsCluster(rls))
+	}
 	return out
 }
 
