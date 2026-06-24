@@ -80,8 +80,9 @@ func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions) []*hcmv3.HttpFilter {
 	if rl.Enabled {
 		filters = append(filters, localRateLimitFilter(rl))
 	}
-	// RED: the ext_authz filter is not emitted yet — only local_ratelimit and
-	// the router. The filter (and its cluster) land next.
+	if ea.Enabled {
+		filters = append(filters, extAuthzFilter(ea))
+	}
 	return append(filters, routerFilter())
 }
 

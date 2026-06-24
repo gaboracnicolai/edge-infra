@@ -52,6 +52,24 @@ spec:
               value: {{ .Values.rateLimit.tokensPerFill | quote }}
             - name: GW_RATELIMIT_FILL_INTERVAL_MS
               value: {{ .Values.rateLimit.fillIntervalMs | quote }}
+            - name: EXT_AUTHZ_ENABLED
+              value: {{ .Values.extAuthz.enabled | quote }}
+            - name: EXT_AUTHZ_ADDRESS
+              value: {{ .Values.extAuthz.address | quote }}
+            - name: EXT_AUTHZ_PORT
+              value: {{ .Values.extAuthz.port | quote }}
+            {{- if .Values.extAuthz.caFile }}
+            - name: EXT_AUTHZ_CA_FILE
+              value: {{ .Values.extAuthz.caFile | quote }}
+            {{- end }}
+            {{- if .Values.extAuthz.certFile }}
+            - name: EXT_AUTHZ_CERT_FILE
+              value: {{ .Values.extAuthz.certFile | quote }}
+            {{- end }}
+            {{- if .Values.extAuthz.keyFile }}
+            - name: EXT_AUTHZ_KEY_FILE
+              value: {{ .Values.extAuthz.keyFile | quote }}
+            {{- end }}
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

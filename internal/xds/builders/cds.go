@@ -21,7 +21,9 @@ func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions) []types.Resourc
 			},
 		})
 	}
-	// RED: the static auth-service cluster for ext_authz is not emitted yet.
+	if ea.Enabled {
+		out = append(out, authServiceCluster(ea))
+	}
 	return out
 }
 

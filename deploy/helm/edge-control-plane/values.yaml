@@ -25,6 +25,21 @@ rateLimit:
   tokensPerFill: 100   # tokens refilled each interval
   fillIntervalMs: 1000
 
+# Gateway ext_authz (Envoy → auth-service gRPC). FAIL-CLOSED: if the
+# auth-service is unreachable Envoy denies. Opt-in (default off) because
+# enabling it without a reachable auth-service denies ALL traffic suite-wide —
+# flip it on at cutover once the auth front is deployed and verified.
+extAuthz:
+  enabled: false
+  address: auth-service.infra.svc.cluster.local
+  port: 50051
+  # Upstream (m)TLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD — the
+  # proxy reads them, not the control plane. Leave caFile empty for plaintext;
+  # the auth-service deploys with TLS, so prod must set these.
+  caFile: ""
+  certFile: ""
+  keyFile: ""
+
 postgres:
   existingSecret: edge-control-plane-postgres
   secretKey: dsn
