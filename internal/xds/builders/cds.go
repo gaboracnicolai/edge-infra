@@ -8,8 +8,8 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
-func BuildClusters(clusters []store.Cluster) []types.Resource {
-	out := make([]types.Resource, 0, len(clusters))
+func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions) []types.Resource {
+	out := make([]types.Resource, 0, len(clusters)+1)
 	for _, c := range clusters {
 		out = append(out, &clusterv3.Cluster{
 			Name:                 c.Name,
@@ -21,6 +21,7 @@ func BuildClusters(clusters []store.Cluster) []types.Resource {
 			},
 		})
 	}
+	// RED: the static auth-service cluster for ext_authz is not emitted yet.
 	return out
 }
 
