@@ -28,6 +28,7 @@ type Reconciler struct {
 	log       *slog.Logger
 	triggerCh chan struct{}
 	ha        ha.Coordinator // nil = single-instance mode
+	rateLimit builders.RateLimitOptions
 
 	localVersion atomic.Uint64
 	localLast    atomic.Pointer[reconcileResult]
@@ -59,6 +60,13 @@ func (r *Reconciler) WithCoordinator(c ha.Coordinator) {
 	r.ha = c
 }
 
+// WithRateLimit configures the per-listener Envoy local_ratelimit filter
+// emitted on every gateway listener. Must be called before Run. The zero
+// value (Enabled=false) leaves listeners unchanged.
+func (r *Reconciler) WithRateLimit(opts builders.RateLimitOptions) {
+	r.rateLimit = opts
+}
+
 // TriggerNow requests an out-of-band reconcile. It is safe to call from any
 // goroutine and never blocks: if a trigger is already pending the call is a
 // no-op (coalescing semantics).
@@ -78,7 +86,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways),
+		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, r.rateLimit),
 		resourcev3.RouteType:    builders.BuildRouteConfigs(domain.Gateways, domain.Routes),
 		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters),
 		resourcev3.EndpointType: builders.BuildEndpoints(domain.Clusters, domain.Endpoints),

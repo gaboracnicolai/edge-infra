@@ -1,6 +1,8 @@
 package builders
 
 import (
+	"time"
+
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
@@ -12,15 +14,25 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
-func BuildListeners(gateways []store.Gateway) []types.Resource {
+// RateLimitOptions configures the per-listener Envoy local_ratelimit filter.
+// It is intentionally fail-open: when the limiter is disabled or misconfigured
+// the gateway keeps serving traffic. This is the opposite posture from auth.
+type RateLimitOptions struct {
+	Enabled       bool
+	MaxTokens     uint32        // burst size
+	TokensPerFill uint32        // tokens added each fill interval
+	FillInterval  time.Duration // refill period (must be > 0)
+}
+
+func BuildListeners(gateways []store.Gateway, rl RateLimitOptions) []types.Resource {
 	out := make([]types.Resource, 0, len(gateways))
 	for _, g := range gateways {
-		out = append(out, listenerForGateway(g))
+		out = append(out, listenerForGateway(g, rl))
 	}
 	return out
 }
 
-func listenerForGateway(g store.Gateway) *listenerv3.Listener {
+func listenerForGateway(g store.Gateway, rl RateLimitOptions) *listenerv3.Listener {
 	hcm := &hcmv3.HttpConnectionManager{
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
 		StatPrefix: g.Name,
@@ -30,12 +42,7 @@ func listenerForGateway(g store.Gateway) *listenerv3.Listener {
 				RouteConfigName: RouteConfigName(g.Name),
 			},
 		},
-		HttpFilters: []*hcmv3.HttpFilter{{
-			Name: wellknown.Router,
-			ConfigType: &hcmv3.HttpFilter_TypedConfig{
-				TypedConfig: mustAny(&routerv3.Router{}),
-			},
-		}},
+		HttpFilters: httpFilters(rl),
 	}
 
 	filterChain := &listenerv3.FilterChain{
@@ -55,6 +62,21 @@ func listenerForGateway(g store.Gateway) *listenerv3.Listener {
 		Name:         g.Name,
 		Address:      socketAddress("0.0.0.0", g.Port),
 		FilterChains: []*listenerv3.FilterChain{filterChain},
+	}
+}
+
+// httpFilters returns the HCM filter chain. The router must always be last.
+func httpFilters(rl RateLimitOptions) []*hcmv3.HttpFilter {
+	// RED: the local_ratelimit filter is not added yet — only the router.
+	return []*hcmv3.HttpFilter{routerFilter()}
+}
+
+func routerFilter() *hcmv3.HttpFilter {
+	return &hcmv3.HttpFilter{
+		Name: wellknown.Router,
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{
+			TypedConfig: mustAny(&routerv3.Router{}),
+		},
 	}
 }
 

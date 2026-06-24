@@ -25,6 +25,14 @@ type Config struct {
 	TLSCertFile string
 	TLSKeyFile  string
 	TLSCAFile   string
+
+	// Gateway rate limiting (Envoy local_ratelimit, a per-listener token
+	// bucket served via LDS). Fail-open by design: unlike auth, a limiter
+	// problem must never block traffic. Per Envoy instance.
+	RateLimitEnabled       bool
+	RateLimitMaxTokens     uint32        // burst size
+	RateLimitTokensPerFill uint32        // tokens added each fill interval
+	RateLimitFillInterval  time.Duration // refill period (must be > 0)
 }
 
 func FromEnv() (*Config, error) {
@@ -51,7 +59,41 @@ func FromEnv() (*Config, error) {
 		}
 		c.ReconcileInterval = time.Duration(ms) * time.Millisecond
 	}
+
+	c.RateLimitEnabled = getenvBool("GW_RATELIMIT_ENABLED", true)
+	c.RateLimitMaxTokens = getenvU32("GW_RATELIMIT_MAX_TOKENS", 200)
+	c.RateLimitTokensPerFill = getenvU32("GW_RATELIMIT_TOKENS_PER_FILL", 100)
+	fillMS := getenvU32("GW_RATELIMIT_FILL_INTERVAL_MS", 1000)
+	if fillMS == 0 {
+		fillMS = 1000 // Envoy requires fill_interval > 0
+	}
+	c.RateLimitFillInterval = time.Duration(fillMS) * time.Millisecond
+
 	return c, nil
+}
+
+func getenvBool(k string, def bool) bool {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
+}
+
+func getenvU32(k string, def uint32) uint32 {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		return def
+	}
+	return uint32(n)
 }
 
 func getenv(k, def string) string {
