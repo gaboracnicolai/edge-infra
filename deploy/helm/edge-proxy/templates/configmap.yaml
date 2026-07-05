@@ -48,10 +48,17 @@ data:
                           address: {{ .Values.xds.controlPlaneHost }}
                           port_value: {{ .Values.xds.controlPlanePort }}
           {{- if .Values.xds.tls.enabled }}
+          # xDS transport mTLS to the control plane. The client cert (mounted
+          # from envoy-xds-client-tls-secret at xds.tls.mountPath) satisfies the
+          # server's RequireAndVerifyClientCert; the server is verified by CA +
+          # SAN. SAN is pinned to controlPlaneHost — the control-plane server
+          # cert SAN (k8s/certs/control-plane-cert.yaml dnsNames) MUST equal this
+          # host, or the handshake fails.
           transport_socket:
             name: envoy.transport_sockets.tls
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              sni: {{ .Values.xds.controlPlaneHost }}
               common_tls_context:
                 tls_certificates:
                   - certificate_chain:
@@ -61,4 +68,8 @@ data:
                 validation_context:
                   trusted_ca:
                     filename: {{ .Values.xds.tls.mountPath }}/ca.crt
+                  match_typed_subject_alt_names:
+                    - san_type: DNS
+                      matcher:
+                        exact: {{ .Values.xds.controlPlaneHost }}
           {{- end }}

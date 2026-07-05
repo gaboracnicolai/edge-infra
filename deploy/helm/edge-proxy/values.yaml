@@ -14,7 +14,10 @@ xds:
   controlPlaneHost: edge-control-plane.infra.svc.cluster.local
   controlPlanePort: 18000
   tls:
-    enabled: false
+    # mTLS to the control-plane xDS server, which requires client certs
+    # unconditionally. Gates BOTH the bootstrap transport_socket and the client
+    # cert mount together (no plaintext half-state). Keep true fleet-wide.
+    enabled: true
     existingSecret: envoy-xds-client-tls-secret
     mountPath: /etc/xds-client-tls
 

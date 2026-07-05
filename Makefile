@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run argocd-apply argocd-diff docker-build-local
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls argocd-apply argocd-diff docker-build-local
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -52,6 +52,12 @@ helm-template-dry-run:
 	  --values deploy/envs/staging/values-issuer.yaml
 	helm template edge-ratelimit deploy/helm/edge-ratelimit \
 	  --values deploy/envs/staging/values-ratelimit.yaml
+
+# Invariant lock: assert the edge-proxy bootstrap renders xDS mutual TLS with
+# peer pinning (SNI + SAN==controlPlaneHost) for base + every env overlay.
+# Fails if anyone reverts xDS to plaintext or drops the SAN pin.
+verify-xds-mtls:
+	bash deploy/hack/verify-xds-mtls.sh
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:
