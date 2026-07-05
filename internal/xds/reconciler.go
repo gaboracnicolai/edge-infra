@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -32,8 +34,13 @@ type Reconciler struct {
 	extAuthz  builders.ExtAuthzOptions
 	rls       builders.RateLimitServiceOptions
 
-	localVersion atomic.Uint64
-	localLast    atomic.Pointer[reconcileResult]
+	// allowEmpty disables the empty-collapse guard (EDGE_ALLOW_EMPTY_SNAPSHOT),
+	// permitting an intentional scale-to-zero / drain. Read once at construction.
+	allowEmpty bool
+
+	localVersion          atomic.Uint64
+	localLast             atomic.Pointer[reconcileResult]
+	emptySnapshotsBlocked atomic.Uint64
 }
 
 type reconcileResult struct {
@@ -48,12 +55,27 @@ func NewReconciler(c cachev3.SnapshotCache, s store.Store, nodeID string, log *s
 		log = slog.Default()
 	}
 	return &Reconciler{
-		cache:     c,
-		store:     s,
-		nodeID:    nodeID,
-		log:       log,
-		triggerCh: make(chan struct{}, 1),
+		cache:      c,
+		store:      s,
+		nodeID:     nodeID,
+		log:        log,
+		triggerCh:  make(chan struct{}, 1),
+		allowEmpty: allowEmptySnapshot(),
 	}
+}
+
+// EmptySnapshotsBlocked reports how many times the empty-collapse guard has
+// suppressed a publish. Exposed for tests and future metrics wiring.
+func (r *Reconciler) EmptySnapshotsBlocked() uint64 {
+	return r.emptySnapshotsBlocked.Load()
+}
+
+// allowEmptySnapshot reports whether the empty-collapse guard is disabled via
+// EDGE_ALLOW_EMPTY_SNAPSHOT (accepts 1/t/true/… per strconv.ParseBool).
+// Defaults to false, so the guard is on unless an operator opts out.
+func allowEmptySnapshot() bool {
+	v, _ := strconv.ParseBool(os.Getenv("EDGE_ALLOW_EMPTY_SNAPSHOT"))
+	return v
 }
 
 // WithCoordinator sets the HA coordinator used for shared hash and version
@@ -114,8 +136,45 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	hash := hashResources(resources)
 
 	// Fast path: local state confirms nothing has changed on this replica.
-	if prev := r.localLast.Load(); prev != nil && prev.Hash == hash {
+	prev := r.localLast.Load()
+	if prev != nil && prev.Hash == hash {
 		return nil
+	}
+
+	// Fail-static empty-collapse guard.
+	//
+	// Once a healthy snapshot has been published (prev != nil), refuse to
+	// replace it with one that has zero listeners or zero clusters. xDS is
+	// state-of-the-world: a push with no listeners removes every listener on
+	// every proxy, and a push with no clusters blackholes every route. An
+	// empty-but-successful read is almost always a source fault (a truncated
+	// table, a failover to an un-seeded replica) rather than a real teardown,
+	// so we keep serving the last-good snapshot until the source recovers.
+	//
+	// Triggers ONLY on total collapse: a partial change (some listeners/clusters
+	// removed while others remain) is non-zero and publishes normally. First
+	// boot (prev == nil) is exempt so a fresh edge can come up empty. An
+	// intentional decommission sets EDGE_ALLOW_EMPTY_SNAPSHOT=true.
+	//
+	// Placed before resolveVersion: on a block we return without touching the
+	// local or shared (Redis) version counter, so a transient empty read can
+	// never advance or pin a version.
+	//
+	// TODO(f1-follow-up): widen the floor from "zero" to "collapsed far below
+	// last-good" (e.g. refuse if new listeners/clusters < ~50% of prev counts).
+	if prev != nil && !r.allowEmpty {
+		nListeners := len(resources[resourcev3.ListenerType])
+		nClusters := len(resources[resourcev3.ClusterType])
+		if nListeners == 0 || nClusters == 0 {
+			r.emptySnapshotsBlocked.Add(1)
+			r.log.Error("refusing to publish empty snapshot; keeping last-good config",
+				"new_listeners", nListeners,
+				"new_clusters", nClusters,
+				"last_good_version", prev.Version,
+				"blocked_total", r.emptySnapshotsBlocked.Load(),
+			)
+			return nil
+		}
 	}
 
 	version, err := r.resolveVersion(ctx, hash)

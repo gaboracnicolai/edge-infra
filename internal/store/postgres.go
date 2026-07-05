@@ -6,12 +6,31 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// pgxDB is the subset of *pgxpool.Pool the store depends on. It is an
+// interface so the snapshot read path can be exercised without a live
+// database (see postgres_test.go).
+type pgxDB interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Ping(ctx context.Context) error
+	Close()
+}
+
+// querier is the read surface shared by *pgxpool.Pool and pgx.Tx. The snapshot
+// loaders take it so LoadSnapshot can funnel every read through one tx; the
+// pool's own Query is deliberately kept off pgxDB so a read cannot bypass it.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 // PostgresStore is a Store backed by a PostgreSQL connection pool.
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool pgxDB
 }
 
 // NewPostgresStore opens a pgxpool and verifies connectivity.
@@ -40,39 +59,42 @@ func (s *PostgresStore) Close() {
 }
 
 // LoadSnapshot returns every active row across the configuration tables.
+//
+// All five reads run inside one REPEATABLE READ, read-only transaction so the
+// result is a single point-in-time view. Without this the queries could land
+// on different pooled connections and straddle a concurrent write, assembling
+// a torn snapshot (e.g. a route whose gateway or cluster was just deleted)
+// that is non-empty but internally inconsistent.
 func (s *PostgresStore) LoadSnapshot(ctx context.Context) (*Snapshot, error) {
-	snap := &Snapshot{}
-
-	gws, err := s.loadGateways(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
 	if err != nil {
+		return nil, fmt.Errorf("begin read tx: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op once committed; releases the snapshot otherwise
+
+	snap := &Snapshot{}
+	if snap.Gateways, err = loadGateways(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load gateways: %w", err)
 	}
-	snap.Gateways = gws
-
-	routes, err := s.loadRoutes(ctx)
-	if err != nil {
+	if snap.Routes, err = loadRoutes(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load routes: %w", err)
 	}
-	snap.Routes = routes
-
-	clusters, err := s.loadClusters(ctx)
-	if err != nil {
+	if snap.Clusters, err = loadClusters(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load clusters: %w", err)
 	}
-	snap.Clusters = clusters
-
-	endpoints, err := s.loadEndpoints(ctx)
-	if err != nil {
+	if snap.Endpoints, err = loadEndpoints(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load endpoints: %w", err)
 	}
-	snap.Endpoints = endpoints
-
-	secrets, err := s.loadSecrets(ctx)
-	if err != nil {
+	if snap.Secrets, err = loadSecrets(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
 	}
-	snap.Secrets = secrets
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit read tx: %w", err)
+	}
 	return snap, nil
 }
 
@@ -170,8 +192,8 @@ func (s *PostgresStore) DeleteRoute(ctx context.Context, gatewayName, pathPrefix
 	return err
 }
 
-func (s *PostgresStore) loadGateways(ctx context.Context) ([]Gateway, error) {
-	rows, err := s.pool.Query(ctx, `
+func loadGateways(ctx context.Context, q querier) ([]Gateway, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id, name, port, protocol, COALESCE(tls_secret, ''),
 		       COALESCE(node_selector::text, '{}')
 		FROM gateways
@@ -202,8 +224,8 @@ func (s *PostgresStore) loadGateways(ctx context.Context) ([]Gateway, error) {
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) loadRoutes(ctx context.Context) ([]Route, error) {
-	rows, err := s.pool.Query(ctx, `
+func loadRoutes(ctx context.Context, q querier) ([]Route, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id, name, gateway_id, hosts, path_prefix, cluster_name,
 		       COALESCE(timeout_seconds, 30)
 		FROM routes
@@ -226,8 +248,8 @@ func (s *PostgresStore) loadRoutes(ctx context.Context) ([]Route, error) {
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) loadClusters(ctx context.Context) ([]Cluster, error) {
-	rows, err := s.pool.Query(ctx, `
+func loadClusters(ctx context.Context, q querier) ([]Cluster, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id, name, connect_timeout_ms, lb_policy
 		FROM clusters
 		ORDER BY name
@@ -250,8 +272,8 @@ func (s *PostgresStore) loadClusters(ctx context.Context) ([]Cluster, error) {
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) loadEndpoints(ctx context.Context) ([]Endpoint, error) {
-	rows, err := s.pool.Query(ctx, `
+func loadEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id, cluster_id, address, port, weight
 		FROM endpoints
 		ORDER BY cluster_id, address, port
@@ -272,8 +294,8 @@ func (s *PostgresStore) loadEndpoints(ctx context.Context) ([]Endpoint, error) {
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) loadSecrets(ctx context.Context) ([]Secret, error) {
-	rows, err := s.pool.Query(ctx, `
+func loadSecrets(ctx context.Context, q querier) ([]Secret, error) {
+	rows, err := q.Query(ctx, `
 		SELECT id, name, cert_pem, key_pem
 		FROM secrets
 		ORDER BY name

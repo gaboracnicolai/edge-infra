@@ -5,9 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
-	"sync/atomic"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
@@ -36,10 +36,10 @@ func (f *fakeStore) LoadSnapshot(_ context.Context) (*store.Snapshot, error) {
 	return f.snap, nil
 }
 
-func (f *fakeStore) UpsertGateway(_ context.Context, _ store.Gateway) error      { return nil }
-func (f *fakeStore) DeleteGateway(_ context.Context, _ string) error             { return nil }
-func (f *fakeStore) UpsertRoute(_ context.Context, _ store.Route) error          { return nil }
-func (f *fakeStore) DeleteRoute(_ context.Context, _ string, _ string) error     { return nil }
+func (f *fakeStore) UpsertGateway(_ context.Context, _ store.Gateway) error  { return nil }
+func (f *fakeStore) DeleteGateway(_ context.Context, _ string) error         { return nil }
+func (f *fakeStore) UpsertRoute(_ context.Context, _ store.Route) error      { return nil }
+func (f *fakeStore) DeleteRoute(_ context.Context, _ string, _ string) error { return nil }
 
 func (f *fakeStore) Close() {}
 
@@ -215,7 +215,12 @@ func TestReconcile_StoreErrorPropagates(t *testing.T) {
 	assert.Contains(t, err.Error(), "db down")
 }
 
-func TestReconcile_EmptySnapshotProducesEmptyResources(t *testing.T) {
+func TestReconcile_FirstBootEmptySnapshotIsAllowed(t *testing.T) {
+	// The empty-collapse guard only engages once a healthy snapshot exists
+	// (localLast != nil). On first boot with a legitimately empty store there is
+	// no last-good to protect, so an empty snapshot must still publish —
+	// otherwise a fresh edge with no talyvor routes could never come up. The
+	// condition is `prev != nil && collapsed`, never `collapsed` alone.
 	cache := newCache()
 	r := NewReconciler(cache, &fakeStore{snap: &store.Snapshot{}}, testNodeID, discardLogger())
 
@@ -225,6 +230,66 @@ func TestReconcile_EmptySnapshotProducesEmptyResources(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, snap.GetResources(resourcev3.ListenerType))
 	assert.Empty(t, snap.GetResources(resourcev3.ClusterType))
+	assert.Equal(t, uint64(0), r.EmptySnapshotsBlocked(), "first boot must not trip the guard")
+}
+
+func TestReconcile_AllowEmptyEnvPermitsDrainToZero(t *testing.T) {
+	// EDGE_ALLOW_EMPTY_SNAPSHOT=true is the intentional decommission / drain
+	// escape hatch: an operator tearing the edge down must be able to publish an
+	// empty snapshot even after a healthy one. Read once at construction.
+	t.Setenv("EDGE_ALLOW_EMPTY_SNAPSHOT", "true")
+
+	cache := newCache()
+	fs := &fakeStore{snap: sampleSnapshot()}
+	r := NewReconciler(cache, fs, testNodeID, discardLogger())
+
+	require.NoError(t, r.Reconcile(context.Background()))
+	v1, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	require.Len(t, v1.GetResources(resourcev3.ListenerType), 2)
+
+	fs.snap = &store.Snapshot{}
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	v2, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	assert.Empty(t, v2.GetResources(resourcev3.ListenerType),
+		"drain must publish the empty set when explicitly allowed")
+	assert.NotEqual(t, v1.GetVersion(resourcev3.ListenerType), v2.GetVersion(resourcev3.ListenerType),
+		"drain must push a new (empty) snapshot")
+	assert.Equal(t, uint64(0), r.EmptySnapshotsBlocked(), "the escape hatch must not count as blocked")
+}
+
+func TestReconcile_PartialShrinkStillPublishes(t *testing.T) {
+	// TALYVOR-SAFETY: the guard must fire ONLY on total collapse. A legitimate
+	// partial change — some routes/clusters removed while others remain — is
+	// non-zero and must publish normally.
+	cache := newCache()
+	fs := &fakeStore{snap: sampleSnapshot()}
+	r := NewReconciler(cache, fs, testNodeID, discardLogger())
+
+	require.NoError(t, r.Reconcile(context.Background()))
+	v1, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	require.Len(t, v1.GetResources(resourcev3.ClusterType), 2)
+
+	// Drop one gateway, one cluster, its endpoints and routes — but leave the
+	// rest. Still a non-empty (listeners>0 AND clusters>0) snapshot.
+	shrunk := sampleSnapshot()
+	shrunk.Gateways = shrunk.Gateways[:1]           // 1 listener remains
+	shrunk.Clusters = shrunk.Clusters[:1]           // 1 cluster remains
+	shrunk.Routes = []store.Route{shrunk.Routes[0]} // api → api-cluster
+	shrunk.Endpoints = shrunk.Endpoints[:2]         // api-cluster endpoints
+	fs.snap = shrunk
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	v2, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	assert.Len(t, v2.GetResources(resourcev3.ListenerType), 1, "partial shrink must publish the reduced set")
+	assert.Len(t, v2.GetResources(resourcev3.ClusterType), 1)
+	assert.NotEqual(t, v1.GetVersion(resourcev3.ClusterType), v2.GetVersion(resourcev3.ClusterType),
+		"a legitimate partial change must push a new snapshot")
+	assert.Equal(t, uint64(0), r.EmptySnapshotsBlocked(), "partial shrink must not trip the guard")
 }
 
 // fakeCoordinator implements ha.Coordinator for tests.
@@ -315,6 +380,58 @@ func TestReconcile_HACoordinator_NilIsLocalMode(t *testing.T) {
 	snap, err := cache.GetSnapshot(testNodeID)
 	require.NoError(t, err)
 	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
+}
+
+func TestReconcile_EmptyCollapseAfterHealthyKeepsLastSnapshot(t *testing.T) {
+	cache := newCache()
+	fs := &fakeStore{snap: sampleSnapshot()}
+	r := NewReconciler(cache, fs, testNodeID, discardLogger())
+
+	// Healthy fleet published.
+	require.NoError(t, r.Reconcile(context.Background()))
+	v1, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	require.Len(t, v1.GetResources(resourcev3.ListenerType), 2)
+
+	// The source read now succeeds but returns nothing: a truncated table or a
+	// failover to an un-seeded replica. A state-of-the-world push of this would
+	// remove every listener on every proxy — blackholing all talyvor traffic.
+	fs.snap = &store.Snapshot{}
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	v2, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	assert.Len(t, v2.GetResources(resourcev3.ListenerType), 2,
+		"empty collapse must NOT wipe the last-good listeners")
+	assert.Equal(t, v1.GetVersion(resourcev3.ListenerType), v2.GetVersion(resourcev3.ListenerType),
+		"no new snapshot may be published on empty collapse")
+	assert.Equal(t, uint64(1), r.EmptySnapshotsBlocked(), "the suppressed publish must be counted")
+}
+
+func TestReconcile_AllClustersGoneKeepsLastSnapshot(t *testing.T) {
+	cache := newCache()
+	fs := &fakeStore{snap: sampleSnapshot()}
+	r := NewReconciler(cache, fs, testNodeID, discardLogger())
+
+	require.NoError(t, r.Reconcile(context.Background()))
+	v1, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	require.Len(t, v1.GetResources(resourcev3.ClusterType), 2)
+
+	// Listeners survive, but every cluster vanished — routes would all
+	// blackhole. This is a collapse too and must not be published.
+	partial := sampleSnapshot()
+	partial.Clusters = nil
+	partial.Endpoints = nil
+	fs.snap = partial
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	v2, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err)
+	assert.Len(t, v2.GetResources(resourcev3.ClusterType), 2,
+		"all-clusters-gone is a collapse; must keep last-good clusters")
+	assert.Equal(t, v1.GetVersion(resourcev3.ClusterType), v2.GetVersion(resourcev3.ClusterType),
+		"no new snapshot may be published when all clusters vanish")
 }
 
 func TestRun_StopsOnContextCancel(t *testing.T) {
