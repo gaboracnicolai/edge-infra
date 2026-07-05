@@ -1,0 +1,42 @@
+name: Deploy Test
+
+# Lints every Helm chart and proves the edge-proxy xDS mTLS invariant
+# (SNI + SAN peer pinning) renders for base and every env overlay — offline,
+# no cluster. Closes the gap where deploy/** changes ran no CI, so a revert of
+# xds.tls.enabled back to plaintext would otherwise pass CI silently.
+on:
+  push:
+    paths:
+      - 'deploy/**'
+      - 'Makefile'
+      - '.github/workflows/deploy-test.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/**'
+      - 'Makefile'
+      - '.github/workflows/deploy-test.yaml'
+
+jobs:
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          VERSION=v4.2.0
+          echo "Installing Helm ${VERSION}"
+          curl -fsSL -o helm.tar.gz \
+            "https://get.helm.sh/helm-${VERSION}-linux-amd64.tar.gz"
+          tar -xzf helm.tar.gz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          helm version
+      - name: Lint all charts
+        run: |
+          set -euo pipefail
+          for chart in deploy/helm/*/; do
+            helm lint --strict "$chart"
+          done
+      - name: Verify xDS mTLS invariant
+        run: make verify-xds-mtls
