@@ -53,7 +53,9 @@ async def test_worker_create_acks(mock_pool, cfg, service_spec_dict):
     # run (order-independent: the translator's derived-row writes sit between
     # them inside the same transaction).
     sqls = [c.args[0] for c in mock_pool.execute.call_args_list]
-    assert any("INSERT INTO services" in s and "ON CONFLICT (name) DO UPDATE" in s for s in sqls)
+    assert any(
+        "INSERT INTO services" in s and "ON CONFLICT (team, name) DO UPDATE" in s for s in sqls
+    )
     assert any("UPDATE provision_requests" in s and "'COMPLETED'" in s for s in sqls)
 
 
@@ -61,7 +63,7 @@ async def test_worker_delete_soft_deletes(mock_pool, cfg):
     request_id = str(uuid4())
     msg = make_msg(
         cfg.nats_subject_deprovision,
-        {"name": "api-svc"},
+        {"team": "platform", "name": "api-svc"},
         headers={"Nats-Msg-Id": request_id},
     )
 
@@ -70,8 +72,13 @@ async def test_worker_delete_soft_deletes(mock_pool, cfg):
     msg.ack.assert_awaited_once()
     msg.nak.assert_not_called()
 
-    first_sql = mock_pool.execute.call_args_list[0].args[0]
-    assert "UPDATE services SET deleted_at = NOW()" in first_sql
+    # Team-scoped soft-delete (the translator's derived-row deletes run first in
+    # the same tx, so assert order-independently).
+    sqls = [c.args[0] for c in mock_pool.execute.call_args_list]
+    assert any(
+        "UPDATE services SET deleted_at = NOW()" in s and "team = $1 AND name = $2" in s
+        for s in sqls
+    )
 
 
 async def test_worker_db_error_naks(mock_pool, cfg, service_spec_dict):

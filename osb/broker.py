@@ -14,9 +14,11 @@ from models import ProvisionResponse, ServiceSpec
 log = structlog.get_logger(__name__)
 
 
-async def provision(spec: ServiceSpec, pool, js, cfg: Settings) -> ProvisionResponse:
+async def provision(spec: ServiceSpec, pool, js, cfg: Settings, team: str) -> ProvisionResponse:
     """Persist a CREATE request and publish it to JetStream.
 
+    ``team`` is the caller's authenticated tenant (from the API layer); it is
+    stamped on the request row and is already the authoritative ``spec.team``.
     The DB insert happens before the publish so the request is durable; if
     publish fails the row is removed so the caller sees a clean 5xx.
     """
@@ -26,13 +28,14 @@ async def provision(spec: ServiceSpec, pool, js, cfg: Settings) -> ProvisionResp
 
     await pool.execute(
         """
-        INSERT INTO provision_requests (id, operation, status, payload, webhook_url)
-        VALUES ($1, 'CREATE', 'PENDING', $2::jsonb, $3)
+        INSERT INTO provision_requests (id, operation, status, payload, webhook_url, team)
+        VALUES ($1, 'CREATE', 'PENDING', $2::jsonb, $3, $4)
         ON CONFLICT (id) DO NOTHING
         """,
         request_id,
         payload_json,
         webhook_url,
+        team,
     )
 
     try:
@@ -59,19 +62,25 @@ async def provision(spec: ServiceSpec, pool, js, cfg: Settings) -> ProvisionResp
     )
 
 
-async def deprovision(name: str, pool, js, cfg: Settings) -> ProvisionResponse:
-    """Persist a DELETE request and publish it to JetStream (same pattern as provision)."""
+async def deprovision(name: str, pool, js, cfg: Settings, team: str) -> ProvisionResponse:
+    """Persist a DELETE request and publish it to JetStream (same pattern as provision).
+
+    ``team`` is the caller's authenticated tenant; it is threaded into the NATS
+    payload so the worker deletes only that tenant's service (names are no longer
+    globally unique — UNIQUE(team, name)).
+    """
     request_id = uuid4()
-    payload = json.dumps({"name": name})
+    payload = json.dumps({"team": team, "name": name})
 
     await pool.execute(
         """
-        INSERT INTO provision_requests (id, operation, status, payload, webhook_url)
-        VALUES ($1, 'DELETE', 'PENDING', $2::jsonb, NULL)
+        INSERT INTO provision_requests (id, operation, status, payload, webhook_url, team)
+        VALUES ($1, 'DELETE', 'PENDING', $2::jsonb, NULL, $3)
         ON CONFLICT (id) DO NOTHING
         """,
         request_id,
         payload,
+        team,
     )
 
     try:

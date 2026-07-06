@@ -35,7 +35,7 @@ async def test_provision_db_before_nats(mock_pool, mock_js, cfg, spec):
     mock_pool.execute.side_effect = record_execute
     mock_js.publish.side_effect = record_publish
 
-    await broker.provision(spec, mock_pool, mock_js, cfg)
+    await broker.provision(spec, mock_pool, mock_js, cfg, "platform")
     assert order == ["execute", "publish"]
 
 
@@ -44,7 +44,7 @@ async def test_provision_nats_failure_rolls_back(mock_pool, mock_js, cfg, spec):
     mock_js.publish.side_effect = nats.errors.TimeoutError()
 
     with pytest.raises(nats.errors.TimeoutError):
-        await broker.provision(spec, mock_pool, mock_js, cfg)
+        await broker.provision(spec, mock_pool, mock_js, cfg, "platform")
 
     assert mock_pool.execute.call_count == 2  # INSERT + compensating DELETE
     delete_call = mock_pool.execute.call_args_list[1]
@@ -53,7 +53,7 @@ async def test_provision_nats_failure_rolls_back(mock_pool, mock_js, cfg, spec):
 
 async def test_deprovision_uses_delete_operation(mock_pool, mock_js, cfg):
     """broker.deprovision INSERTs operation='DELETE' and publishes to the deprovision subject."""
-    response = await broker.deprovision("api-svc", mock_pool, mock_js, cfg)
+    response = await broker.deprovision("api-svc", mock_pool, mock_js, cfg, "platform")
 
     insert_call = mock_pool.execute.call_args_list[0]
     assert "'DELETE'" in insert_call.args[0]

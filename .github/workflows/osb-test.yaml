@@ -80,6 +80,7 @@ jobs:
               "migrations/0001_init.sql",
               "migrations/0002_controller_fields.sql",
               "osb/migrations/0001_osb.sql",
+              "osb/migrations/0002_tenancy.sql",
           ]
           async def main():
               conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
@@ -91,8 +92,8 @@ jobs:
                   await conn.close()
           asyncio.run(main())
           PY
-      - name: Python translator suite (shared DB)
-        run: pytest tests/test_translator.py -q
+      - name: Python translator + tenancy suites (shared DB)
+        run: pytest tests/test_translator.py tests/test_tenancy.py -q
         working-directory: osb
       - name: Go cross-language E2E (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSBEndToEnd

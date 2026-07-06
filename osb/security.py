@@ -13,6 +13,7 @@ on responses produced by deeper error handlers.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 from uuid import uuid4
 
@@ -80,6 +81,14 @@ def admin_key_ok(provided: str | None, configured: str | None) -> bool:
 # Same generic gate ("unset config = open, else constant-time equality"), aliased
 # for readability at the provisioning-API-key call site.
 secret_matches = admin_key_ok
+
+
+def hash_key(key: str) -> str:
+    """SHA-256 hex of a bearer key — how tenant_api_keys.key_hash is stored and
+    looked up. Keys are never persisted in the clear; a lookup hashes the
+    presented bearer and matches on the primary key.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 class SecurityHeadersMiddleware:

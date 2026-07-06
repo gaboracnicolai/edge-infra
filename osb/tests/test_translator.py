@@ -75,8 +75,8 @@ async def _create(pool, cfg, spec: ServiceSpec):
     return m
 
 
-async def _delete(pool, cfg, name: str):
-    m = _msg(cfg.nats_subject_deprovision, json.dumps({"name": name}).encode())
+async def _delete(pool, cfg, team: str, name: str):
+    m = _msg(cfg.nats_subject_deprovision, json.dumps({"team": team, "name": name}).encode())
     await worker.process_message(m, pool, cfg)
     return m
 
@@ -111,7 +111,7 @@ async def test_create_http_fans_out(pool, cfg):
 #    shared gateway, and soft-deletes the services row.
 async def test_delete_soft_route_hard_cluster(pool, cfg):
     await _create(pool, cfg, _http_spec())
-    await _delete(pool, cfg, "checkout")
+    await _delete(pool, cfg, "payments", "checkout")
     async with pool.acquire() as c:
         rt = await c.fetchrow("SELECT deleted_at FROM routes WHERE name='osb-payments-checkout'")
         cl = await c.fetchrow("SELECT 1 FROM clusters WHERE name='osb-payments-checkout'")
@@ -184,7 +184,7 @@ async def test_partial_failure_rolls_back_everything(pool, cfg, monkeypatch):
 
 # DELETE of a never-provisioned service is an idempotent no-op that still acks.
 async def test_delete_absent_is_noop(pool, cfg):
-    m = await _delete(pool, cfg, "ghost")
+    m = await _delete(pool, cfg, "payments", "ghost")
     m.ack.assert_awaited_once()
     m.nak.assert_not_awaited()
 

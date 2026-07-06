@@ -65,13 +65,21 @@ async def app_client(mock_pool: AsyncMock, mock_js: AsyncMock) -> AsyncIterator[
     """An httpx AsyncClient bound to the FastAPI app via ASGITransport.
 
     ASGITransport does not run lifespan events, so we wire the pool and js
-    handles directly onto app.state for each test.
+    handles directly onto app.state for each test. These surface/validation
+    tests run in open mode (OSB_ALLOW_UNTENANTED); enforced tenant isolation is
+    covered in test_tenancy.py against a real DB.
     """
+    import main
     from main import app
 
     app.state.pool = mock_pool
     app.state.js = mock_js
+    prev = main.cfg.allow_untenanted
+    main.cfg.allow_untenanted = True
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+    finally:
+        main.cfg.allow_untenanted = prev

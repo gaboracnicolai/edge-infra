@@ -23,7 +23,7 @@ from security import (
     SecurityHeadersMiddleware,
     admin_key_ok,
     bearer_token,
-    secret_matches,
+    hash_key,
 )
 from tls import build_nats_tls
 
@@ -50,11 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pool = pool
     app.state.js = js
     app.state.nc = nc
-    if not cfg.api_key:
-        log.warning(
-            "provisioning API is unauthenticated (API_KEY unset) — "
-            "intended for local dev only; set API_KEY in production"
-        )
+    await startup_tenancy_check(pool, cfg)  # fail-closed: refuse to start unconfigured
     log.info("osb broker ready", listen_port=cfg.listen_port)
     try:
         yield
@@ -72,26 +68,51 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 
 
-async def require_api_key(
+async def require_tenant(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
-) -> None:
-    """Gate the provisioning API on the shared API key (ISO 27001 A.9 — access control).
+    x_tenant: Annotated[str | None, Header()] = None,
+) -> str:
+    """Resolve the caller's tenant from the verified per-tenant API key (A.9).
 
-    No-op when ``API_KEY`` is unset (open mode for local dev). When set, callers
-    must send ``Authorization: Bearer <key>``: 401 when the header is absent or
-    not a Bearer scheme, 403 when present but wrong.
-
-    NOTE: a shared bearer key is the lightest credential that fits the existing
-    secret plumbing; whether the real provisioning callers want this, per-tenant
-    keys, or mTLS (like auth-service) is Nicolai's call — this is reversible.
+    The returned team is the ONLY tenant for the request — the body can never set
+    or cross it. 401 when no bearer is presented, 403 when the bearer is
+    unrecognized. In explicit open mode (OSB_ALLOW_UNTENANTED=true, dev only) an
+    unresolved caller falls back to the X-Tenant header or "default".
     """
-    if not cfg.api_key:
-        return
     token = bearer_token(authorization)
-    if token is None:
+    if token is not None:
+        row = await request.app.state.pool.fetchrow(
+            "SELECT team FROM tenant_api_keys WHERE key_hash = $1", hash_key(token)
+        )
+        if row is not None:
+            return row["team"]
+        if not cfg.allow_untenanted:
+            raise HTTPException(status_code=403, detail="unrecognized API key")
+    elif not cfg.allow_untenanted:
         raise HTTPException(status_code=401, detail="API key required")
-    if not secret_matches(token, cfg.api_key):
-        raise HTTPException(status_code=403, detail="invalid API key")
+    return x_tenant or "default"  # explicit open/dev mode only
+
+
+async def startup_tenancy_check(pool, settings: Settings) -> None:
+    """Fail closed: refuse to start when tenant isolation is unconfigured.
+
+    With OSB_ALLOW_UNTENANTED false (default) and no rows in tenant_api_keys,
+    every provisioning call would be unauthenticated — so refuse to start rather
+    than silently run open (like R1 ext_authz's fail-closed posture). Set the
+    flag true (dev) to bypass.
+    """
+    if settings.allow_untenanted:
+        log.warning(
+            "OSB_ALLOW_UNTENANTED=true — provisioning runs WITHOUT tenant isolation (dev only)"
+        )
+        return
+    count = await pool.fetchval("SELECT count(*) FROM tenant_api_keys")
+    if not count:
+        raise RuntimeError(
+            "no tenant_api_keys configured and OSB_ALLOW_UNTENANTED is false — "
+            "refusing to start (populate tenant_api_keys or set OSB_ALLOW_UNTENANTED=true for dev)"
+        )
 
 
 async def require_admin(
@@ -112,57 +133,71 @@ async def require_admin(
         raise HTTPException(status_code=403, detail="invalid admin credentials")
 
 
-@app.post(
-    "/v1/services",
-    status_code=202,
-    response_model=ProvisionResponse,
-    dependencies=[Depends(require_api_key)],
-)
-async def create_service(spec: ServiceSpec, request: Request) -> ProvisionResponse:
-    """Enqueue a CREATE request for an edge service."""
+@app.post("/v1/services", status_code=202, response_model=ProvisionResponse)
+async def create_service(
+    spec: ServiceSpec,
+    request: Request,
+    tenant: Annotated[str, Depends(require_tenant)],
+) -> ProvisionResponse:
+    """Enqueue a CREATE request. The caller's authenticated tenant is
+    authoritative — the body's ``team`` is overwritten, so a caller can never
+    write into another tenant's namespace (R4 Stage 2, L2)."""
+    spec.team = tenant
     try:
-        return await broker.provision(spec, request.app.state.pool, request.app.state.js, cfg)
+        return await broker.provision(
+            spec, request.app.state.pool, request.app.state.js, cfg, tenant
+        )
     except Exception as exc:  # noqa: BLE001 — every broker failure becomes a 500
         log.exception("provision failed", error=str(exc))
         raise HTTPException(status_code=500, detail="failed to queue provision") from exc
 
 
-@app.delete(
-    "/v1/services/{name}",
-    status_code=202,
-    response_model=ProvisionResponse,
-    dependencies=[Depends(require_api_key)],
-)
-async def delete_service(name: str, request: Request) -> ProvisionResponse:
-    """Enqueue a DELETE request for an edge service."""
+@app.delete("/v1/services/{name}", status_code=202, response_model=ProvisionResponse)
+async def delete_service(
+    name: str,
+    request: Request,
+    tenant: Annotated[str, Depends(require_tenant)],
+) -> ProvisionResponse:
+    """Enqueue a DELETE for the caller's OWN service. Deleting a name the tenant
+    does not own returns 404 — cross-tenant existence is never revealed."""
     # The {name} path param skips ServiceSpec validation, so enforce the same
     # name shape here — it flows into SQL params and the NATS payload (A.14).
     try:
         specvalidation.validate_service_name(name)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    pool = request.app.state.pool
+    owned = await pool.fetchrow(
+        "SELECT 1 FROM services WHERE team = $1 AND name = $2 AND deleted_at IS NULL",
+        tenant,
+        name,
+    )
+    if owned is None:
+        raise HTTPException(status_code=404, detail="service not found")
     try:
-        return await broker.deprovision(name, request.app.state.pool, request.app.state.js, cfg)
+        return await broker.deprovision(name, pool, request.app.state.js, cfg, tenant)
     except Exception as exc:  # noqa: BLE001
         log.exception("deprovision failed", error=str(exc))
         raise HTTPException(status_code=500, detail="failed to queue deprovision") from exc
 
 
-@app.get(
-    "/v1/requests/{request_id}",
-    response_model=ProvisionRequest,
-    dependencies=[Depends(require_api_key)],
-)
-async def get_request(request_id: UUID, request: Request) -> ProvisionRequest:
-    """Return the current state of a provisioning request."""
+@app.get("/v1/requests/{request_id}", response_model=ProvisionRequest)
+async def get_request(
+    request_id: UUID,
+    request: Request,
+    tenant: Annotated[str, Depends(require_tenant)],
+) -> ProvisionRequest:
+    """Return a provisioning request — scoped to the caller's tenant; another
+    tenant's request UUID returns 404."""
     row = await request.app.state.pool.fetchrow(
         """
         SELECT id, operation, status, payload::text AS payload, webhook_url,
                error, completed_at, created_at
         FROM provision_requests
-        WHERE id = $1
+        WHERE id = $1 AND team = $2
         """,
         request_id,
+        tenant,
     )
     if row is None:
         raise HTTPException(status_code=404, detail="request not found")

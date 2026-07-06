@@ -127,19 +127,28 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
     return "provisioned"
 
 
-async def apply_delete(conn, name: str) -> bool:
-    """Unwind a service's derived rows: soft-delete the route (so it drops from
-    the snapshot) and hard-delete the cluster (cascading its endpoints; clusters
-    have no soft-delete). The shared gateway is never removed.
+async def apply_delete(conn, team: str, name: str) -> bool:
+    """Unwind a service's derived rows for the given tenant: soft-delete the
+    route (so it drops from the snapshot) and hard-delete the cluster (cascading
+    its endpoints; clusters have no soft-delete). The shared gateway is never
+    removed.
 
-    The team is recovered from the ``services`` row (still present at delete
-    time). Returns False when the service was never provisioned (idempotent).
+    ``team`` is the caller's authenticated tenant (threaded from the API through
+    the NATS payload); the derived name is built from IT — there is NO name-only
+    lookup, so a caller can only ever unwind its own ``osb-{team}-{name}`` rows,
+    even when another tenant owns a service with the same name.
+
+    Existence is keyed on the tenant-scoped services row (``WHERE team AND name``,
+    never a name-only match); returns False as a no-op when this tenant has no
+    such service (idempotent).
     """
-    row = await conn.fetchrow("SELECT team FROM services WHERE name = $1", name)
-    if row is None:
+    owned = await conn.fetchrow(
+        "SELECT 1 FROM services WHERE team = $1 AND name = $2", team, name
+    )
+    if owned is None:
         return False
 
-    dn = derived_name(row["team"], name)
+    dn = derived_name(team, name)
     await conn.execute(
         "UPDATE routes SET deleted_at = NOW(), updated_at = NOW() "
         "WHERE name = $1 AND deleted_at IS NULL",

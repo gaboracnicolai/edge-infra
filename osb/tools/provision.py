@@ -8,7 +8,7 @@ reconciler serves, end to end across the language boundary.
 
 Usage:
     DATABASE_URL=... python provision.py create '<ServiceSpec JSON>'
-    DATABASE_URL=... python provision.py delete '<service name>'
+    DATABASE_URL=... python provision.py delete '<JSON {"team","name"}>'
 
 Exits non-zero if the worker naks (provision failed) so the caller sees it.
 """
@@ -16,7 +16,6 @@ Exits non-zero if the worker naks (provision failed) so the caller sees it.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 import uuid
@@ -36,7 +35,8 @@ async def _run(action: str, arg: str) -> None:
     if action == "create":
         subject, data = cfg.nats_subject_provision, arg.encode()
     elif action == "delete":
-        subject, data = cfg.nats_subject_deprovision, json.dumps({"name": arg}).encode()
+        # arg is the deprovision payload JSON, e.g. {"team":"t","name":"svc"}.
+        subject, data = cfg.nats_subject_deprovision, arg.encode()
     else:
         sys.exit(f"unknown action {action!r} (want create|delete)")
 

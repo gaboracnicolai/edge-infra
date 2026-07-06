@@ -132,7 +132,10 @@ async def test_provision_accepts_public_webhook(app_client, valid_spec):
     assert response.status_code == 202
 
 
-async def test_deprovision(app_client):
+async def test_deprovision(app_client, mock_pool):
+    # The endpoint verifies the caller's tenant owns the service before enqueue;
+    # make that ownership lookup succeed.
+    mock_pool.fetchrow = AsyncMock(return_value={"exists": 1})
     response = await app_client.delete("/v1/services/my-service")
     assert response.status_code == 202
     body = response.json()
@@ -181,52 +184,6 @@ async def test_healthz(app_client):
     assert response.json() == {"ok": True}
 
 
-# ─── provisioning API auth (opt-in via API_KEY) ──────
-
-
-async def test_provision_open_when_key_unset(app_client, valid_spec):
-    # default Settings() has no api_key → the product API stays open (local dev)
-    response = await app_client.post("/v1/services", json=valid_spec)
-    assert response.status_code == 202
-
-
-async def test_provision_requires_key_when_configured(app_client, monkeypatch, valid_spec):
-    import main
-
-    monkeypatch.setattr(main.cfg, "api_key", "s3cret")
-    # missing Authorization → 401
-    assert (await app_client.post("/v1/services", json=valid_spec)).status_code == 401
-    # non-Bearer scheme → 401 (token cannot be extracted)
-    basic = await app_client.post(
-        "/v1/services", json=valid_spec, headers={"Authorization": "Basic s3cret"}
-    )
-    assert basic.status_code == 401
-    # wrong key → 403
-    bad = await app_client.post(
-        "/v1/services", json=valid_spec, headers={"Authorization": "Bearer nope"}
-    )
-    assert bad.status_code == 403
-    # correct key → 202
-    ok = await app_client.post(
-        "/v1/services", json=valid_spec, headers={"Authorization": "Bearer s3cret"}
-    )
-    assert ok.status_code == 202
-
-
-async def test_delete_requires_key_when_configured(app_client, monkeypatch):
-    import main
-
-    monkeypatch.setattr(main.cfg, "api_key", "s3cret")
-    assert (await app_client.delete("/v1/services/my-service")).status_code == 401
-    ok = await app_client.delete(
-        "/v1/services/my-service", headers={"Authorization": "Bearer s3cret"}
-    )
-    assert ok.status_code == 202
-
-
-async def test_get_request_requires_key_when_configured(app_client, monkeypatch, mock_pool):
-    import main
-
-    monkeypatch.setattr(main.cfg, "api_key", "s3cret")
-    # auth gate fires before the handler, so no DB row is needed for the 401
-    assert (await app_client.get(f"/v1/requests/{uuid4()}")).status_code == 401
+# Per-tenant auth (bearer -> tenant_api_keys) and cross-tenant isolation are
+# covered end-to-end against a real DB in test_tenancy.py; these surface tests
+# run in open mode via the app_client fixture.

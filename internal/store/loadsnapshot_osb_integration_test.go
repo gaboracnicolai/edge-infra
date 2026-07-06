@@ -92,35 +92,47 @@ func TestLoadSnapshot_OSBEndToEnd(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL and OSB_PROVISION required (integration)")
 	}
 
-	const spec = `{"name":"e2esvc","team":"e2eteam","host":"10.9.9.9","port":8080,"protocol":"HTTP"}`
-	const cluster = "osb-e2eteam-e2esvc"
+	const (
+		specA    = `{"name":"e2esvc","team":"e2eteam","host":"10.9.9.9","port":8080,"protocol":"HTTP"}`
+		specB    = `{"name":"e2esvc","team":"e2eteam2","host":"10.9.9.10","port":8080,"protocol":"HTTP"}`
+		clusterA = "osb-e2eteam-e2esvc"
+		clusterB = "osb-e2eteam2-e2esvc"
+	)
 
-	// CREATE via the real Python translator, then the Go reader must serve it.
-	osbProvision(t, dsn, prov, "create", spec)
+	// Two teams register the SAME service name — both must surface as distinct
+	// derived clusters/routes (R4 Stage 2 per-tenant isolation).
+	osbProvision(t, dsn, prov, "create", specA)
+	osbProvision(t, dsn, prov, "create", specB)
 	snap := loadForTest(t, dsn)
 	if !hasGateway(snap, "osb-shared-http") {
 		t.Error("LoadSnapshot missing shared gateway osb-shared-http")
 	}
-	if !hasCluster(snap, cluster) {
-		t.Errorf("LoadSnapshot missing derived cluster %s", cluster)
+	for _, c := range []string{clusterA, clusterB} {
+		if !hasCluster(snap, c) {
+			t.Errorf("LoadSnapshot missing derived cluster %s", c)
+		}
+		if !hasRoute(snap, c) {
+			t.Errorf("LoadSnapshot missing derived route %s", c)
+		}
 	}
-	if !hasRoute(snap, cluster) {
-		t.Errorf("LoadSnapshot missing derived route %s", cluster)
+	if !endpointAddr(snap, clusterA, "10.9.9.9", 8080) {
+		t.Errorf("LoadSnapshot missing endpoint for %s", clusterA)
 	}
-	if !endpointAddr(snap, cluster, "10.9.9.9", 8080) {
-		t.Errorf("LoadSnapshot missing endpoint 10.9.9.9:8080 for %s", cluster)
+	if !endpointAddr(snap, clusterB, "10.9.9.10", 8080) {
+		t.Errorf("LoadSnapshot missing endpoint for %s", clusterB)
 	}
 
-	// DELETE — the route must drop from the snapshot (soft-deleted), cluster gone.
-	osbProvision(t, dsn, prov, "delete", "e2esvc")
+	// DELETE team A's service (team-threaded). B's identically-named service must
+	// remain served — a tenant can only unwind its own rows.
+	osbProvision(t, dsn, prov, "delete", `{"team":"e2eteam","name":"e2esvc"}`)
 	snap2 := loadForTest(t, dsn)
-	if hasRoute(snap2, cluster) {
-		t.Errorf("route %s still served after deprovision", cluster)
+	if hasRoute(snap2, clusterA) || hasCluster(snap2, clusterA) {
+		t.Errorf("team A's %s still served after its own deprovision", clusterA)
 	}
-	if hasCluster(snap2, cluster) {
-		t.Errorf("cluster %s still present after deprovision (should be hard-deleted)", cluster)
+	if !hasRoute(snap2, clusterB) || !hasCluster(snap2, clusterB) {
+		t.Errorf("team B's %s must remain served after team A deletes its own", clusterB)
 	}
 	if !hasGateway(snap2, "osb-shared-http") {
-		t.Error("shared gateway must persist after a single service deprovision")
+		t.Error("shared gateway must persist")
 	}
 }

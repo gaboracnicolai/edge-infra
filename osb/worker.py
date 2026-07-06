@@ -124,7 +124,7 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
                         (name, team, host, port, protocol, tls_secret_name, auth_policy,
                          rate_limit, health_check, node_selector)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb)
-                    ON CONFLICT (name) DO UPDATE SET
+                    ON CONFLICT (team, name) DO UPDATE SET
                         team             = EXCLUDED.team,
                         host             = EXCLUDED.host,
                         port             = EXCLUDED.port,
@@ -153,14 +153,16 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
             metrics.services_derived_total[(spec.protocol, outcome)] += 1
         elif msg.subject == cfg.nats_subject_deprovision:
             payload = json.loads(msg.data)
+            team = payload["team"]
             service_name = payload["name"]
             async with pool.acquire() as conn, conn.transaction():
-                await translator.apply_delete(conn, service_name)
+                await translator.apply_delete(conn, team, service_name)
                 await conn.execute(
                     """
                     UPDATE services SET deleted_at = NOW(), updated_at = NOW()
-                    WHERE name = $1 AND deleted_at IS NULL
+                    WHERE team = $1 AND name = $2 AND deleted_at IS NULL
                     """,
+                    team,
                     service_name,
                 )
                 pending_webhook = await _complete_request(conn, request_id, service_name)

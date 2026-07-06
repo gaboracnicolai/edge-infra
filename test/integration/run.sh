@@ -34,7 +34,8 @@ for _ in $(seq 1 30); do
 done
 
 echo "==> applying BOTH migration sets to the one shared database"
-for f in migrations/0001_init.sql migrations/0002_controller_fields.sql osb/migrations/0001_osb.sql; do
+for f in migrations/0001_init.sql migrations/0002_controller_fields.sql \
+         osb/migrations/0001_osb.sql osb/migrations/0002_tenancy.sql; do
   docker exec -i "$PG" psql -U postgres -d edge -q -f - <"$f"
 done
 
@@ -50,8 +51,8 @@ echo "==> python venv + deps (mirrors osb/pyproject.toml)"
 export TEST_DATABASE_URL="$DSN"
 export OSB_PROVISION="$VENV/bin/python $REPO/osb/tools/provision.py"
 
-echo "==> python translator integration suite"
-(cd osb && "$VENV/bin/pytest" tests/test_translator.py -q)
+echo "==> python translator + tenancy integration suites"
+(cd osb && "$VENV/bin/pytest" tests/test_translator.py tests/test_tenancy.py -q)
 
 echo "==> go cross-language E2E (Python translator writes -> Go LoadSnapshot serves)"
 go test -tags integration ./internal/store/ -run TestLoadSnapshot_OSBEndToEnd

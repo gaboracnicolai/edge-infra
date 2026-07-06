@@ -30,10 +30,12 @@ class Settings(BaseSettings):
     nats_tls_key: str | None = None
 
     admin_api_key: str | None = None  # gates /metrics; unset = open (local dev)
-    # Bearer key for the provisioning API (POST/DELETE /v1/services, GET
-    # /v1/requests). Unset = open (local dev); production sets API_KEY via the
-    # config secret so callers must send `Authorization: Bearer <key>` (A.9).
-    api_key: str | None = None
+    # Tenant isolation (R4 Stage 2): the provisioning API resolves the caller's
+    # tenant from a per-tenant key in tenant_api_keys (hashed at rest); that team
+    # is the ONLY tenant — the request body can never set it. OSB_ALLOW_UNTENANTED
+    # is an explicit dev/open escape hatch that DEFAULTS FALSE; with no keys
+    # configured and the flag false, OSB refuses to start (fail-closed, A.9).
+    allow_untenanted: bool = False
     webhook_timeout_s: float = 5.0
     webhook_max_retries: int = 5
     webhook_retry_base_s: float = 2.0
