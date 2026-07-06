@@ -116,6 +116,20 @@ func anyRouteNeedsLocalRateLimit(routes []store.Route) bool {
 	return false
 }
 
+// AnyRouteWantsAuth reports whether any route expects authentication — i.e. its
+// auth_policy is anything other than the explicit "none". Used by the reconciler
+// to loudly signal the case where routes want auth but ext_authz is globally
+// unconfigured (so auth cannot be enforced). "" (unset) counts as wanting auth —
+// the safe default is authenticated.
+func AnyRouteWantsAuth(routes []store.Route) bool {
+	for _, r := range routes {
+		if r.AuthPolicy != "none" {
+			return true
+		}
+	}
+	return false
+}
+
 // localRateLimitBaseFilter is a no-op base local_ratelimit filter: 0% enabled, so
 // it never throttles on its own. It exists only so per-route (per-service)
 // typed_per_filter_config overrides have a filter to attach to when the global

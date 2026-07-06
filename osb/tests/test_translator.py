@@ -247,6 +247,45 @@ async def test_policy_removed_on_recreate_nulls_columns(pool, cfg):
     assert cl["health_check_path"] is None  # stale health check cleared
 
 
+# --- Stage 3a-ii: per-service auth_policy on the derived route -----------------
+
+# 8. Default auth_policy (jwt) is persisted → the route is authenticated.
+async def test_auth_policy_default_jwt_persisted(pool, cfg):
+    await _create(pool, cfg, _http_spec(name="apisvc", team="payments"))
+    async with pool.acquire() as c:
+        ap = await c.fetchval("SELECT auth_policy FROM routes WHERE name='osb-payments-apisvc'")
+    assert ap == "jwt"
+
+
+# 9. Explicit auth_policy=none is persisted → the route opts out of auth.
+async def test_auth_policy_none_persisted(pool, cfg):
+    spec = ServiceSpec(
+        name="public", team="payments", host="10.0.0.5", port=8080,
+        protocol="HTTP", auth_policy="none",
+    )
+    await _create(pool, cfg, spec)
+    async with pool.acquire() as c:
+        ap = await c.fetchval("SELECT auth_policy FROM routes WHERE name='osb-payments-public'")
+    assert ap == "none"
+
+
+# 10. Re-CREATE flips auth jwt→none→jwt (ON CONFLICT = EXCLUDED); never stale.
+async def test_auth_policy_flips_on_recreate(pool, cfg):
+    await _create(pool, cfg, _http_spec(name="flip", team="ops"))  # default jwt
+    await _create(
+        pool, cfg,
+        ServiceSpec(name="flip", team="ops", host="10.0.0.5", port=8080,
+                    protocol="HTTP", auth_policy="none"),
+    )
+    async with pool.acquire() as c:
+        ap1 = await c.fetchval("SELECT auth_policy FROM routes WHERE name='osb-ops-flip'")
+    assert ap1 == "none"
+    await _create(pool, cfg, _http_spec(name="flip", team="ops"))  # back to default jwt
+    async with pool.acquire() as c:
+        ap2 = await c.fetchval("SELECT auth_policy FROM routes WHERE name='osb-ops-flip'")
+    assert ap2 == "jwt"
+
+
 # The osb-{team}- prefix keeps derived rows disjoint from controller-written
 # rows: a controller cluster with a user-chosen name is never touched.
 async def test_controller_rows_untouched(pool, cfg):

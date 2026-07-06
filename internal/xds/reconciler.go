@@ -41,6 +41,11 @@ type Reconciler struct {
 	localVersion          atomic.Uint64
 	localLast             atomic.Pointer[reconcileResult]
 	emptySnapshotsBlocked atomic.Uint64
+
+	// authWantedButExtAuthzOff counts reconciles where a route requested auth but
+	// ext_authz was globally disabled (so auth could not be enforced). A loud
+	// signal — never a silent bypass.
+	authWantedButExtAuthzOff atomic.Uint64
 }
 
 type reconcileResult struct {
@@ -68,6 +73,12 @@ func NewReconciler(c cachev3.SnapshotCache, s store.Store, nodeID string, log *s
 // suppressed a publish. Exposed for tests and future metrics wiring.
 func (r *Reconciler) EmptySnapshotsBlocked() uint64 {
 	return r.emptySnapshotsBlocked.Load()
+}
+
+// AuthWantedButExtAuthzOff reports how many reconciles saw a route requesting
+// auth while ext_authz was globally disabled. Exposed for tests and metrics.
+func (r *Reconciler) AuthWantedButExtAuthzOff() uint64 {
+	return r.authWantedButExtAuthzOff.Load()
 }
 
 // allowEmptySnapshot reports whether the empty-collapse guard is disabled via
@@ -123,6 +134,17 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	domain, err := r.store.LoadSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("load snapshot: %w", err)
+	}
+
+	// Authority-path signal: per-service auth is renderable ONLY when ext_authz is
+	// globally configured (its filter needs the auth-service cluster/target, both
+	// gated on ExtAuthz.Enabled). If a route wants auth while ext_authz is off it
+	// is NOT authenticated — the gateway is already open — so signal loudly rather
+	// than let anyone believe per-service auth is active. Never a silent bypass.
+	if !r.extAuthz.Enabled && builders.AnyRouteWantsAuth(domain.Routes) {
+		r.authWantedButExtAuthzOff.Add(1)
+		r.log.Warn("per-service auth_policy requested but ext_authz is globally disabled; " +
+			"affected routes are NOT authenticated (set EXT_AUTHZ_ENABLED and configure the auth-service)")
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{

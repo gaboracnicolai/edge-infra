@@ -36,6 +36,11 @@ type Route struct {
 	// limit; rendered as a per-route local_ratelimit typed_per_filter_config.
 	RateLimitPerUnit int
 	RateLimitUnit    string // "SECOND" | "MINUTE" | "HOUR"
+
+	// Per-service auth (R4 Stage 3a-ii). "jwt" (default) or anything other than
+	// "none" => ext_authz applies (authenticated); ONLY the exact "none" disables
+	// ext_authz on this route. Never let empty/unknown read as disabled.
+	AuthPolicy string
 }
 
 // Cluster is the domain model for an Envoy upstream cluster.

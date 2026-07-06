@@ -6,6 +6,7 @@ import (
 	"time"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -98,12 +99,25 @@ func routesFor(rs []store.Route) []*routev3.Route {
 				},
 			},
 		}
-		// Per-service rate limit → a per-route local_ratelimit override (the base
-		// filter is guaranteed present by the LDS presence guard).
+		// Per-route typed_per_filter_config, built once so rate_limit and auth can
+		// coexist without clobbering each other.
+		tpfc := map[string]*anypb.Any{}
+		// Per-service rate limit → a local_ratelimit override (the base filter is
+		// guaranteed present by the LDS presence guard).
 		if r.RateLimitPerUnit > 0 {
-			rt.TypedPerFilterConfig = map[string]*anypb.Any{
-				localRateLimitFilterName: mustAny(perRouteLocalRateLimit(r)),
-			}
+			tpfc[localRateLimitFilterName] = mustAny(perRouteLocalRateLimit(r))
+		}
+		// Per-service auth: ONLY the explicit "none" disables ext_authz on this
+		// route. Any other value (jwt, "", unknown) adds nothing → the global
+		// ext_authz filter applies → authenticated. This is the safe default —
+		// an unspecified or unrecognized policy can never disable auth.
+		if r.AuthPolicy == "none" {
+			tpfc[extAuthzFilterName] = mustAny(&extauthzv3.ExtAuthzPerRoute{
+				Override: &extauthzv3.ExtAuthzPerRoute_Disabled{Disabled: true},
+			})
+		}
+		if len(tpfc) > 0 {
+			rt.TypedPerFilterConfig = tpfc
 		}
 		out = append(out, rt)
 	}

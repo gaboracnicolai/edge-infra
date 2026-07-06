@@ -82,6 +82,29 @@ async def test_provision_rejects_invalid_team(app_client, valid_spec):
     assert response.status_code == 422
 
 
+async def test_provision_rejects_mtls_on_http(app_client, valid_spec):
+    # mtls/jwt_or_mtls are transport-level (HTTPS-only, deferred to 3b); an HTTP
+    # service must be rejected at the API boundary before enqueue.
+    valid_spec["auth_policy"] = "mtls"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_rejects_jwt_or_mtls_on_http(app_client, valid_spec):
+    valid_spec["auth_policy"] = "jwt_or_mtls"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
+async def test_provision_accepts_mtls_on_https(app_client, valid_spec):
+    # HTTPS + mtls is accepted (stored, deferred to 3b) — not rejected.
+    valid_spec["protocol"] = "HTTPS"
+    valid_spec["tls_secret_name"] = "edge-cert"
+    valid_spec["auth_policy"] = "mtls"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
 async def test_provision_rejects_control_char_node_selector(app_client, valid_spec):
     valid_spec["node_selector"] = {"zone": "eu-west\n1a"}
     response = await app_client.post("/v1/services", json=valid_spec)

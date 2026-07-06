@@ -118,8 +118,8 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         """
         INSERT INTO routes
             (id, name, gateway_id, hosts, path_prefix, cluster_name, timeout_seconds,
-             rate_limit_per_unit, rate_limit_unit, deleted_at)
-        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, NULL)
+             rate_limit_per_unit, rate_limit_unit, auth_policy, deleted_at)
+        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, $7, NULL)
         ON CONFLICT (name) DO UPDATE SET
             gateway_id          = EXCLUDED.gateway_id,
             hosts               = EXCLUDED.hosts,
@@ -128,6 +128,7 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
             timeout_seconds     = EXCLUDED.timeout_seconds,
             rate_limit_per_unit = EXCLUDED.rate_limit_per_unit,
             rate_limit_unit     = EXCLUDED.rate_limit_unit,
+            auth_policy         = EXCLUDED.auth_policy,
             updated_at          = NOW(),
             deleted_at          = NULL
         """,
@@ -137,6 +138,7 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         _DEFAULT_ROUTE_TIMEOUT_S,
         spec.rate_limit.requests_per_unit if spec.rate_limit else None,
         spec.rate_limit.unit if spec.rate_limit else None,
+        spec.auth_policy,
     )
 
     log.info("osb http service fanned out", service=spec.name, team=spec.team, cluster=dn)

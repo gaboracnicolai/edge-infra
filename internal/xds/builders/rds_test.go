@@ -5,11 +5,29 @@ import (
 	"time"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
 	"github.com/edge-infra/control-plane/internal/store"
 )
+
+const extAuthzFilterNameForTest = "envoy.filters.http.ext_authz"
+
+// extAuthzPerRoute returns the per-route ext_authz override on a built route, if
+// present (present == the route opted OUT of auth via auth_policy=none).
+func extAuthzPerRoute(t *testing.T, r *routev3.Route) (*extauthzv3.ExtAuthzPerRoute, bool) {
+	t.Helper()
+	cfg, ok := r.GetTypedPerFilterConfig()[extAuthzFilterNameForTest]
+	if !ok {
+		return nil, false
+	}
+	var pr extauthzv3.ExtAuthzPerRoute
+	if err := cfg.UnmarshalTo(&pr); err != nil {
+		t.Fatalf("unmarshal ExtAuthzPerRoute: %v", err)
+	}
+	return &pr, true
+}
 
 func sharedGateway() store.Gateway {
 	return store.Gateway{ID: "shared", Name: "osb-shared-http", Port: 80, Protocol: "HTTP"}
@@ -103,5 +121,62 @@ func TestBuildRouteConfigs_NoRateLimit_NoOverride(t *testing.T) {
 	r := findRoute(t, res[0], "plain")
 	if r.GetTypedPerFilterConfig()[localRateLimitFilterName] != nil {
 		t.Error("route without a per-service limit must not carry a local_ratelimit override")
+	}
+}
+
+// ---- R4 Stage 3a-ii: per-service auth_policy (jwt/none) --------------------
+
+// THE SAFETY TEST (lead): an unspecified/default/unknown auth_policy must NEVER
+// disable auth — only the exact literal "none" opts a route out. jwt, "", and a
+// typo all leave ext_authz to apply (authenticated under ea.Enabled).
+func TestBuildRouteConfigs_DefaultAuthenticated(t *testing.T) {
+	gw := sharedGateway()
+	for _, ap := range []string{"jwt", "", "bogus"} {
+		route := store.Route{
+			Name: "r-" + ap, GatewayID: "shared", ClusterName: "c", PathPrefix: "/", AuthPolicy: ap,
+		}
+		res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+		if _, optedOut := extAuthzPerRoute(t, findRoute(t, res[0], "r-"+ap)); optedOut {
+			t.Errorf("auth_policy=%q must NOT add an ext_authz override (stays authenticated)", ap)
+		}
+	}
+	// Only "none" opts out.
+	route := store.Route{Name: "r-none", GatewayID: "shared", ClusterName: "c", PathPrefix: "/", AuthPolicy: "none"}
+	res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+	if _, optedOut := extAuthzPerRoute(t, findRoute(t, res[0], "r-none")); !optedOut {
+		t.Error("auth_policy=none must add an ext_authz disable override")
+	}
+}
+
+// auth_policy=none renders as the EXACT ExtAuthzPerRoute{Disabled:true} (not an
+// encoding Envoy would silently ignore).
+func TestBuildRouteConfigs_AuthNone_DisablesExtAuthz(t *testing.T) {
+	gw := sharedGateway()
+	route := store.Route{Name: "public", GatewayID: "shared", ClusterName: "c", PathPrefix: "/", AuthPolicy: "none"}
+	res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+	pr, ok := extAuthzPerRoute(t, findRoute(t, res[0], "public"))
+	if !ok {
+		t.Fatal("expected an ext_authz per-route override for auth_policy=none")
+	}
+	if !pr.GetDisabled() {
+		t.Error("ExtAuthzPerRoute.Disabled must be true for auth_policy=none")
+	}
+}
+
+// A route with BOTH a rate_limit and auth_policy=none carries both overrides —
+// the TypedPerFilterConfig map is never clobbered.
+func TestBuildRouteConfigs_RateLimitAndAuthCoexist(t *testing.T) {
+	gw := sharedGateway()
+	route := store.Route{
+		Name: "both", GatewayID: "shared", ClusterName: "c", PathPrefix: "/",
+		RateLimitPerUnit: 100, RateLimitUnit: "SECOND", AuthPolicy: "none",
+	}
+	res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+	tpfc := findRoute(t, res[0], "both").GetTypedPerFilterConfig()
+	if _, ok := tpfc[localRateLimitFilterName]; !ok {
+		t.Error("rate_limit override missing — map clobbered")
+	}
+	if _, ok := tpfc[extAuthzFilterNameForTest]; !ok {
+		t.Error("ext_authz disable missing — map clobbered")
 	}
 }

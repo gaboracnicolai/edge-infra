@@ -21,6 +21,7 @@ import (
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	cachetypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
 
 	"github.com/edge-infra/control-plane/internal/store"
@@ -117,6 +118,34 @@ func builtClusterHasHealthCheck(res []cachetypes.Resource, name, path string) bo
 		for _, hc := range c.GetHealthChecks() {
 			if hc.GetHttpHealthCheck().GetPath() == path {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+// builtRouteExtAuthzDisabled reports whether the built route carries an
+// ExtAuthzPerRoute{Disabled:true} override (i.e. auth_policy=none opted it out).
+func builtRouteExtAuthzDisabled(res []cachetypes.Resource, name string) bool {
+	for _, r := range res {
+		rc, ok := r.(*routev3.RouteConfiguration)
+		if !ok {
+			continue
+		}
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, rt := range vh.GetRoutes() {
+				if rt.GetName() != name {
+					continue
+				}
+				cfg, has := rt.GetTypedPerFilterConfig()["envoy.filters.http.ext_authz"]
+				if !has {
+					return false
+				}
+				var pr extauthzv3.ExtAuthzPerRoute
+				if cfg.UnmarshalTo(&pr) != nil {
+					return false
+				}
+				return pr.GetDisabled()
 			}
 		}
 	}
@@ -227,5 +256,31 @@ func TestLoadSnapshot_OSBPerServicePolicy(t *testing.T) {
 	clusters := builders.BuildClusters(snap.Clusters, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{})
 	if !builtClusterHasHealthCheck(clusters, derived, "/healthz") {
 		t.Errorf("built cluster %s missing HTTP health check for /healthz", derived)
+	}
+}
+
+// R4 Stage 3a-ii: auth_policy=none opts a derived route out of ext_authz
+// (ExtAuthzPerRoute{Disabled}); the default (jwt) leaves the route authenticated
+// (no override). Python write -> Go load -> builder render.
+func TestLoadSnapshot_OSBAuthPolicy(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	prov := os.Getenv("OSB_PROVISION")
+	if dsn == "" || prov == "" {
+		t.Skip("TEST_DATABASE_URL and OSB_PROVISION required (integration)")
+	}
+
+	const specPublic = `{"name":"pub","team":"e2eauth","host":"10.9.9.30","port":8080,"protocol":"HTTP","auth_policy":"none"}`
+	const specDefault = `{"name":"priv","team":"e2eauth","host":"10.9.9.31","port":8080,"protocol":"HTTP"}`
+
+	osbProvision(t, dsn, prov, "create", specPublic)
+	osbProvision(t, dsn, prov, "create", specDefault)
+	snap := loadForTest(t, dsn)
+
+	routeCfgs := builders.BuildRouteConfigs(snap.Gateways, snap.Routes, builders.RateLimitServiceOptions{})
+	if !builtRouteExtAuthzDisabled(routeCfgs, "osb-e2eauth-pub") {
+		t.Error("auth_policy=none route must carry an ext_authz disable override")
+	}
+	if builtRouteExtAuthzDisabled(routeCfgs, "osb-e2eauth-priv") {
+		t.Error("default (jwt) route must NOT carry an ext_authz disable — stays authenticated")
 	}
 }

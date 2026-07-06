@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/edge-infra/control-plane/internal/store"
+	"github.com/edge-infra/control-plane/internal/xds/builders"
 )
 
 const testNodeID = "test-node"
@@ -450,5 +451,29 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 		assert.ErrorIs(t, err, context.Canceled)
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// R4 Stage 3a-ii — the DETECT+LOUD-SIGNAL path: per-service auth can be enforced
+// ONLY when ext_authz is globally configured. When it isn't but a route wants
+// auth, the reconciler must loudly signal (counter) — never silently imply auth.
+func TestReconcile_AuthWantedButExtAuthzOff_Signals(t *testing.T) {
+	cache := newCache()
+	// ext_authz NOT configured (default zero value: Enabled=false); the sample
+	// routes want auth (auth_policy unset => authenticated by default).
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+	require.NoError(t, r.Reconcile(context.Background()))
+	if r.AuthWantedButExtAuthzOff() == 0 {
+		t.Fatal("ext_authz off + routes want auth: the loud signal must fire (counter > 0)")
+	}
+}
+
+func TestReconcile_ExtAuthzOn_NoAuthOffSignal(t *testing.T) {
+	cache := newCache()
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+	r.WithExtAuthz(builders.ExtAuthzOptions{Enabled: true, Address: "auth-service", Port: 9000})
+	require.NoError(t, r.Reconcile(context.Background()))
+	if got := r.AuthWantedButExtAuthzOff(); got != 0 {
+		t.Fatalf("ext_authz configured: the auth-off signal must NOT fire; got %d", got)
 	}
 }

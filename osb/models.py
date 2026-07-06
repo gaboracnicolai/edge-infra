@@ -86,6 +86,20 @@ class ServiceSpec(BaseModel):
             raise ValueError("tls_secret_name is required when protocol is HTTPS")
         return self
 
+    @model_validator(mode="after")
+    def _transport_auth_requires_https(self) -> ServiceSpec:
+        """mtls / jwt_or_mtls are transport-level (downstream client cert) and
+        only meaningful on HTTPS — their rendering is deferred to Stage 3b. Reject
+        them on HTTP at the API boundary (before enqueue) so an HTTP service can
+        never carry an unrenderable transport auth policy. Enforced here so it
+        also guards the worker's ServiceSpec parse."""
+        if self.protocol == "HTTP" and self.auth_policy in ("mtls", "jwt_or_mtls"):
+            raise ValueError(
+                "auth_policy mtls/jwt_or_mtls requires protocol HTTPS "
+                "(transport-level; deferred to Stage 3b)"
+            )
+        return self
+
 
 class ProvisionResponse(BaseModel):
     """Returned synchronously when a CREATE or DELETE is accepted."""
