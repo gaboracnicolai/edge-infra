@@ -229,7 +229,7 @@ func loadRoutes(ctx context.Context, q querier) ([]Route, error) {
 		SELECT id, name, gateway_id, hosts, path_prefix, cluster_name,
 		       COALESCE(timeout_seconds, 30),
 		       COALESCE(rate_limit_per_unit, 0), COALESCE(rate_limit_unit, ''),
-		       COALESCE(auth_policy, 'jwt')
+		       COALESCE(auth_policy, 'jwt'), COALESCE(tls_secret_name, '')
 		FROM routes
 		WHERE deleted_at IS NULL
 		ORDER BY name
@@ -243,7 +243,7 @@ func loadRoutes(ctx context.Context, q querier) ([]Route, error) {
 	for rows.Next() {
 		var r Route
 		if err := rows.Scan(&r.ID, &r.Name, &r.GatewayID, &r.Hosts, &r.PathPrefix, &r.ClusterName,
-			&r.TimeoutSeconds, &r.RateLimitPerUnit, &r.RateLimitUnit, &r.AuthPolicy); err != nil {
+			&r.TimeoutSeconds, &r.RateLimitPerUnit, &r.RateLimitUnit, &r.AuthPolicy, &r.TLSSecret); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

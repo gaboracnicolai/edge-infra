@@ -13,8 +13,8 @@ requests_total: dict[tuple[str, str], int] = defaultdict(int)
 webhook_deliveries_total: dict[str, int] = defaultdict(int)
 nats_messages_total: dict[tuple[str, str], int] = defaultdict(int)
 # Data-plane fan-out outcomes, keyed by (protocol, outcome). HTTP services yield
-# ("HTTP", "provisioned"); HTTPS is deferred to Stage 3 and records
-# ("HTTPS", "deferred_https") so the deferral is observable, not silent.
+# ("HTTP", "provisioned"); HTTPS services yield ("HTTPS", "provisioned_https")
+# (R4 Stage 3b-i — per-SNI rendering, reference-only).
 services_derived_total: dict[tuple[str, str], int] = defaultdict(int)
 
 

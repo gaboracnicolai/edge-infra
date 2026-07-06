@@ -8,11 +8,39 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 
 	"github.com/edge-infra/control-plane/internal/store"
 )
+
+// chainCertName returns the SDS secret name the filter chain's downstream TLS
+// references (empty when the chain has no TLS transport socket).
+func chainCertName(t *testing.T, fc *listenerv3.FilterChain) string {
+	t.Helper()
+	if fc.GetTransportSocket() == nil {
+		return ""
+	}
+	var ctx tlsv3.DownstreamTlsContext
+	if err := fc.GetTransportSocket().GetTypedConfig().UnmarshalTo(&ctx); err != nil {
+		t.Fatalf("unmarshal DownstreamTlsContext: %v", err)
+	}
+	sds := ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs()
+	if len(sds) == 0 {
+		return ""
+	}
+	return sds[0].GetName()
+}
+
+func listenerFrom(t *testing.T, res any) *listenerv3.Listener {
+	t.Helper()
+	l, ok := res.(*listenerv3.Listener)
+	if !ok {
+		t.Fatalf("resource is not a Listener: %T", res)
+	}
+	return l
+}
 
 func hcmFromListener(t *testing.T, res any) *hcmv3.HttpConnectionManager {
 	t.Helper()
@@ -121,5 +149,85 @@ func TestBuildListeners_NoPerServiceRateLimit_Disabled_NoFilter(t *testing.T) {
 	)[0])
 	if slices.Contains(filterNames(hcm), localRateLimitFilterName) {
 		t.Errorf("no per-service limits + rl disabled: local_ratelimit filter should be absent; filters = %v", filterNames(hcm))
+	}
+}
+
+// ---- R4 Stage 3b-i: per-SNI HTTPS rendering --------------------------------
+
+// THE LOAD-BEARING TEST: the shared HTTPS gateway presents the RIGHT cert per
+// SNI host — two services get two filter chains, each matching its own host and
+// referencing its own secret (certs never cross hosts).
+func TestBuildListeners_PerSNI_CertPerHost(t *testing.T) {
+	gw := store.Gateway{ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}
+	routes := []store.Route{
+		{Name: "osb-t-a", GatewayID: "https", ClusterName: "osb-t-a", Hosts: []string{"a.example.com"}, PathPrefix: "/", TLSSecret: "sec-a"},
+		{Name: "osb-t-b", GatewayID: "https", ClusterName: "osb-t-b", Hosts: []string{"b.example.com"}, PathPrefix: "/", TLSSecret: "sec-b"},
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{gw}, routes, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	if len(l.FilterChains) != 2 {
+		t.Fatalf("per-SNI: want 2 filter chains; got %d", len(l.FilterChains))
+	}
+	got := map[string]string{}
+	for _, fc := range l.FilterChains {
+		sn := fc.GetFilterChainMatch().GetServerNames()
+		if len(sn) != 1 {
+			t.Fatalf("each SNI chain must match exactly one host; got %v", sn)
+		}
+		got[sn[0]] = chainCertName(t, fc)
+	}
+	if got["a.example.com"] != "sec-a" {
+		t.Errorf("host a.example.com cert = %q; want sec-a", got["a.example.com"])
+	}
+	if got["b.example.com"] != "sec-b" {
+		t.Errorf("host b.example.com cert = %q; want sec-b", got["b.example.com"])
+	}
+}
+
+// BACKWARD-COMPAT: a single-cert HTTPS gateway (g.TLSSecret set, no per-route
+// secrets) renders exactly one filter chain with that cert and no SNI match.
+func TestBuildListeners_SingleCertHTTPS_BackwardCompat(t *testing.T) {
+	gw := store.Gateway{ID: "g", Name: "edge-https", Port: 8443, Protocol: "HTTPS", TLSSecret: "edge-cert"}
+	routes := []store.Route{{Name: "r", GatewayID: "g", ClusterName: "c", Hosts: []string{"h"}, PathPrefix: "/"}}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{gw}, routes, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	if len(l.FilterChains) != 1 {
+		t.Fatalf("single-cert HTTPS: want 1 chain; got %d", len(l.FilterChains))
+	}
+	if got := chainCertName(t, l.FilterChains[0]); got != "edge-cert" {
+		t.Errorf("single-cert chain = %q; want edge-cert", got)
+	}
+	if fcm := l.FilterChains[0].GetFilterChainMatch(); fcm != nil && len(fcm.GetServerNames()) != 0 {
+		t.Error("single-cert chain must not carry an SNI match (it serves all)")
+	}
+}
+
+// HTTP gateway is unchanged: one plaintext chain, no TLS transport socket.
+func TestBuildListeners_HTTP_NoTLS(t *testing.T) {
+	gw := store.Gateway{ID: "g", Name: "osb-shared-http", Port: 80, Protocol: "HTTP"}
+	routes := []store.Route{{Name: "r", GatewayID: "g", ClusterName: "c", Hosts: []string{"h"}, PathPrefix: "/"}}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{gw}, routes, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	if len(l.FilterChains) != 1 {
+		t.Fatalf("HTTP: want 1 chain; got %d", len(l.FilterChains))
+	}
+	if l.FilterChains[0].GetTransportSocket() != nil {
+		t.Error("HTTP chain must have no TLS transport socket")
+	}
+}
+
+// ADVERSARIAL: two services declare the SAME SNI host with DIFFERENT certs (a
+// misconfiguration). Resolution must be DETERMINISTIC — the smallest route name
+// wins regardless of input order — one host → one chain → one cert.
+func TestBuildListeners_PerSNI_SameHostConflict_Deterministic(t *testing.T) {
+	gw := store.Gateway{ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}
+	// Passed in REVERSE name order to prove the choice isn't iteration/chain order.
+	routes := []store.Route{
+		{Name: "osb-z", GatewayID: "https", ClusterName: "osb-z", Hosts: []string{"dup.example.com"}, PathPrefix: "/", TLSSecret: "cert-z"},
+		{Name: "osb-a", GatewayID: "https", ClusterName: "osb-a", Hosts: []string{"dup.example.com"}, PathPrefix: "/", TLSSecret: "cert-a"},
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{gw}, routes, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	if len(l.FilterChains) != 1 {
+		t.Fatalf("same host must collapse to one filter chain; got %d", len(l.FilterChains))
+	}
+	if got := chainCertName(t, l.FilterChains[0]); got != "cert-a" {
+		t.Errorf("same-host conflict must deterministically pick smallest route name (cert-a); got %q", got)
 	}
 }

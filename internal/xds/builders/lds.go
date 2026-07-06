@@ -2,6 +2,7 @@ package builders
 
 import (
 	"math"
+	"sort"
 	"strconv"
 	"time"
 
@@ -62,25 +63,73 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 		// any route on this gateway carries a per-service limit.
 		HttpFilters: httpFilters(rl, ea, rls, anyRouteNeedsLocalRateLimit(routes)),
 	}
-
-	filterChain := &listenerv3.FilterChain{
-		Filters: []*listenerv3.Filter{{
-			Name: wellknown.HTTPConnectionManager,
-			ConfigType: &listenerv3.Filter_TypedConfig{
-				TypedConfig: mustAny(hcm),
-			},
-		}},
+	hcmFilter := &listenerv3.Filter{
+		Name: wellknown.HTTPConnectionManager,
+		ConfigType: &listenerv3.Filter_TypedConfig{
+			TypedConfig: mustAny(hcm),
+		},
 	}
 
-	if g.Protocol == "HTTPS" && g.TLSSecret != "" {
-		filterChain.TransportSocket = downstreamTLS(g.TLSSecret)
+	var chains []*listenerv3.FilterChain
+	if sni := sniFilterChains(routes, hcmFilter); g.Protocol == "HTTPS" && len(sni) > 0 {
+		// Per-SNI: one filter chain per distinct host, each presenting that host's
+		// cert (the shared HTTPS gateway; certs live on the routes, not g.TLSSecret).
+		chains = sni
+	} else {
+		// One chain: plaintext (HTTP) or a single cert (backward-compat single-cert
+		// HTTPS gateway — e.g. a controller-provisioned gateway with g.TLSSecret).
+		fc := &listenerv3.FilterChain{Filters: []*listenerv3.Filter{hcmFilter}}
+		if g.Protocol == "HTTPS" && g.TLSSecret != "" {
+			fc.TransportSocket = downstreamTLS(g.TLSSecret)
+		}
+		chains = []*listenerv3.FilterChain{fc}
 	}
 
 	return &listenerv3.Listener{
 		Name:         g.Name,
 		Address:      socketAddress("0.0.0.0", g.Port),
-		FilterChains: []*listenerv3.FilterChain{filterChain},
+		FilterChains: chains,
 	}
+}
+
+// sniFilterChains builds one filter chain per DISTINCT SNI host among the routes
+// that carry a TLS secret: filter_chain_match{server_names:[host]} + that host's
+// downstream cert (referenced by SDS name — no cert material here) + the shared
+// HCM. For a same-host/different-cert conflict the route with the smallest NAME
+// wins, so the choice is DETERMINISTIC regardless of input order (never arbitrary
+// iteration or chain order); hosts are then sorted for stable chain order.
+// Returns empty when no route carries a secret (the caller falls back to the
+// single-chain path).
+func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*listenerv3.FilterChain {
+	type pick struct{ secret, routeName string }
+	byHost := map[string]pick{}
+	for _, r := range routes {
+		if r.TLSSecret == "" || len(r.Hosts) == 0 {
+			continue
+		}
+		host := r.Hosts[0]
+		if host == "" || host == "*" {
+			continue // SNI needs a concrete host
+		}
+		if cur, ok := byHost[host]; !ok || r.Name < cur.routeName {
+			byHost[host] = pick{secret: r.TLSSecret, routeName: r.Name}
+		}
+	}
+	hosts := make([]string, 0, len(byHost))
+	for h := range byHost {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+
+	chains := make([]*listenerv3.FilterChain, 0, len(hosts))
+	for _, h := range hosts {
+		chains = append(chains, &listenerv3.FilterChain{
+			FilterChainMatch: &listenerv3.FilterChainMatch{ServerNames: []string{h}},
+			Filters:          []*listenerv3.Filter{hcmFilter},
+			TransportSocket:  downstreamTLS(byHost[h].secret),
+		})
+	}
+	return chains
 }
 
 // httpFilters returns the HCM filter chain in order: local_ratelimit (a coarse

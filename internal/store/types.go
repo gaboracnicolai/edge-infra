@@ -41,6 +41,12 @@ type Route struct {
 	// "none" => ext_authz applies (authenticated); ONLY the exact "none" disables
 	// ext_authz on this route. Never let empty/unknown read as disabled.
 	AuthPolicy string
+
+	// Per-service TLS secret NAME (R4 Stage 3b-i) — the SNI cert this route's
+	// service presents on the shared HTTPS gateway. A reference only (SDS resolves
+	// the material from the secrets table); empty for HTTP routes. Never the key
+	// material itself — OSB writes only this reference (Stage 1 boundary).
+	TLSSecret string
 }
 
 // Cluster is the domain model for an Envoy upstream cluster.

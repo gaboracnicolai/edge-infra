@@ -44,7 +44,7 @@ async def pool():
 async def clean(pool):
     async with pool.acquire() as c:
         await c.execute(
-            "TRUNCATE services, provision_requests, routes, endpoints, clusters, gateways "
+            "TRUNCATE services, provision_requests, routes, endpoints, clusters, gateways, secrets "
             "RESTART IDENTITY CASCADE"
         )
     yield
@@ -140,22 +140,36 @@ async def test_recreate_idempotent(pool, cfg):
     assert (counts["gw"], counts["cl"], counts["ep"], counts["rt"]) == (1, 1, 1, 1)
 
 
-# 4. HTTPS is deferred: the services row is written, but NO data-plane rows, and
-#    the deferral is signalled explicitly (metric), not silent.
-async def test_https_defers_dataplane(pool, cfg):
+# 4. HTTPS now provisions per-SNI (3b-i): the shared HTTPS gateway (443, no cert)
+#    + cluster + endpoint + a route carrying tls_secret_name (REFERENCE only).
+#    OSB writes NO cert material; the provisioned_https metric fires.
+async def test_https_provisions_per_sni(pool, cfg):
     spec = ServiceSpec(
-        name="secure", team="payments", host="10.0.0.9", port=8443,
+        name="secure", team="payments", host="secure.example.com", port=8443,
         protocol="HTTPS", tls_secret_name="edge-cert",
     )
-    before = metrics.services_derived_total[("HTTPS", "deferred_https")]
+    before = metrics.services_derived_total[("HTTPS", "provisioned_https")]
     await _create(pool, cfg, spec)
     async with pool.acquire() as c:
-        svc = await c.fetchrow("SELECT 1 FROM services WHERE name='secure'")
+        gw = await c.fetchrow(
+            "SELECT port, protocol, tls_secret FROM gateways WHERE name='osb-shared-https'"
+        )
         cl = await c.fetchrow("SELECT 1 FROM clusters WHERE name='osb-payments-secure'")
-        rt = await c.fetchrow("SELECT 1 FROM routes WHERE name='osb-payments-secure'")
-    assert svc is not None                       # services row still written
-    assert cl is None and rt is None             # NO data-plane rows for HTTPS in Stage 1
-    assert metrics.services_derived_total[("HTTPS", "deferred_https")] == before + 1
+        ep = await c.fetchrow(
+            "SELECT address FROM endpoints WHERE cluster_id='osb-payments-secure'"
+        )
+        rt = await c.fetchrow(
+            "SELECT gateway_id, hosts, tls_secret_name FROM routes WHERE name='osb-payments-secure'"
+        )
+        cert_row = await c.fetchrow("SELECT 1 FROM secrets WHERE name='edge-cert'")
+    assert gw is not None and gw["port"] == 443 and gw["protocol"] == "HTTPS"
+    assert gw["tls_secret"] is None  # shared HTTPS gateway carries NO cert — per-SNI on routes
+    assert cl is not None and ep is not None
+    assert rt is not None and rt["gateway_id"] == "osb-shared-https"
+    assert list(rt["hosts"]) == ["secure.example.com"]  # the SNI host
+    assert rt["tls_secret_name"] == "edge-cert"  # reference stamped on the route
+    assert cert_row is None  # BOUNDARY: OSB referenced the secret but never wrote it
+    assert metrics.services_derived_total[("HTTPS", "provisioned_https")] == before + 1
 
 
 # --- adversarial (green-locking) -------------------------------------------

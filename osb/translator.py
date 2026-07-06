@@ -11,9 +11,11 @@ Disjointness from controller-written rows is by the ``osb-{team}-`` name prefix
 (controllers write user-chosen names). A formal owner column + UNIQUE(team,name)
 is Stage 2 and intentionally not added here.
 
-HTTPS is out of Stage 1 scope: the caller still writes the ``services`` row, but
-no data-plane rows are produced (per-SNI TLS + builder work is Stage 3). The
-deferral is signalled by the ``deferred_https`` outcome, never silent.
+HTTPS (R4 Stage 3b-i): a service is fanned out onto the shared HTTPS listener
+(port 443), with the route carrying its ``tls_secret_name`` — a REFERENCE only.
+OSB never writes the cert/key material (the Stage 1 boundary); the secret must be
+provisioned separately (sub-stage 2), and SDS resolves it by name at render time.
+mtls / jwt_or_mtls transport auth remain later sub-stages.
 """
 
 from __future__ import annotations
@@ -26,15 +28,17 @@ from models import ServiceSpec
 
 log = structlog.get_logger(__name__)
 
-# Fixed identity of the shared public HTTP listener (port 80 matches the
-# edge-proxy DaemonSet hostPort). Seeded idempotently on first fan-out.
+# Fixed identity of the shared public listeners (ports match the edge-proxy
+# DaemonSet hostPorts). Seeded idempotently on first fan-out. The HTTPS gateway
+# carries NO tls_secret — per-SNI certs live on the routes.
 SHARED_HTTP_GATEWAY = "osb-shared-http"
+SHARED_HTTPS_GATEWAY = "osb-shared-https"
 
 _DEFAULT_CONNECT_TIMEOUT_MS = 5000
 _DEFAULT_LB_POLICY = "ROUND_ROBIN"
 _DEFAULT_ROUTE_TIMEOUT_S = 30
 
-CreateOutcome = Literal["provisioned", "deferred_https"]
+CreateOutcome = Literal["provisioned", "provisioned_https"]
 
 
 def derived_name(team: str, name: str) -> str:
@@ -48,29 +52,42 @@ def derived_name(team: str, name: str) -> str:
 
 
 async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
-    """Fan an HTTP service out into gateway + cluster + endpoint + route.
+    """Fan a service out into gateway + cluster + endpoint + route.
 
-    Runs on the caller's connection inside the caller's transaction. HTTPS is
-    deferred: returns ``deferred_https`` and writes no data-plane rows.
+    Runs on the caller's connection inside the caller's transaction. HTTP lands on
+    the shared ``osb-shared-http:80`` listener; HTTPS on ``osb-shared-https:443``
+    with the route carrying its ``tls_secret_name`` — a REFERENCE only; OSB never
+    writes cert/key material (SDS resolves the secret by name).
     """
-    if spec.protocol != "HTTP":
-        log.info(
-            "osb https service: data-plane fan-out deferred to stage 3",
-            service=spec.name,
-            team=spec.team,
-        )
-        return "deferred_https"
-
     dn = derived_name(spec.team, spec.name)
+    if spec.protocol == "HTTPS":
+        gateway, port, protocol, tls_secret, outcome = (
+            SHARED_HTTPS_GATEWAY,
+            443,
+            "HTTPS",
+            spec.tls_secret_name,  # reference only; the material lives in `secrets`
+            "provisioned_https",
+        )
+    else:
+        gateway, port, protocol, tls_secret, outcome = (
+            SHARED_HTTP_GATEWAY,
+            80,
+            "HTTP",
+            None,
+            "provisioned",
+        )
 
-    # 1. Ensure the shared HTTP gateway exists (idempotent; never per-service).
+    # 1. Ensure the shared gateway exists (idempotent; never per-service). The
+    #    HTTPS gateway carries NO tls_secret — per-SNI certs live on the routes.
     await conn.execute(
         """
         INSERT INTO gateways (id, name, port, protocol, node_selector)
-        VALUES ($1, $1, 80, 'HTTP', '{}'::jsonb)
+        VALUES ($1, $1, $2, $3, '{}'::jsonb)
         ON CONFLICT (name) DO NOTHING
         """,
-        SHARED_HTTP_GATEWAY,
+        gateway,
+        port,
+        protocol,
     )
 
     # 2. Per-service cluster (EDS; endpoints attached below). The health_check
@@ -111,15 +128,16 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
     )
 
     # 4. Route on the shared gateway, forwarding to the cluster by name. The
-    #    rate_limit columns carry the service's per-route local_ratelimit; ON
-    #    CONFLICT sets them from EXCLUDED so a re-CREATE that drops rate_limit
-    #    NULLs them (no stale limit served).
+    #    rate_limit / auth_policy / tls_secret_name columns carry the per-route
+    #    policy + (for HTTPS) the SNI cert REFERENCE; ON CONFLICT sets them from
+    #    EXCLUDED so a re-CREATE that drops a value clears it (no stale policy).
+    #    tls_secret_name is a reference ONLY — never key material.
     await conn.execute(
         """
         INSERT INTO routes
             (id, name, gateway_id, hosts, path_prefix, cluster_name, timeout_seconds,
-             rate_limit_per_unit, rate_limit_unit, auth_policy, deleted_at)
-        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, $7, NULL)
+             rate_limit_per_unit, rate_limit_unit, auth_policy, tls_secret_name, deleted_at)
+        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, $7, $8, NULL)
         ON CONFLICT (name) DO UPDATE SET
             gateway_id          = EXCLUDED.gateway_id,
             hosts               = EXCLUDED.hosts,
@@ -129,20 +147,25 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
             rate_limit_per_unit = EXCLUDED.rate_limit_per_unit,
             rate_limit_unit     = EXCLUDED.rate_limit_unit,
             auth_policy         = EXCLUDED.auth_policy,
+            tls_secret_name     = EXCLUDED.tls_secret_name,
             updated_at          = NOW(),
             deleted_at          = NULL
         """,
         dn,
-        SHARED_HTTP_GATEWAY,
+        gateway,
         [spec.host],
         _DEFAULT_ROUTE_TIMEOUT_S,
         spec.rate_limit.requests_per_unit if spec.rate_limit else None,
         spec.rate_limit.unit if spec.rate_limit else None,
         spec.auth_policy,
+        tls_secret,
     )
 
-    log.info("osb http service fanned out", service=spec.name, team=spec.team, cluster=dn)
-    return "provisioned"
+    log.info(
+        "osb service fanned out",
+        service=spec.name, team=spec.team, cluster=dn, protocol=spec.protocol,
+    )
+    return outcome
 
 
 async def apply_delete(conn, team: str, name: str) -> bool:

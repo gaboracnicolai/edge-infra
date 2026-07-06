@@ -20,9 +20,12 @@ import (
 	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	cachetypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/edge-infra/control-plane/internal/store"
 	"github.com/edge-infra/control-plane/internal/xds/builders"
@@ -256,6 +259,85 @@ func TestLoadSnapshot_OSBPerServicePolicy(t *testing.T) {
 	clusters := builders.BuildClusters(snap.Clusters, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{})
 	if !builtClusterHasHealthCheck(clusters, derived, "/healthz") {
 		t.Errorf("built cluster %s missing HTTP health check for /healthz", derived)
+	}
+}
+
+// seedSecret inserts a TLS secret directly (the provisioning path is a separate
+// sub-stage; seeding proves rendering independently). Reference-by-name only.
+func seedSecret(t *testing.T, dsn, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to seed secret: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO secrets (id, name, cert_pem, key_pem)
+		 VALUES ($1, $1, '-----CERT-----', '-----KEY-----')
+		 ON CONFLICT (name) DO NOTHING`, name); err != nil {
+		t.Fatalf("seed secret %q: %v", name, err)
+	}
+}
+
+func httpsListenerHasSNICert(t *testing.T, res []cachetypes.Resource, listenerName, host, cert string) bool {
+	t.Helper()
+	for _, r := range res {
+		l, ok := r.(*listenerv3.Listener)
+		if !ok || l.GetName() != listenerName {
+			continue
+		}
+		for _, fc := range l.GetFilterChains() {
+			sn := fc.GetFilterChainMatch().GetServerNames()
+			if len(sn) != 1 || sn[0] != host {
+				continue
+			}
+			if fc.GetTransportSocket() == nil {
+				return false
+			}
+			var ctx tlsv3.DownstreamTlsContext
+			if fc.GetTransportSocket().GetTypedConfig().UnmarshalTo(&ctx) != nil {
+				return false
+			}
+			sds := ctx.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs()
+			return len(sds) == 1 && sds[0].GetName() == cert
+		}
+	}
+	return false
+}
+
+func secretServed(res []cachetypes.Resource, name string) bool {
+	for _, r := range res {
+		if s, ok := r.(*tlsv3.Secret); ok && s.GetName() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// R4 Stage 3b-i: an HTTPS service lands on the shared osb-shared-https listener
+// with a per-SNI filter chain presenting its (seeded) cert by name, and
+// BuildSecrets serves the material. Python writes only the reference.
+func TestLoadSnapshot_OSBHttpsSNI(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	prov := os.Getenv("OSB_PROVISION")
+	if dsn == "" || prov == "" {
+		t.Skip("TEST_DATABASE_URL and OSB_PROVISION required (integration)")
+	}
+
+	seedSecret(t, dsn, "sni-cert")
+	const spec = `{"name":"tls","team":"e2esni","host":"sni.example.com","port":8443,"protocol":"HTTPS","tls_secret_name":"sni-cert"}`
+	osbProvision(t, dsn, prov, "create", spec)
+	snap := loadForTest(t, dsn)
+
+	listeners := builders.BuildListeners(snap.Gateways, snap.Routes,
+		builders.RateLimitOptions{}, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{})
+	if !httpsListenerHasSNICert(t, listeners, "osb-shared-https", "sni.example.com", "sni-cert") {
+		t.Error("shared HTTPS listener missing per-SNI filter chain sni.example.com → sni-cert")
+	}
+	if !secretServed(builders.BuildSecrets(snap.Secrets), "sni-cert") {
+		t.Error("BuildSecrets must serve the seeded sni-cert material")
 	}
 }
 
