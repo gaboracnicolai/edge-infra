@@ -79,6 +79,7 @@ jobs:
           FILES = [
               "migrations/0001_init.sql",
               "migrations/0002_controller_fields.sql",
+              "migrations/0003_service_policy.sql",
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
           ]
@@ -96,4 +97,4 @@ jobs:
         run: pytest tests/test_translator.py tests/test_tenancy.py -q
         working-directory: osb
       - name: Go cross-language E2E (-count=1, no cached pass)
-        run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSBEndToEnd
+        run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB

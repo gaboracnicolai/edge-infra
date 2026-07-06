@@ -1,6 +1,7 @@
 package builders
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -12,8 +13,6 @@ import (
 
 	"github.com/edge-infra/control-plane/internal/store"
 )
-
-const localRateLimitFilterName = "envoy.filters.http.local_ratelimit"
 
 func hcmFromListener(t *testing.T, res any) *hcmv3.HttpConnectionManager {
 	t.Helper()
@@ -44,7 +43,7 @@ func sampleGateway() store.Gateway {
 }
 
 func TestBuildListeners_RateLimitDisabled_RouterOnly(t *testing.T) {
-	res := BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{Enabled: false}, ExtAuthzOptions{}, RateLimitServiceOptions{})
+	res := BuildListeners([]store.Gateway{sampleGateway()}, nil, RateLimitOptions{Enabled: false}, ExtAuthzOptions{}, RateLimitServiceOptions{})
 	got := filterNames(hcmFromListener(t, res[0]))
 	if len(got) != 1 || got[0] != wellknown.Router {
 		t.Fatalf("filters = %v; want [%s]", got, wellknown.Router)
@@ -53,7 +52,7 @@ func TestBuildListeners_RateLimitDisabled_RouterOnly(t *testing.T) {
 
 func TestBuildListeners_RateLimitEnabled_FilterPresentAndOrdered(t *testing.T) {
 	rl := RateLimitOptions{Enabled: true, MaxTokens: 200, TokensPerFill: 100, FillInterval: time.Second}
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, nil, rl, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
 
 	// local_ratelimit must precede the router (router is always last).
 	got := filterNames(hcm)
@@ -86,5 +85,41 @@ func TestBuildListeners_RateLimitEnabled_FilterPresentAndOrdered(t *testing.T) {
 	}
 	if !hasRetryAfter {
 		t.Error("missing Retry-After response header")
+	}
+}
+
+func rateLimitedRoute() store.Route {
+	return store.Route{
+		Name: "osb-team-svc", GatewayID: "shared", ClusterName: "osb-team-svc",
+		PathPrefix: "/", RateLimitPerUnit: 100, RateLimitUnit: "SECOND",
+	}
+}
+
+// THE PRESENCE GUARD: with the global throttle OFF, a route that carries a
+// per-service rate_limit must STILL get the base local_ratelimit filter in the
+// HCM chain — otherwise the per-route override is inert and the limit silently
+// no-ops.
+func TestBuildListeners_PerServiceRateLimit_PresenceGuard(t *testing.T) {
+	gw := sharedGateway()
+	hcm := hcmFromListener(t, BuildListeners(
+		[]store.Gateway{gw}, []store.Route{rateLimitedRoute()},
+		RateLimitOptions{Enabled: false}, ExtAuthzOptions{}, RateLimitServiceOptions{},
+	)[0])
+	if !slices.Contains(filterNames(hcm), localRateLimitFilterName) {
+		t.Fatalf("rl.Enabled=false but a route needs a per-service limit: base local_ratelimit "+
+			"filter MUST be emitted so the override applies; filters = %v", filterNames(hcm))
+	}
+}
+
+// The inverse: no per-service limits + global throttle off → no needless filter.
+func TestBuildListeners_NoPerServiceRateLimit_Disabled_NoFilter(t *testing.T) {
+	gw := sharedGateway()
+	plain := store.Route{Name: "plain", GatewayID: "shared", ClusterName: "c", PathPrefix: "/"}
+	hcm := hcmFromListener(t, BuildListeners(
+		[]store.Gateway{gw}, []store.Route{plain},
+		RateLimitOptions{Enabled: false}, ExtAuthzOptions{}, RateLimitServiceOptions{},
+	)[0])
+	if slices.Contains(filterNames(hcm), localRateLimitFilterName) {
+		t.Errorf("no per-service limits + rl disabled: local_ratelimit filter should be absent; filters = %v", filterNames(hcm))
 	}
 }

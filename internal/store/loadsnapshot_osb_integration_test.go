@@ -19,7 +19,12 @@ import (
 	"testing"
 	"time"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	cachetypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+
 	"github.com/edge-infra/control-plane/internal/store"
+	"github.com/edge-infra/control-plane/internal/xds/builders"
 )
 
 func osbProvision(t *testing.T, dsn, provisionCmd, action, arg string) {
@@ -85,6 +90,39 @@ func endpointAddr(s *store.Snapshot, clusterID, addr string, port uint32) bool {
 	return false
 }
 
+func builtRouteHasLocalRateLimit(res []cachetypes.Resource, name string) bool {
+	for _, r := range res {
+		rc, ok := r.(*routev3.RouteConfiguration)
+		if !ok {
+			continue
+		}
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, rt := range vh.GetRoutes() {
+				if rt.GetName() == name {
+					_, has := rt.GetTypedPerFilterConfig()["envoy.filters.http.local_ratelimit"]
+					return has
+				}
+			}
+		}
+	}
+	return false
+}
+
+func builtClusterHasHealthCheck(res []cachetypes.Resource, name, path string) bool {
+	for _, r := range res {
+		c, ok := r.(*clusterv3.Cluster)
+		if !ok || c.GetName() != name {
+			continue
+		}
+		for _, hc := range c.GetHealthChecks() {
+			if hc.GetHttpHealthCheck().GetPath() == path {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestLoadSnapshot_OSBEndToEnd(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	prov := os.Getenv("OSB_PROVISION")
@@ -134,5 +172,60 @@ func TestLoadSnapshot_OSBEndToEnd(t *testing.T) {
 	}
 	if !hasGateway(snap2, "osb-shared-http") {
 		t.Error("shared gateway must persist")
+	}
+}
+
+// R4 Stage 3a-i: a service's rate_limit + health_check survive the Python write,
+// load into the Go Snapshot's Route/Cluster, and render through the builders as a
+// per-route local_ratelimit override + a per-cluster active HTTP health check.
+func TestLoadSnapshot_OSBPerServicePolicy(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	prov := os.Getenv("OSB_PROVISION")
+	if dsn == "" || prov == "" {
+		t.Skip("TEST_DATABASE_URL and OSB_PROVISION required (integration)")
+	}
+
+	const spec = `{"name":"policed","team":"e2epol","host":"10.9.9.20","port":8080,"protocol":"HTTP",` +
+		`"rate_limit":{"requests_per_unit":100,"unit":"SECOND"},` +
+		`"health_check":{"path":"/healthz","interval_seconds":5}}`
+	const derived = "osb-e2epol-policed"
+
+	osbProvision(t, dsn, prov, "create", spec)
+	snap := loadForTest(t, dsn)
+
+	// (a) The loaded domain snapshot carries the policy fields.
+	var route *store.Route
+	for i := range snap.Routes {
+		if snap.Routes[i].Name == derived {
+			route = &snap.Routes[i]
+		}
+	}
+	if route == nil {
+		t.Fatalf("route %s not in snapshot", derived)
+	}
+	if route.RateLimitPerUnit != 100 || route.RateLimitUnit != "SECOND" {
+		t.Errorf("route policy = (%d,%q); want (100, SECOND)", route.RateLimitPerUnit, route.RateLimitUnit)
+	}
+	var cluster *store.Cluster
+	for i := range snap.Clusters {
+		if snap.Clusters[i].Name == derived {
+			cluster = &snap.Clusters[i]
+		}
+	}
+	if cluster == nil {
+		t.Fatalf("cluster %s not in snapshot", derived)
+	}
+	if cluster.HealthCheckPath != "/healthz" || cluster.HealthCheckIntervalSeconds != 5 {
+		t.Errorf("cluster health check = (%q,%d); want (/healthz, 5)", cluster.HealthCheckPath, cluster.HealthCheckIntervalSeconds)
+	}
+
+	// (b) The builders render them onto the derived route + cluster.
+	routeCfgs := builders.BuildRouteConfigs(snap.Gateways, snap.Routes, builders.RateLimitServiceOptions{})
+	if !builtRouteHasLocalRateLimit(routeCfgs, derived) {
+		t.Errorf("built route %s missing local_ratelimit typed_per_filter_config", derived)
+	}
+	clusters := builders.BuildClusters(snap.Clusters, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{})
+	if !builtClusterHasHealthCheck(clusters, derived, "/healthz") {
+		t.Errorf("built cluster %s missing HTTP health check for /healthz", derived)
 	}
 }

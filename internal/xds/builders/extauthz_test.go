@@ -16,7 +16,7 @@ import (
 func TestBuildListeners_ExtAuthz_FailClosedAndOrdered(t *testing.T) {
 	rl := RateLimitOptions{Enabled: true, MaxTokens: 10, TokensPerFill: 10, FillInterval: time.Second}
 	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ea, RateLimitServiceOptions{})[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, nil, rl, ea, RateLimitServiceOptions{})[0])
 
 	// Order: local_ratelimit (pre-auth IP throttle) → ext_authz → router.
 	got := filterNames(hcm)
@@ -43,7 +43,7 @@ func TestBuildListeners_ExtAuthz_FailClosedAndOrdered(t *testing.T) {
 }
 
 func TestBuildListeners_ExtAuthzDisabled_NoFilter(t *testing.T) {
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{}, ExtAuthzOptions{Enabled: false}, RateLimitServiceOptions{})[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, nil, RateLimitOptions{}, ExtAuthzOptions{Enabled: false}, RateLimitServiceOptions{})[0])
 	if slices.Contains(filterNames(hcm), extAuthzFilterName) {
 		t.Fatal("ext_authz filter must not be emitted when disabled")
 	}

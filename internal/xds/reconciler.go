@@ -126,7 +126,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, r.rateLimit, r.extAuthz, r.rls),
+		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, domain.Routes, r.rateLimit, r.extAuthz, r.rls),
 		resourcev3.RouteType:    builders.BuildRouteConfigs(domain.Gateways, domain.Routes, r.rls),
 		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters, r.extAuthz, r.rls),
 		resourcev3.EndpointType: builders.BuildEndpoints(domain.Clusters, domain.Endpoints),

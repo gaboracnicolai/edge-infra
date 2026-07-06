@@ -227,7 +227,8 @@ func loadGateways(ctx context.Context, q querier) ([]Gateway, error) {
 func loadRoutes(ctx context.Context, q querier) ([]Route, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, name, gateway_id, hosts, path_prefix, cluster_name,
-		       COALESCE(timeout_seconds, 30)
+		       COALESCE(timeout_seconds, 30),
+		       COALESCE(rate_limit_per_unit, 0), COALESCE(rate_limit_unit, '')
 		FROM routes
 		WHERE deleted_at IS NULL
 		ORDER BY name
@@ -240,7 +241,8 @@ func loadRoutes(ctx context.Context, q querier) ([]Route, error) {
 	var out []Route
 	for rows.Next() {
 		var r Route
-		if err := rows.Scan(&r.ID, &r.Name, &r.GatewayID, &r.Hosts, &r.PathPrefix, &r.ClusterName, &r.TimeoutSeconds); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.GatewayID, &r.Hosts, &r.PathPrefix, &r.ClusterName,
+			&r.TimeoutSeconds, &r.RateLimitPerUnit, &r.RateLimitUnit); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -250,7 +252,8 @@ func loadRoutes(ctx context.Context, q querier) ([]Route, error) {
 
 func loadClusters(ctx context.Context, q querier) ([]Cluster, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, name, connect_timeout_ms, lb_policy
+		SELECT id, name, connect_timeout_ms, lb_policy,
+		       COALESCE(health_check_path, ''), COALESCE(health_check_interval_s, 0)
 		FROM clusters
 		ORDER BY name
 	`)
@@ -263,7 +266,8 @@ func loadClusters(ctx context.Context, q querier) ([]Cluster, error) {
 	for rows.Next() {
 		var c Cluster
 		var ms int64
-		if err := rows.Scan(&c.ID, &c.Name, &ms, &c.LbPolicy); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &ms, &c.LbPolicy,
+			&c.HealthCheckPath, &c.HealthCheckIntervalSeconds); err != nil {
 			return nil, err
 		}
 		c.ConnectTimeout = time.Duration(ms) * time.Millisecond

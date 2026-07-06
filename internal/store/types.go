@@ -31,6 +31,11 @@ type Route struct {
 	PathPrefix     string
 	ClusterName    string
 	TimeoutSeconds int
+
+	// Per-service rate limit (R4 Stage 3a-i). RateLimitPerUnit == 0 means no
+	// limit; rendered as a per-route local_ratelimit typed_per_filter_config.
+	RateLimitPerUnit int
+	RateLimitUnit    string // "SECOND" | "MINUTE" | "HOUR"
 }
 
 // Cluster is the domain model for an Envoy upstream cluster.
@@ -39,6 +44,11 @@ type Cluster struct {
 	Name           string
 	ConnectTimeout time.Duration
 	LbPolicy       string
+
+	// Per-service active HTTP health check (R4 Stage 3a-i). An empty
+	// HealthCheckPath means no health check.
+	HealthCheckPath            string
+	HealthCheckIntervalSeconds int
 }
 
 // Endpoint is the domain model for an individual upstream endpoint (host:port).

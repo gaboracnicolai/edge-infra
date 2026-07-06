@@ -3,9 +3,15 @@ package builders
 import (
 	"sort"
 	"strings"
+	"time"
 
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/edge-infra/control-plane/internal/store"
 )
@@ -81,7 +87,7 @@ func routesFor(rs []store.Route) []*routev3.Route {
 		if prefix == "" {
 			prefix = "/"
 		}
-		out = append(out, &routev3.Route{
+		rt := &routev3.Route{
 			Name: r.Name,
 			Match: &routev3.RouteMatch{
 				PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: prefix},
@@ -91,7 +97,46 @@ func routesFor(rs []store.Route) []*routev3.Route {
 					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: r.ClusterName},
 				},
 			},
-		})
+		}
+		// Per-service rate limit → a per-route local_ratelimit override (the base
+		// filter is guaranteed present by the LDS presence guard).
+		if r.RateLimitPerUnit > 0 {
+			rt.TypedPerFilterConfig = map[string]*anypb.Any{
+				localRateLimitFilterName: mustAny(perRouteLocalRateLimit(r)),
+			}
+		}
+		out = append(out, rt)
 	}
 	return out
+}
+
+// perRouteLocalRateLimit renders a service's rate_limit as a per-route
+// local_ratelimit override: a bucket of RateLimitPerUnit tokens refilled fully
+// each unit, enforced at 100% with a 429.
+func perRouteLocalRateLimit(r store.Route) *lrlv3.LocalRateLimit {
+	tokens := uint32(r.RateLimitPerUnit)
+	return &lrlv3.LocalRateLimit{
+		StatPrefix: "http_local_rate_limit",
+		Status:     &typev3.HttpStatus{Code: typev3.StatusCode_TooManyRequests},
+		TokenBucket: &typev3.TokenBucket{
+			MaxTokens:     tokens,
+			TokensPerFill: wrapperspb.UInt32(tokens),
+			FillInterval:  durationpb.New(rateLimitUnitDuration(r.RateLimitUnit)),
+		},
+		FilterEnabled:  fullPercent(),
+		FilterEnforced: fullPercent(),
+	}
+}
+
+// rateLimitUnitDuration maps a ServiceSpec rate_limit unit to a fill interval.
+// The unit is validated upstream (SECOND/MINUTE/HOUR); default to a second.
+func rateLimitUnitDuration(unit string) time.Duration {
+	switch unit {
+	case "MINUTE":
+		return time.Minute
+	case "HOUR":
+		return time.Hour
+	default:
+		return time.Second
+	}
 }

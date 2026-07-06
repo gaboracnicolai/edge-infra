@@ -35,6 +35,7 @@ done
 
 echo "==> applying BOTH migration sets to the one shared database"
 for f in migrations/0001_init.sql migrations/0002_controller_fields.sql \
+         migrations/0003_service_policy.sql \
          osb/migrations/0001_osb.sql osb/migrations/0002_tenancy.sql; do
   docker exec -i "$PG" psql -U postgres -d edge -q -f - <"$f"
 done
@@ -55,6 +56,6 @@ echo "==> python translator + tenancy integration suites"
 (cd osb && "$VENV/bin/pytest" tests/test_translator.py tests/test_tenancy.py -q)
 
 echo "==> go cross-language E2E (Python translator writes -> Go LoadSnapshot serves)"
-go test -tags integration ./internal/store/ -run TestLoadSnapshot_OSBEndToEnd
+go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
 
 echo "==> PASS: OSB -> data-plane translator proven against one shared DB"

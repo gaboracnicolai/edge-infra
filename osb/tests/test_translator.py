@@ -189,6 +189,64 @@ async def test_delete_absent_is_noop(pool, cfg):
     m.nak.assert_not_awaited()
 
 
+# --- Stage 3a-i: per-service rate_limit + health_check on the derived rows -----
+
+# 5. rate_limit + health_check are persisted onto the derived route / cluster.
+async def test_policy_persisted_on_derived_rows(pool, cfg):
+    spec = ServiceSpec(
+        name="checkout", team="payments", host="10.0.0.5", port=8080, protocol="HTTP",
+        rate_limit={"requests_per_unit": 100, "unit": "SECOND"},
+        health_check={"path": "/healthz", "interval_seconds": 5},
+    )
+    await _create(pool, cfg, spec)
+    async with pool.acquire() as c:
+        rt = await c.fetchrow(
+            "SELECT rate_limit_per_unit, rate_limit_unit FROM routes "
+            "WHERE name='osb-payments-checkout'"
+        )
+        cl = await c.fetchrow(
+            "SELECT health_check_path, health_check_interval_s FROM clusters "
+            "WHERE name='osb-payments-checkout'"
+        )
+    assert rt["rate_limit_per_unit"] == 100 and rt["rate_limit_unit"] == "SECOND"
+    assert cl["health_check_path"] == "/healthz" and cl["health_check_interval_s"] == 5
+
+
+# 6. A service without policy leaves the columns NULL (controller rows unchanged).
+async def test_policy_absent_leaves_null(pool, cfg):
+    await _create(pool, cfg, _http_spec(name="plain", team="ops"))
+    async with pool.acquire() as c:
+        rt = await c.fetchrow(
+            "SELECT rate_limit_per_unit, rate_limit_unit FROM routes WHERE name='osb-ops-plain'"
+        )
+        cl = await c.fetchrow(
+            "SELECT health_check_path, health_check_interval_s FROM clusters "
+            "WHERE name='osb-ops-plain'"
+        )
+    assert rt["rate_limit_per_unit"] is None and rt["rate_limit_unit"] is None
+    assert cl["health_check_path"] is None and cl["health_check_interval_s"] is None
+
+
+# 7. A re-CREATE that drops the policy NULLs the columns (no stale limit/check).
+async def test_policy_removed_on_recreate_nulls_columns(pool, cfg):
+    with_policy = ServiceSpec(
+        name="drift", team="payments", host="10.0.0.5", port=8080, protocol="HTTP",
+        rate_limit={"requests_per_unit": 50, "unit": "MINUTE"},
+        health_check={"path": "/hz", "interval_seconds": 10},
+    )
+    await _create(pool, cfg, with_policy)
+    await _create(pool, cfg, _http_spec(name="drift", team="payments"))  # policy dropped
+    async with pool.acquire() as c:
+        rt = await c.fetchrow(
+            "SELECT rate_limit_per_unit FROM routes WHERE name='osb-payments-drift'"
+        )
+        cl = await c.fetchrow(
+            "SELECT health_check_path FROM clusters WHERE name='osb-payments-drift'"
+        )
+    assert rt["rate_limit_per_unit"] is None  # stale limit cleared
+    assert cl["health_check_path"] is None  # stale health check cleared
+
+
 # The osb-{team}- prefix keeps derived rows disjoint from controller-written
 # rows: a controller cluster with a user-chosen name is never touched.
 async def test_controller_rows_untouched(pool, cfg):

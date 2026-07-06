@@ -20,6 +20,11 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
+// localRateLimitFilterName is the Envoy HTTP filter name for local_ratelimit —
+// the base filter and the per-route (per-service) typed_per_filter_config
+// overrides both key on it.
+const localRateLimitFilterName = "envoy.filters.http.local_ratelimit"
+
 // RateLimitOptions configures the per-listener Envoy local_ratelimit filter.
 // It is intentionally fail-open: when the limiter is disabled or misconfigured
 // the gateway keeps serving traffic. This is the opposite posture from auth.
@@ -30,15 +35,19 @@ type RateLimitOptions struct {
 	FillInterval  time.Duration // refill period (must be > 0)
 }
 
-func BuildListeners(gateways []store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
+func BuildListeners(gateways []store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
+	byGateway := make(map[string][]store.Route, len(gateways))
+	for _, r := range routes {
+		byGateway[r.GatewayID] = append(byGateway[r.GatewayID], r)
+	}
 	out := make([]types.Resource, 0, len(gateways))
 	for _, g := range gateways {
-		out = append(out, listenerForGateway(g, rl, ea, rls))
+		out = append(out, listenerForGateway(g, byGateway[g.ID], rl, ea, rls))
 	}
 	return out
 }
 
-func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) *listenerv3.Listener {
+func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) *listenerv3.Listener {
 	hcm := &hcmv3.HttpConnectionManager{
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
 		StatPrefix: g.Name,
@@ -48,7 +57,10 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions
 				RouteConfigName: RouteConfigName(g.Name),
 			},
 		},
-		HttpFilters: httpFilters(rl, ea, rls),
+		// Presence guard: a per-route local_ratelimit override is inert unless the
+		// base filter is in the chain, so emit it when the global throttle is on OR
+		// any route on this gateway carries a per-service limit.
+		HttpFilters: httpFilters(rl, ea, rls, anyRouteNeedsLocalRateLimit(routes)),
 	}
 
 	filterChain := &listenerv3.FilterChain{
@@ -75,10 +87,14 @@ func listenerForGateway(g store.Gateway, rl RateLimitOptions, ea ExtAuthzOptions
 // pre-auth IP throttle that shields the auth-service from unauthenticated
 // floods) → ext_authz → router (always last). Phase B's identity-keyed limiter
 // will sit after ext_authz, once x-user-id flows.
-func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) []*hcmv3.HttpFilter {
+func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions, needsLocalRateLimit bool) []*hcmv3.HttpFilter {
 	var filters []*hcmv3.HttpFilter
 	if rl.Enabled {
 		filters = append(filters, localRateLimitFilter(rl))
+	} else if needsLocalRateLimit {
+		// No global throttle, but a per-service limit needs the base filter present
+		// to host its per-route override. This base does nothing on its own.
+		filters = append(filters, localRateLimitBaseFilter())
 	}
 	if ea.Enabled {
 		filters = append(filters, extAuthzFilter(ea))
@@ -87,6 +103,42 @@ func httpFilters(rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOp
 		filters = append(filters, rateLimitFilter(rls))
 	}
 	return append(filters, routerFilter())
+}
+
+// anyRouteNeedsLocalRateLimit reports whether any route carries a per-service
+// rate limit (and therefore needs the base local_ratelimit filter present).
+func anyRouteNeedsLocalRateLimit(routes []store.Route) bool {
+	for _, r := range routes {
+		if r.RateLimitPerUnit > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// localRateLimitBaseFilter is a no-op base local_ratelimit filter: 0% enabled, so
+// it never throttles on its own. It exists only so per-route (per-service)
+// typed_per_filter_config overrides have a filter to attach to when the global
+// throttle is disabled.
+func localRateLimitBaseFilter() *hcmv3.HttpFilter {
+	cfg := &lrlv3.LocalRateLimit{
+		StatPrefix: "http_local_rate_limit",
+		// A token bucket is required by the proto even at 0% enabled; per-route
+		// overrides replace it entirely for services that set a rate_limit.
+		TokenBucket: &typev3.TokenBucket{
+			MaxTokens:     1,
+			TokensPerFill: wrapperspb.UInt32(1),
+			FillInterval:  durationpb.New(time.Second),
+		},
+		FilterEnabled:  zeroPercent(),
+		FilterEnforced: zeroPercent(),
+	}
+	return &hcmv3.HttpFilter{
+		Name: localRateLimitFilterName,
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{
+			TypedConfig: mustAny(cfg),
+		},
+	}
 }
 
 func routerFilter() *hcmv3.HttpFilter {
@@ -128,7 +180,7 @@ func localRateLimitFilter(rl RateLimitOptions) *hcmv3.HttpFilter {
 		}},
 	}
 	return &hcmv3.HttpFilter{
-		Name: "envoy.filters.http.local_ratelimit",
+		Name: localRateLimitFilterName,
 		ConfigType: &hcmv3.HttpFilter_TypedConfig{
 			TypedConfig: mustAny(cfg),
 		},
@@ -140,6 +192,17 @@ func fullPercent() *corev3.RuntimeFractionalPercent {
 	return &corev3.RuntimeFractionalPercent{
 		DefaultValue: &typev3.FractionalPercent{
 			Numerator:   100,
+			Denominator: typev3.FractionalPercent_HUNDRED,
+		},
+	}
+}
+
+// zeroPercent is 0% — the filter never applies at the base level (used by the
+// no-op base local_ratelimit filter; per-route overrides set their own percent).
+func zeroPercent() *corev3.RuntimeFractionalPercent {
+	return &corev3.RuntimeFractionalPercent{
+		DefaultValue: &typev3.FractionalPercent{
+			Numerator:   0,
 			Denominator: typev3.FractionalPercent_HUNDRED,
 		},
 	}

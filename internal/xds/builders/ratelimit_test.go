@@ -20,7 +20,7 @@ func enabledRLS() RateLimitServiceOptions {
 func TestBuildListeners_RateLimitService_FailOpenAndOrdered(t *testing.T) {
 	rl := RateLimitOptions{Enabled: true, MaxTokens: 10, TokensPerFill: 10, FillInterval: time.Second}
 	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service", Port: 50051}
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, rl, ea, enabledRLS())[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, nil, rl, ea, enabledRLS())[0])
 
 	// Order: local_ratelimit → ext_authz → ratelimit → router.
 	got := filterNames(hcm)
@@ -46,7 +46,7 @@ func TestBuildListeners_RateLimitService_FailOpenAndOrdered(t *testing.T) {
 }
 
 func TestBuildListeners_RateLimitServiceDisabled_NoFilter(t *testing.T) {
-	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{Enabled: false})[0])
+	hcm := hcmFromListener(t, BuildListeners([]store.Gateway{sampleGateway()}, nil, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{Enabled: false})[0])
 	if slices.Contains(filterNames(hcm), rateLimitFilterName) {
 		t.Fatal("global ratelimit filter must not be emitted when disabled")
 	}

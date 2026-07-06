@@ -73,19 +73,27 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         SHARED_HTTP_GATEWAY,
     )
 
-    # 2. Per-service cluster (EDS; endpoints attached below).
+    # 2. Per-service cluster (EDS; endpoints attached below). The health_check
+    #    columns carry the service's active HTTP check; ON CONFLICT sets them
+    #    from EXCLUDED so a re-CREATE that drops health_check NULLs them (no stale
+    #    check served).
     await conn.execute(
         """
-        INSERT INTO clusters (id, name, connect_timeout_ms, lb_policy)
-        VALUES ($1, $1, $2, $3)
+        INSERT INTO clusters (id, name, connect_timeout_ms, lb_policy,
+                              health_check_path, health_check_interval_s)
+        VALUES ($1, $1, $2, $3, $4, $5)
         ON CONFLICT (name) DO UPDATE SET
-            connect_timeout_ms = EXCLUDED.connect_timeout_ms,
-            lb_policy          = EXCLUDED.lb_policy,
-            updated_at         = NOW()
+            connect_timeout_ms      = EXCLUDED.connect_timeout_ms,
+            lb_policy               = EXCLUDED.lb_policy,
+            health_check_path       = EXCLUDED.health_check_path,
+            health_check_interval_s = EXCLUDED.health_check_interval_s,
+            updated_at              = NOW()
         """,
         dn,
         _DEFAULT_CONNECT_TIMEOUT_MS,
         _DEFAULT_LB_POLICY,
+        spec.health_check.path if spec.health_check else None,
+        spec.health_check.interval_seconds if spec.health_check else None,
     )
 
     # 3. Endpoint — one per service. Replace so a changed host/port leaves no
@@ -102,25 +110,33 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         spec.port,
     )
 
-    # 4. Route on the shared gateway, forwarding to the cluster by name.
+    # 4. Route on the shared gateway, forwarding to the cluster by name. The
+    #    rate_limit columns carry the service's per-route local_ratelimit; ON
+    #    CONFLICT sets them from EXCLUDED so a re-CREATE that drops rate_limit
+    #    NULLs them (no stale limit served).
     await conn.execute(
         """
         INSERT INTO routes
-            (id, name, gateway_id, hosts, path_prefix, cluster_name, timeout_seconds, deleted_at)
-        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, NULL)
+            (id, name, gateway_id, hosts, path_prefix, cluster_name, timeout_seconds,
+             rate_limit_per_unit, rate_limit_unit, deleted_at)
+        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, NULL)
         ON CONFLICT (name) DO UPDATE SET
-            gateway_id      = EXCLUDED.gateway_id,
-            hosts           = EXCLUDED.hosts,
-            path_prefix     = EXCLUDED.path_prefix,
-            cluster_name    = EXCLUDED.cluster_name,
-            timeout_seconds = EXCLUDED.timeout_seconds,
-            updated_at      = NOW(),
-            deleted_at      = NULL
+            gateway_id          = EXCLUDED.gateway_id,
+            hosts               = EXCLUDED.hosts,
+            path_prefix         = EXCLUDED.path_prefix,
+            cluster_name        = EXCLUDED.cluster_name,
+            timeout_seconds     = EXCLUDED.timeout_seconds,
+            rate_limit_per_unit = EXCLUDED.rate_limit_per_unit,
+            rate_limit_unit     = EXCLUDED.rate_limit_unit,
+            updated_at          = NOW(),
+            deleted_at          = NULL
         """,
         dn,
         SHARED_HTTP_GATEWAY,
         [spec.host],
         _DEFAULT_ROUTE_TIMEOUT_S,
+        spec.rate_limit.requests_per_unit if spec.rate_limit else None,
+        spec.rate_limit.unit if spec.rate_limit else None,
     )
 
     log.info("osb http service fanned out", service=spec.name, team=spec.team, cluster=dn)
