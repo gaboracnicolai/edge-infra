@@ -56,7 +56,10 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_URL: postgres://osb:osb@localhost:5432/edge?sslmode=disable
-      OSB_PROVISION: python osb/tools/provision.py
+      # Absolute path: the Go E2E runs `go test ./internal/store/`, whose test
+      # binary executes with cwd=the package dir, so a relative provision.py path
+      # would resolve under internal/store/. github.workspace is the repo root.
+      OSB_PROVISION: python ${{ github.workspace }}/osb/tools/provision.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
