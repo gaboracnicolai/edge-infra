@@ -54,6 +54,10 @@ rateLimitService:
   certFile: ""
   keyFile: ""
 
+# R4 CO-LOCATION: this DSN and the edge-osb DATABASE_URL must reference the SAME
+# Postgres database (both schemas applied there), so the OSB translator can write
+# derived data-plane rows in the same transaction as the services row.
+# See docs/osb-translator-stage1.md.
 postgres:
   existingSecret: edge-control-plane-postgres
   secretKey: dsn

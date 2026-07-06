@@ -15,6 +15,7 @@ from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import ConsumerConfig
 
 import metrics
+import translator
 import webhook
 from config import Settings
 from db import create_pool
@@ -71,6 +72,36 @@ def _spawn_webhook(url: str, payload: dict[str, Any], cfg: Settings) -> None:
     task.add_done_callback(_webhook_tasks.discard)
 
 
+async def _complete_request(conn, request_id: UUID | None, service_name: str | None):
+    """Mark the provision_requests row COMPLETED and return the webhook (url,
+    payload) to deliver after ack, if any. Runs inside the caller's transaction
+    so the status flips atomically with the service + data-plane writes.
+    """
+    if request_id is None:
+        return None
+    await conn.execute(
+        "UPDATE provision_requests SET status = 'COMPLETED', completed_at = NOW() WHERE id = $1",
+        request_id,
+    )
+    row = await conn.fetchrow(
+        "SELECT webhook_url FROM provision_requests WHERE id = $1",
+        request_id,
+    )
+    if row is not None and row["webhook_url"]:
+        # Capture the delivery; fire it only after the ack so a slow webhook
+        # can't hold the message past ack_wait.
+        return (
+            row["webhook_url"],
+            {
+                "request_id": str(request_id),
+                "status": "COMPLETED",
+                "service": service_name,
+                "timestamp": datetime.now(tz=UTC).isoformat(),
+            },
+        )
+    return None
+
+
 async def process_message(msg: Any, pool, cfg: Settings) -> None:
     """Apply a single NATS message: write services row, ack on success, nak on failure."""
     headers = msg.headers or {}
@@ -83,76 +114,60 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
         if msg.subject == cfg.nats_subject_provision:
             spec = ServiceSpec.model_validate_json(msg.data)
             service_name = spec.name
-            await pool.execute(
-                """
-                INSERT INTO services
-                    (name, team, host, port, protocol, tls_secret_name, auth_policy,
-                     rate_limit, health_check, node_selector)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb)
-                ON CONFLICT (name) DO UPDATE SET
-                    team             = EXCLUDED.team,
-                    host             = EXCLUDED.host,
-                    port             = EXCLUDED.port,
-                    protocol         = EXCLUDED.protocol,
-                    tls_secret_name  = EXCLUDED.tls_secret_name,
-                    auth_policy      = EXCLUDED.auth_policy,
-                    rate_limit       = EXCLUDED.rate_limit,
-                    health_check     = EXCLUDED.health_check,
-                    node_selector    = EXCLUDED.node_selector,
-                    updated_at       = NOW(),
-                    deleted_at       = NULL
-                """,
-                spec.name,
-                spec.team,
-                spec.host,
-                spec.port,
-                spec.protocol,
-                spec.tls_secret_name,
-                spec.auth_policy,
-                spec.rate_limit.model_dump_json() if spec.rate_limit else None,
-                spec.health_check.model_dump_json() if spec.health_check else None,
-                json.dumps(spec.node_selector),
-            )
+            # One transaction: the services row + the derived data-plane rows +
+            # the request-status update commit together. A partial fan-out
+            # failure rolls the whole provision back — no half-built Envoy config.
+            async with pool.acquire() as conn, conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO services
+                        (name, team, host, port, protocol, tls_secret_name, auth_policy,
+                         rate_limit, health_check, node_selector)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb)
+                    ON CONFLICT (name) DO UPDATE SET
+                        team             = EXCLUDED.team,
+                        host             = EXCLUDED.host,
+                        port             = EXCLUDED.port,
+                        protocol         = EXCLUDED.protocol,
+                        tls_secret_name  = EXCLUDED.tls_secret_name,
+                        auth_policy      = EXCLUDED.auth_policy,
+                        rate_limit       = EXCLUDED.rate_limit,
+                        health_check     = EXCLUDED.health_check,
+                        node_selector    = EXCLUDED.node_selector,
+                        updated_at       = NOW(),
+                        deleted_at       = NULL
+                    """,
+                    spec.name,
+                    spec.team,
+                    spec.host,
+                    spec.port,
+                    spec.protocol,
+                    spec.tls_secret_name,
+                    spec.auth_policy,
+                    spec.rate_limit.model_dump_json() if spec.rate_limit else None,
+                    spec.health_check.model_dump_json() if spec.health_check else None,
+                    json.dumps(spec.node_selector),
+                )
+                outcome = await translator.apply_create(conn, spec)
+                pending_webhook = await _complete_request(conn, request_id, service_name)
+            metrics.services_derived_total[(spec.protocol, outcome)] += 1
         elif msg.subject == cfg.nats_subject_deprovision:
             payload = json.loads(msg.data)
             service_name = payload["name"]
-            await pool.execute(
-                """
-                UPDATE services SET deleted_at = NOW(), updated_at = NOW()
-                WHERE name = $1 AND deleted_at IS NULL
-                """,
-                service_name,
-            )
+            async with pool.acquire() as conn, conn.transaction():
+                await translator.apply_delete(conn, service_name)
+                await conn.execute(
+                    """
+                    UPDATE services SET deleted_at = NOW(), updated_at = NOW()
+                    WHERE name = $1 AND deleted_at IS NULL
+                    """,
+                    service_name,
+                )
+                pending_webhook = await _complete_request(conn, request_id, service_name)
         else:
             log.warning("unknown subject; acking to drop", subject=msg.subject)
             await msg.ack()
             return
-
-        if request_id is not None:
-            await pool.execute(
-                """
-                UPDATE provision_requests
-                SET status = 'COMPLETED', completed_at = NOW()
-                WHERE id = $1
-                """,
-                request_id,
-            )
-            row = await pool.fetchrow(
-                "SELECT webhook_url FROM provision_requests WHERE id = $1",
-                request_id,
-            )
-            if row is not None and row["webhook_url"]:
-                # Capture the delivery; fire it only after the ack below so a
-                # slow webhook can't hold the message past ack_wait.
-                pending_webhook = (
-                    row["webhook_url"],
-                    {
-                        "request_id": str(request_id),
-                        "status": "COMPLETED",
-                        "service": service_name,
-                        "timestamp": datetime.now(tz=UTC).isoformat(),
-                    },
-                )
 
         await msg.ack()
         metrics.nats_messages_total[(operation, "ack")] += 1

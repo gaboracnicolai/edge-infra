@@ -12,6 +12,10 @@ from collections import defaultdict
 requests_total: dict[tuple[str, str], int] = defaultdict(int)
 webhook_deliveries_total: dict[str, int] = defaultdict(int)
 nats_messages_total: dict[tuple[str, str], int] = defaultdict(int)
+# Data-plane fan-out outcomes, keyed by (protocol, outcome). HTTP services yield
+# ("HTTP", "provisioned"); HTTPS is deferred to Stage 3 and records
+# ("HTTPS", "deferred_https") so the deferral is observable, not silent.
+services_derived_total: dict[tuple[str, str], int] = defaultdict(int)
 
 
 def render() -> str:
@@ -33,6 +37,13 @@ def render() -> str:
     for (operation, result), count in sorted(nats_messages_total.items()):
         lines.append(
             f'osb_nats_messages_total{{operation="{operation}",result="{result}"}} {count}'
+        )
+
+    lines.append("# HELP osb_services_derived_total Data-plane fan-out outcomes by protocol.")
+    lines.append("# TYPE osb_services_derived_total counter")
+    for (protocol, outcome), count in sorted(services_derived_total.items()):
+        lines.append(
+            f'osb_services_derived_total{{protocol="{protocol}",outcome="{outcome}"}} {count}'
         )
 
     return "\n".join(lines) + "\n"

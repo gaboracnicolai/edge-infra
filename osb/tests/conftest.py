@@ -25,10 +25,30 @@ def cfg() -> Settings:
 
 @pytest.fixture
 def mock_pool() -> AsyncMock:
-    """asyncpg.Pool double — execute/fetchrow are awaitable and return None by default."""
+    """asyncpg.Pool double — execute/fetchrow are awaitable and return None by default.
+
+    The worker's transactional path, ``async with pool.acquire() as conn,
+    conn.transaction():``, yields a connection whose execute/fetchrow are the
+    SAME mocks as the pool's, so call-based assertions observe both the
+    direct-pool and in-transaction statements. __aexit__ returns False, so an
+    exception in the body propagates (simulating a rollback).
+    """
     pool = AsyncMock()
     pool.execute = AsyncMock(return_value=None)
     pool.fetchrow = AsyncMock(return_value=None)
+
+    conn = AsyncMock()
+    conn.execute = pool.execute
+    conn.fetchrow = pool.fetchrow
+
+    def _acm(enter_value: object) -> AsyncMock:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=enter_value)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    conn.transaction = lambda *a, **k: _acm(None)
+    pool.acquire = lambda *a, **k: _acm(conn)
     return pool
 
 

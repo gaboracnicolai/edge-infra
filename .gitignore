@@ -30,3 +30,6 @@ auth-service/dist/
 *.pem
 *.key
 !observability/grafana/dashboards/*.json
+
+# integration-test python venv (make test-integration)
+.venv-integration/

@@ -49,15 +49,12 @@ async def test_worker_create_acks(mock_pool, cfg, service_spec_dict):
     msg.ack.assert_awaited_once()
     msg.nak.assert_not_called()
 
-    # First execute is the INSERT ... ON CONFLICT ... DO UPDATE on services.
-    first_sql = mock_pool.execute.call_args_list[0].args[0]
-    assert "INSERT INTO services" in first_sql
-    assert "ON CONFLICT (name) DO UPDATE" in first_sql
-
-    # Then provision_requests transitions to COMPLETED.
-    second_sql = mock_pool.execute.call_args_list[1].args[0]
-    assert "UPDATE provision_requests" in second_sql
-    assert "'COMPLETED'" in second_sql
+    # The services upsert and the provision_requests COMPLETED transition both
+    # run (order-independent: the translator's derived-row writes sit between
+    # them inside the same transaction).
+    sqls = [c.args[0] for c in mock_pool.execute.call_args_list]
+    assert any("INSERT INTO services" in s and "ON CONFLICT (name) DO UPDATE" in s for s in sqls)
+    assert any("UPDATE provision_requests" in s and "'COMPLETED'" in s for s in sqls)
 
 
 async def test_worker_delete_soft_deletes(mock_pool, cfg):
