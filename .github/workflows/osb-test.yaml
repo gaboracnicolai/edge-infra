@@ -1,0 +1,95 @@
+name: OSB Test
+
+# Runs the OSB broker's Python suite. Before this, no workflow ran osb/** tests
+# — only images.yaml built the image, so the R4 translator's unit correctness
+# re-ran on no push. Two jobs:
+#   pytest       — fast, DB-free gate (mock suite); the always-green gate.
+#   integration  — the cross-language OSB -> data-plane E2E against a real
+#                  Postgres (Python translator writes; Go LoadSnapshot serves).
+#
+# GitHub path filters are workflow-level, so both jobs share the union of paths;
+# the fast pytest gate harmlessly also runs on internal/store/** changes (which
+# can affect the reader the translator targets).
+on:
+  push:
+    paths:
+      - 'osb/**'
+      - 'internal/store/**'
+      - '.github/workflows/osb-test.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'osb/**'
+      - 'internal/store/**'
+      - '.github/workflows/osb-test.yaml'
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install OSB + dev deps
+        run: pip install -e './osb[dev]'
+      - name: pytest (mock-only; integration tests skip without TEST_DATABASE_URL)
+        run: pytest -q
+        working-directory: osb
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: osb
+          POSTGRES_PASSWORD: osb
+          POSTGRES_DB: edge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U osb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://osb:osb@localhost:5432/edge?sslmode=disable
+      OSB_PROVISION: python osb/tools/provision.py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Install OSB + dev deps
+        run: pip install -e './osb[dev]'
+      - name: Apply both schemas to the one shared database
+        run: |
+          python - <<'PY'
+          import asyncio, os, asyncpg
+          FILES = [
+              "migrations/0001_init.sql",
+              "migrations/0002_controller_fields.sql",
+              "osb/migrations/0001_osb.sql",
+          ]
+          async def main():
+              conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
+              try:
+                  for f in FILES:
+                      with open(f) as fh:
+                          await conn.execute(fh.read())
+              finally:
+                  await conn.close()
+          asyncio.run(main())
+          PY
+      - name: Python translator suite (shared DB)
+        run: pytest tests/test_translator.py -q
+        working-directory: osb
+      - name: Go cross-language E2E (-count=1, no cached pass)
+        run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSBEndToEnd
