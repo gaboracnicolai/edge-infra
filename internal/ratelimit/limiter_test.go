@@ -8,7 +8,7 @@ import (
 )
 
 func TestLimiter_TripsAfterCapacity(t *testing.T) {
-	l := New(nil) // in-process
+	l := New(nil)                                // in-process
 	rule := Rule{Capacity: 3, RatePerSec: 0.001} // negligible refill during the test
 	ctx := context.Background()
 
