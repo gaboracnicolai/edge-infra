@@ -24,6 +24,20 @@ from tls import build_nats_tls
 
 log = structlog.get_logger(__name__)
 
+# JetStream redelivery budget. Shared by the consumer config and the worker's
+# dead-letter threshold so a message that fails its FINAL delivery is captured in
+# the dead_letter table rather than nak'd into a silent drop.
+MAX_DELIVER = 6
+
+
+def _num_delivered(msg: Any) -> int:
+    """The JetStream delivery count for msg (1-based); 1 if unavailable."""
+    try:
+        n = int(msg.metadata.num_delivered)
+        return n if n > 0 else 1
+    except Exception:  # noqa: BLE001 — any shape we can't read means "first delivery"
+        return 1
+
 
 def _operation_for(subject: str, cfg: Settings) -> str:
     if subject == cfg.nats_subject_provision:
@@ -189,6 +203,37 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
                 )
             except Exception:  # noqa: BLE001 — best-effort status write
                 log.exception("failed to mark provision_requests FAILED", request_id=request_id)
+
+        # If the message has exhausted its redelivery budget, dead-letter it and
+        # ACK (stop retrying) — never nak at the limit, which would silently drop
+        # it. Below the limit, nak so JetStream retries.
+        if _num_delivered(msg) >= MAX_DELIVER:
+            raw = msg.data
+            payload = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+            try:
+                await pool.execute(
+                    """
+                    INSERT INTO dead_letter (msg_id, subject, operation, payload, error, delivered)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    headers.get("Nats-Msg-Id"),
+                    msg.subject,
+                    operation,
+                    payload,
+                    str(exc),
+                    _num_delivered(msg),
+                )
+            except Exception:  # noqa: BLE001 — best-effort DLQ write; still ack to stop retries
+                log.exception("failed to write dead_letter", request_id=request_id)
+            await msg.ack()
+            metrics.nats_messages_total[(operation, "dead_letter")] += 1
+            log.error(
+                "message dead-lettered after exhausting retries",
+                request_id=request_id,
+                subject=msg.subject,
+            )
+            return
+
         await msg.nak(delay=30)
         metrics.nats_messages_total[(operation, "nak")] += 1
         return
@@ -207,7 +252,7 @@ async def run_worker(cfg: Settings, pool, js) -> None:
         "edge.provision.*",
         durable=cfg.nats_consumer_durable,
         manual_ack=True,
-        config=ConsumerConfig(ack_wait=30, max_deliver=6),
+        config=ConsumerConfig(ack_wait=30, max_deliver=MAX_DELIVER),
     )
     log.info("worker subscribed", durable=cfg.nats_consumer_durable)
 

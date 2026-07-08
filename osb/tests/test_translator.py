@@ -323,6 +323,22 @@ async def test_mtls_writes_client_ca_reference(pool, cfg):
     assert material is None  # BOUNDARY: OSB referenced but wrote no cert/CA material
 
 
+# R9: a re-delivered (duplicate) provision is a safe no-op — apply_create upserts
+# everything, so applying the same spec twice leaves exactly one derived row set.
+async def test_apply_create_is_idempotent(pool, cfg):
+    spec = ServiceSpec(name="idem", team="platform", host="10.0.0.9", port=8080, protocol="HTTP")
+    await _create(pool, cfg, spec)
+    await _create(pool, cfg, spec)  # duplicate delivery of the same message
+    dn = "osb-platform-idem"
+    async with pool.acquire() as c:
+        routes = await c.fetchval("SELECT count(*) FROM routes WHERE name = $1", dn)
+        clusters = await c.fetchval("SELECT count(*) FROM clusters WHERE name = $1", dn)
+        endpoints = await c.fetchval("SELECT count(*) FROM endpoints WHERE cluster_id = $1", dn)
+    assert (routes, clusters, endpoints) == (1, 1, 1), (
+        f"duplicate delivery must be a no-op; got r={routes} c={clusters} e={endpoints}"
+    )
+
+
 # The osb-{team}- prefix keeps derived rows disjoint from controller-written
 # rows: a controller cluster with a user-chosen name is never touched.
 async def test_controller_rows_untouched(pool, cfg):

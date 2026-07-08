@@ -254,3 +254,39 @@ async def test_run_retention_sweep_returns_when_disabled(mock_pool, cfg, monkeyp
     # Must return promptly instead of entering the periodic loop.
     await asyncio.wait_for(worker.run_retention_sweep(cfg, mock_pool), timeout=1.0)
     mock_pool.execute.assert_not_called()
+
+
+async def test_worker_dead_letters_after_max_deliver(mock_pool, cfg, service_spec_dict):
+    # A message that has exhausted its redelivery budget and still fails must be
+    # routed to the dead_letter table and ACKed (stop retrying) — never nak'd
+    # (which, at max_deliver, would silently drop it).
+    request_id = str(uuid4())
+    msg = make_msg(
+        cfg.nats_subject_provision,
+        service_spec_dict,
+        headers={"Nats-Msg-Id": request_id},
+    )
+    msg.metadata.num_delivered = worker.MAX_DELIVER  # final delivery
+    # INSERT services fails; the FAILED-status update and the DLQ insert succeed.
+    mock_pool.execute.side_effect = [asyncpg.PostgresError("boom"), None, None]
+
+    await worker.process_message(msg, mock_pool, cfg)
+
+    msg.ack.assert_awaited_once()
+    msg.nak.assert_not_called()
+    dlq = [
+        c for c in mock_pool.execute.await_args_list if "dead_letter" in str(c).lower()
+    ]
+    assert dlq, "an exhausted, still-failing message must be written to dead_letter"
+
+
+async def test_worker_naks_before_max_deliver(mock_pool, cfg, service_spec_dict):
+    # Before the budget is exhausted, a failure still naks (retry), not DLQ.
+    msg = make_msg(
+        cfg.nats_subject_provision, service_spec_dict, headers={"Nats-Msg-Id": str(uuid4())}
+    )
+    msg.metadata.num_delivered = 1
+    mock_pool.execute.side_effect = [asyncpg.PostgresError("boom"), None]
+    await worker.process_message(msg, mock_pool, cfg)
+    msg.nak.assert_awaited_once_with(delay=30)
+    msg.ack.assert_not_called()

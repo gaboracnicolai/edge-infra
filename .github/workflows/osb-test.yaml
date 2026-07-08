@@ -92,6 +92,7 @@ jobs:
               "migrations/0007_route_client_ca.sql",
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
+              "osb/migrations/0003_dead_letter.sql",
           ]
           async def main():
               conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
