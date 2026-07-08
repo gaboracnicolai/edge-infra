@@ -20,6 +20,8 @@ tokio-rustls = "0.26"
 arc-swap = "1"
 thiserror = "1"
 envoy-types = "0.5"
+x509-parser = "0.16"
+percent-encoding = "2"
 
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }

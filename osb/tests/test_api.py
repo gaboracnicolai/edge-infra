@@ -116,6 +116,26 @@ async def test_provision_rejects_mtls_without_client_ca(app_client, valid_spec):
     assert response.status_code == 422
 
 
+async def test_provision_accepts_jwt_or_mtls_with_client_ca(app_client, valid_spec):
+    # jwt_or_mtls is accepted wherever mtls is: HTTPS + tls_secret + client_ca.
+    valid_spec["protocol"] = "HTTPS"
+    valid_spec["tls_secret_name"] = "edge-cert"
+    valid_spec["auth_policy"] = "jwt_or_mtls"
+    valid_spec["client_ca_secret_name"] = "edge-client-ca"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
+async def test_provision_rejects_jwt_or_mtls_without_client_ca(app_client, valid_spec):
+    # jwt_or_mtls still verifies a presented cert against the client-CA, so it
+    # requires one just like mtls — reject at the API boundary.
+    valid_spec["protocol"] = "HTTPS"
+    valid_spec["tls_secret_name"] = "edge-cert"
+    valid_spec["auth_policy"] = "jwt_or_mtls"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 422
+
+
 async def test_provision_rejects_control_char_node_selector(app_client, valid_spec):
     valid_spec["node_selector"] = {"zone": "eu-west\n1a"}
     response = await app_client.post("/v1/services", json=valid_spec)

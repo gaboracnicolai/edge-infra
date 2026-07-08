@@ -214,3 +214,23 @@ func TestBuildRouteConfigs_MTLSAndRateLimit_Coexist(t *testing.T) {
 		t.Error("ext_authz disable missing for mtls — map clobbered")
 	}
 }
+
+// ---- R4 Stage 3b-mtls: jwt_or_mtls ext_authz composition ------------------
+
+// jwt_or_mtls keeps ext_authz ENABLED (the JWT fallback runs there) and carries
+// an auth_policy context extension so auth.rs can allow a valid client cert.
+func TestBuildRouteConfigs_JwtOrMtls_ExtAuthzEnabledWithContext(t *testing.T) {
+	gw := sharedGateway()
+	route := store.Route{Name: "osb-j", GatewayID: "shared", ClusterName: "c", PathPrefix: "/", AuthPolicy: "jwt_or_mtls"}
+	res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+	pr, ok := extAuthzPerRoute(t, findRoute(t, res[0], "osb-j"))
+	if !ok {
+		t.Fatal("jwt_or_mtls must set an ext_authz per-route CheckSettings override")
+	}
+	if pr.GetDisabled() {
+		t.Error("jwt_or_mtls must NOT disable ext_authz (the JWT fallback runs there)")
+	}
+	if got := pr.GetCheckSettings().GetContextExtensions()["auth_policy"]; got != "jwt_or_mtls" {
+		t.Errorf("context_extensions[auth_policy] = %q; want jwt_or_mtls", got)
+	}
+}

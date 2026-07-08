@@ -107,14 +107,24 @@ func routesFor(rs []store.Route) []*routev3.Route {
 		if r.RateLimitPerUnit > 0 {
 			tpfc[localRateLimitFilterName] = mustAny(perRouteLocalRateLimit(r))
 		}
-		// Per-service auth: disable ext_authz for "none" (explicit opt-out) and
-		// "mtls" (the downstream client cert IS the auth — don't also demand a
-		// JWT). Any other value (jwt, "", unknown) adds nothing → the global
-		// ext_authz filter applies → authenticated. Safe default: an unspecified
-		// or unrecognized policy can never disable auth.
-		if r.AuthPolicy == "none" || r.AuthPolicy == "mtls" {
+		// Per-service auth, three ext_authz modes:
+		//   none / mtls   → Disabled (opt-out, or the client cert IS the auth).
+		//   jwt_or_mtls   → ENABLED + an auth_policy context extension, so auth.rs
+		//                    allows a valid client cert OR falls back to the JWT.
+		//   jwt / "" / unknown → no override → the global ext_authz applies.
+		// Safe default: an unspecified or unrecognized policy never disables auth.
+		switch r.AuthPolicy {
+		case "none", "mtls":
 			tpfc[extAuthzFilterName] = mustAny(&extauthzv3.ExtAuthzPerRoute{
 				Override: &extauthzv3.ExtAuthzPerRoute_Disabled{Disabled: true},
+			})
+		case "jwt_or_mtls":
+			tpfc[extAuthzFilterName] = mustAny(&extauthzv3.ExtAuthzPerRoute{
+				Override: &extauthzv3.ExtAuthzPerRoute_CheckSettings{
+					CheckSettings: &extauthzv3.CheckSettings{
+						ContextExtensions: map[string]string{"auth_policy": "jwt_or_mtls"},
+					},
+				},
 			})
 		}
 		if len(tpfc) > 0 {

@@ -108,10 +108,11 @@ class ServiceSpec(BaseModel):
                 "auth_policy mtls/jwt_or_mtls requires protocol HTTPS "
                 "(transport-level; deferred to Stage 3b)"
             )
-        # mtls needs a client-CA to verify client certs against — requiring a
-        # client cert with no CA is a misconfiguration, rejected at submit.
-        if self.auth_policy == "mtls" and self.client_ca_secret_name is None:
-            raise ValueError("auth_policy mtls requires client_ca_secret_name")
+        # mtls and jwt_or_mtls both verify a presented client cert against a
+        # client-CA, so both need one — requiring/verifying a cert with no CA is a
+        # misconfiguration, rejected at submit.
+        if self.auth_policy in ("mtls", "jwt_or_mtls") and self.client_ca_secret_name is None:
+            raise ValueError("auth_policy mtls/jwt_or_mtls requires client_ca_secret_name")
         return self
 
 

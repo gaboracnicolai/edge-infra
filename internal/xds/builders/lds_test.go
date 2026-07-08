@@ -315,3 +315,38 @@ func TestBuildListeners_MTLS_PerSNIIsolation(t *testing.T) {
 		t.Error("service B (plain HTTPS) must NOT require a client cert — no mtls leak across SNIs")
 	}
 }
+
+// ---- R4 Stage 3b-mtls: jwt_or_mtls (request-don't-require) ----------------
+
+// jwt_or_mtls REQUESTS the client cert (require_client_certificate=false) but
+// still verifies it if presented (validation_context) — so a cert-less caller
+// still completes the handshake and reaches ext_authz for the JWT path.
+func TestBuildListeners_JwtOrMtls_RequestsNotRequires(t *testing.T) {
+	route := store.Route{
+		Name: "osb-j", GatewayID: "https", ClusterName: "osb-j", Hosts: []string{"j.example"},
+		PathPrefix: "/", TLSSecret: "sec-j", ClientCASecret: "ca-j", AuthPolicy: "jwt_or_mtls",
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{mtlsGateway()}, []store.Route{route},
+		RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	req, caName := chainMTLS(t, l.FilterChains[0])
+	if req {
+		t.Error("jwt_or_mtls must REQUEST (require_client_certificate=false), not require the client cert")
+	}
+	if caName != "ca-j" {
+		t.Errorf("jwt_or_mtls must still verify-if-presented via validation_context; ca = %q, want ca-j", caName)
+	}
+}
+
+// Regression: mtls still REQUIRES the cert (require_client_certificate=true).
+func TestBuildListeners_Mtls_StillRequires(t *testing.T) {
+	route := store.Route{
+		Name: "osb-m", GatewayID: "https", ClusterName: "osb-m", Hosts: []string{"m.example"},
+		PathPrefix: "/", TLSSecret: "sec-m", ClientCASecret: "ca-m", AuthPolicy: "mtls",
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{mtlsGateway()}, []store.Route{route},
+		RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	req, caName := chainMTLS(t, l.FilterChains[0])
+	if !req || caName != "ca-m" {
+		t.Errorf("mtls must require the client cert + validation_context; got require=%v ca=%q", req, caName)
+	}
+}

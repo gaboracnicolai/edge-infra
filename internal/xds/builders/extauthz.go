@@ -46,6 +46,10 @@ func extAuthzFilter(opts ExtAuthzOptions) *hcmv3.HttpFilter {
 		// FAIL CLOSED: deny when the auth-service is unreachable. Never flip
 		// this to true — a fail-open ext_authz bypasses auth suite-wide.
 		FailureModeAllow: false,
+		// Forward the verified downstream client cert (source.certificate) to the
+		// auth-service so a jwt_or_mtls route can authorize on the cert alone.
+		// Harmless for other policies (no cert presented ⇒ field empty).
+		IncludePeerCertificate: true,
 		Services: &extauthzv3.ExtAuthz_GrpcService{
 			GrpcService: &corev3.GrpcService{
 				TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
