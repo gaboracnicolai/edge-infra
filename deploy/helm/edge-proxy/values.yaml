@@ -1,6 +1,6 @@
 image:
   repository: envoyproxy/envoy
-  tag: v1.30.0
+  tag: v1.30.0@sha256:d7d501253a93f0b5fce8e0d3a24f3bef67372c50ed7ea922279c72fc1200be58  # pinned digest
   pullPolicy: IfNotPresent
 
 hostNetwork: true
