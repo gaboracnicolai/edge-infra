@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -214,4 +215,74 @@ func secretServedInSDS(res []cachetypes.Resource, name string) bool {
 		}
 	}
 	return false
+}
+
+// R5: the custodian seals a key at rest (ciphertext on disk); the control-plane
+// decrypts on load so BuildSecrets serves the ORIGINAL PEM; a control-plane with
+// no/wrong KEK fails LOUDLY rather than serving ciphertext.
+func TestE2E_KeyEncryptedAtRest(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL required (integration)")
+	}
+	ctx := context.Background()
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "TRUNCATE secrets, routes, gateways, clusters, endpoints CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+
+	kek := []byte("0123456789abcdef0123456789abcdef") // 32 bytes, test only
+
+	cs, err := NewStore(ctx, dsn, WithKEK(kek))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	srvCA := newTestCA(t, "svc-ca")
+	certPEM, keyPEM := srvCA.leaf(t, "svc", true)
+	if err := cs.Upsert(ctx, "enc-cert", string(certPEM), string(keyPEM), "tls_certificate"); err != nil {
+		t.Fatal(err)
+	}
+
+	// On disk: ciphertext, never the raw key.
+	var stored string
+	if err := conn.QueryRow(ctx, "SELECT key_pem FROM secrets WHERE name='enc-cert'").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close(ctx)
+	if !strings.HasPrefix(stored, "enc:v1:") {
+		t.Errorf("key must be sealed at rest; got prefix %.10q", stored)
+	}
+	if strings.Contains(stored, "PRIVATE KEY") {
+		t.Error("the raw private key must not be stored on disk")
+	}
+
+	// Control-plane WITH the KEK: decrypts → BuildSecrets serves the original PEM.
+	pg, err := store.NewPostgresStore(ctx, dsn, store.WithKEK(kek))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.Close()
+	snap, err := pg.LoadSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec := findSDSSecret(t, builders.BuildSecrets(snap.Secrets), "enc-cert")
+	if got := sec.GetTlsCertificate().GetPrivateKey().GetInlineString(); got != string(keyPEM) {
+		t.Error("BuildSecrets must serve the DECRYPTED original key PEM")
+	}
+
+	// Control-plane with NO KEK: a sealed key must fail LOUDLY (never serve ciphertext).
+	pgNoKEK, err := store.NewPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pgNoKEK.Close()
+	if _, err := pgNoKEK.LoadSnapshot(ctx); err == nil {
+		t.Error("LoadSnapshot with no KEK must fail on a sealed key (fail-closed)")
+	}
 }

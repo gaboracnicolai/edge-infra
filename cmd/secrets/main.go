@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/edge-infra/control-plane/internal/keycrypt"
 	"github.com/edge-infra/control-plane/internal/secrets"
 )
 
@@ -73,7 +74,18 @@ func runServe(log *slog.Logger) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	store, err := secrets.NewStore(ctx, cfg.DatabaseURL)
+	// Encryption at rest is MANDATORY for the custodian (fail-closed): it must
+	// never write a key in plaintext. SECRET_KEK is a 32-byte base64 AES-256 key,
+	// shared with the control-plane (which decrypts on load).
+	kek, err := keycrypt.ParseKEK(os.Getenv("SECRET_KEK"))
+	if err != nil {
+		return fmt.Errorf("SECRET_KEK: %w", err)
+	}
+	if kek == nil {
+		return fmt.Errorf("SECRET_KEK is required (32-byte base64 AES-256 key): the custodian refuses to run without encryption at rest")
+	}
+
+	store, err := secrets.NewStore(ctx, cfg.DatabaseURL, secrets.WithKEK(kek))
 	if err != nil {
 		return err
 	}

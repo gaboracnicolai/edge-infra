@@ -103,6 +103,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.existingSecret }}
                   key: {{ .Values.postgres.secretKey }}
+            # Encryption-at-rest KEK to decrypt SDS secret keys on load. Optional:
+            # absent ⇒ keys read as plaintext. MUST equal the custodian's SECRET_KEK.
+            - name: SECRET_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: SECRET_KEK
+                  optional: true
             - name: POD_NAME
               valueFrom:
                 fieldRef:

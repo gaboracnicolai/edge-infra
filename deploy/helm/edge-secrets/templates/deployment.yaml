@@ -50,6 +50,15 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: SECRETS_ADMIN_API_KEY
+            # Encryption-at-rest KEK (32-byte base64 AES-256). REQUIRED — the
+            # custodian refuses to start without it. Must equal the control-plane's
+            # SECRET_KEK so it can decrypt on load.
+            - name: SECRET_KEK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: SECRET_KEK
+                  optional: true
                   optional: true
           volumeMounts:
             - name: tls

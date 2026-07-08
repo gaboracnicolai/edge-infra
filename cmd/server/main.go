@@ -27,6 +27,7 @@ import (
 
 	"github.com/edge-infra/control-plane/internal/config"
 	"github.com/edge-infra/control-plane/internal/ha"
+	"github.com/edge-infra/control-plane/internal/keycrypt"
 	"github.com/edge-infra/control-plane/internal/store"
 	"github.com/edge-infra/control-plane/internal/xds"
 	"github.com/edge-infra/control-plane/internal/xds/builders"
@@ -51,8 +52,16 @@ func run(log *slog.Logger) error {
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Optional at-rest decryption key for SDS secret keys (must match the
+	// custodian's SECRET_KEK). Empty ⇒ plaintext keys; a sealed key read without
+	// it fails loudly at snapshot load (fail-closed).
+	kek, err := keycrypt.ParseKEK(os.Getenv("SECRET_KEK"))
+	if err != nil {
+		return fmt.Errorf("SECRET_KEK: %w", err)
+	}
+
 	pgCtx, pgCancel := context.WithTimeout(rootCtx, 10*time.Second)
-	pgStore, err := store.NewPostgresStore(pgCtx, cfg.PostgresDSN)
+	pgStore, err := store.NewPostgresStore(pgCtx, cfg.PostgresDSN, store.WithKEK(kek))
 	pgCancel()
 	if err != nil {
 		return err

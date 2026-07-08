@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/edge-infra/control-plane/internal/keycrypt"
 )
 
 // pgxDB is the subset of *pgxpool.Pool the store depends on. It is an
@@ -31,10 +33,18 @@ type querier interface {
 // PostgresStore is a Store backed by a PostgreSQL connection pool.
 type PostgresStore struct {
 	pool pgxDB
+	kek  []byte // nil ⇒ secret keys read as plaintext (encryption disabled)
 }
 
+// Option configures a PostgresStore.
+type Option func(*PostgresStore)
+
+// WithKEK decrypts sealed secret key material on load (AES-256-GCM under kek).
+// A nil kek reads keys as-is; a sealed value with no/wrong kek fails loudly.
+func WithKEK(kek []byte) Option { return func(s *PostgresStore) { s.kek = kek } }
+
 // NewPostgresStore opens a pgxpool and verifies connectivity.
-func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
+func NewPostgresStore(ctx context.Context, dsn string, opts ...Option) (*PostgresStore, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse pgx config: %w", err)
@@ -50,7 +60,11 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping pg: %w", err)
 	}
-	return &PostgresStore{pool: pool}, nil
+	s := &PostgresStore{pool: pool}
+	for _, o := range opts {
+		o(s)
+	}
+	return s, nil
 }
 
 // VerifyColocation asserts the R4 invariant that the control-plane and OSB share
@@ -118,7 +132,7 @@ func (s *PostgresStore) LoadSnapshot(ctx context.Context) (*Snapshot, error) {
 	if snap.Endpoints, err = loadEndpoints(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load endpoints: %w", err)
 	}
-	if snap.Secrets, err = loadSecrets(ctx, tx); err != nil {
+	if snap.Secrets, err = loadSecrets(ctx, tx, s.kek); err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
 	}
 
@@ -331,7 +345,7 @@ func loadEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
 	return out, rows.Err()
 }
 
-func loadSecrets(ctx context.Context, q querier) ([]Secret, error) {
+func loadSecrets(ctx context.Context, q querier, kek []byte) ([]Secret, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, name, cert_pem, COALESCE(key_pem, ''), COALESCE(kind, 'tls_certificate')
 		FROM secrets
@@ -348,6 +362,14 @@ func loadSecrets(ctx context.Context, q querier) ([]Secret, error) {
 		if err := rows.Scan(&s.ID, &s.Name, &s.CertPEM, &s.KeyPEM, &s.Kind); err != nil {
 			return nil, err
 		}
+		// Decrypt a sealed key so BuildSecrets inlines valid PEM. Plaintext
+		// (pre-encryption) keys pass through; a sealed key with no/wrong KEK errors
+		// LOUDLY so a bad snapshot is never served.
+		key, err := keycrypt.Open(kek, s.KeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("open secret %q key: %w", s.Name, err)
+		}
+		s.KeyPEM = key
 		out = append(out, s)
 	}
 	return out, rows.Err()

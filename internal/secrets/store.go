@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/edge-infra/control-plane/internal/keycrypt"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,10 +41,18 @@ type SecretStore interface {
 // Store is the SOLE production writer of the shared `secrets` table.
 type Store struct {
 	pool *pgxpool.Pool
+	kek  []byte // nil ⇒ encryption disabled (key_pem stored as plaintext)
 }
 
+// StoreOption configures a Store.
+type StoreOption func(*Store)
+
+// WithKEK seals key material at rest under kek (AES-256-GCM). A nil kek leaves
+// keys as plaintext (encryption disabled).
+func WithKEK(kek []byte) StoreOption { return func(s *Store) { s.kek = kek } }
+
 // NewStore opens a pgxpool against the shared DB and verifies connectivity.
-func NewStore(ctx context.Context, dsn string) (*Store, error) {
+func NewStore(ctx context.Context, dsn string, opts ...StoreOption) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse pg config: %w", err)
@@ -58,7 +68,11 @@ func NewStore(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping pg: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	s := &Store{pool: pool}
+	for _, o := range opts {
+		o(s)
+	}
+	return s, nil
 }
 
 // Close releases all pooled connections.
@@ -70,8 +84,17 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 // Upsert writes (or rotates) a secret by name — the only production write path
 // to `secrets`. The id mirrors the name (the scheme controller/OSB rows use).
 func (s *Store) Upsert(ctx context.Context, name, certPEM, keyPEM, kind string) error {
+	// Seal a real key at rest (AES-256-GCM under the KEK); a CA bundle's empty key
+	// is left empty so NULLIF stores SQL NULL. A nil KEK is passthrough (plaintext).
+	if keyPEM != "" {
+		sealed, sErr := keycrypt.Seal(s.kek, keyPEM)
+		if sErr != nil {
+			return fmt.Errorf("seal key: %w", sErr)
+		}
+		keyPEM = sealed
+	}
 	// NULLIF stores a CA bundle's empty key as SQL NULL; a server cert's real key
-	// (never empty — validated upstream) is stored as-is.
+	// (never empty — validated upstream) is stored as (sealed) ciphertext.
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO secrets (id, name, cert_pem, key_pem, kind)
 		VALUES ($1, $1, $2, NULLIF($3, ''), $4)
