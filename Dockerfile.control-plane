@@ -1,10 +1,11 @@
 # Multi-stage build for the Go xDS control plane, Kubernetes controller, token
-# issuer, and rate-limit service.
+# issuer, rate-limit service, and TLS-secrets custodian.
 #
 #   docker build --target server     -t edge-control-plane .
 #   docker build --target controller -t edge-controller    .
 #   docker build --target issuer     -t edge-issuer        .
 #   docker build --target ratelimit  -t edge-ratelimit     .
+#   docker build --target secrets    -t edge-secrets       .
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 WORKDIR /app
@@ -25,6 +26,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/issuer ./cmd/issuer
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/ratelimit ./cmd/ratelimit
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -o /bin/secrets ./cmd/secrets
 
 
 FROM gcr.io/distroless/static:nonroot AS server
@@ -52,3 +55,10 @@ COPY --from=builder /bin/ratelimit /ratelimit
 USER nonroot:nonroot
 EXPOSE 8082 8083
 ENTRYPOINT ["/ratelimit"]
+
+
+FROM gcr.io/distroless/static:nonroot AS secrets
+COPY --from=builder /bin/secrets /secrets
+USER nonroot:nonroot
+EXPOSE 8082
+ENTRYPOINT ["/secrets"]

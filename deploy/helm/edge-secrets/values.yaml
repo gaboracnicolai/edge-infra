@@ -1,0 +1,45 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/gaboracnicolai/edge-secrets
+  tag: "latest"  # pin to the SHA you pushed
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP   # never publicly routable — operator access only
+  port: 8082
+
+config:
+  # Secret holding SECRETS_DATABASE_URL (the shared DB) and, optionally,
+  # SECRETS_ADMIN_API_KEY (the fallback auth key).
+  existingSecret: edge-secrets-config
+
+tls:
+  # Serving cert (TLS is MANDATORY — private key material ships over the wire).
+  existingSecret: edge-secrets-tls
+  mountPath: /etc/edge-secrets-tls
+
+adminCA:
+  # Operator client CA — the SEPARATE edge-admin-ca, NEVER the data-plane
+  # edge-internal-ca. Client certs are verified against ONLY this CA, so a proxy
+  # identity can never write key material. Provisioned out-of-band (PKI bootstrap).
+  existingSecret: edge-admin-ca
+  mountPath: /etc/edge-secrets-admin-ca
+  key: ca.crt
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+podAnnotations: {}
+
+nameOverride: ""
+fullnameOverride: ""

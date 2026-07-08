@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge-secrets.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-secrets.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "edge-secrets.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "edge-secrets.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "edge-secrets.serviceAccountName" . }}
+      containers:
+        - name: secrets
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: mtls
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: SECRETS_LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.service.port }}"
+            - name: SECRETS_TLS_CERT
+              value: {{ .Values.tls.mountPath }}/tls.crt
+            - name: SECRETS_TLS_KEY
+              value: {{ .Values.tls.mountPath }}/tls.key
+            # Operator client CA — the SEPARATE edge-admin-ca (never the data plane).
+            - name: SECRETS_ADMIN_CA
+              value: {{ .Values.adminCA.mountPath }}/{{ .Values.adminCA.key }}
+            - name: SECRETS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: SECRETS_DATABASE_URL
+            # Optional admin-key fallback; when absent the component is mTLS-only.
+            - name: SECRETS_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: SECRETS_ADMIN_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: tls
+              mountPath: {{ .Values.tls.mountPath }}
+              readOnly: true
+            - name: admin-ca
+              mountPath: {{ .Values.adminCA.mountPath }}
+              readOnly: true
+          # TCP probes: the mTLS listener rejects certless HTTPS handshakes, so a
+          # plaintext httpGet probe can't complete — tcpSocket checks liveness
+          # without a client cert. (A dedicated plaintext health port is a noted
+          # follow-on.)
+          readinessProbe:
+            tcpSocket:
+              port: mtls
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: mtls
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+        - name: admin-ca
+          secret:
+            secretName: {{ .Values.adminCA.existingSecret }}

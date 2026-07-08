@@ -59,4 +59,7 @@ echo "==> python translator + tenancy integration suites"
 echo "==> go cross-language E2E (Python translator writes -> Go LoadSnapshot serves)"
 go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
 
+echo "==> go edge-secrets custodian E2E (component write -> LoadSnapshot renders per-SNI)"
+go test -count=1 -tags integration ./internal/secrets/ -run TestE2E
+
 echo "==> PASS: OSB -> data-plane translator proven against one shared DB"
