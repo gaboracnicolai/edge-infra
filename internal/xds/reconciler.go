@@ -38,9 +38,10 @@ type Reconciler struct {
 	// permitting an intentional scale-to-zero / drain. Read once at construction.
 	allowEmpty bool
 
-	localVersion          atomic.Uint64
-	localLast             atomic.Pointer[reconcileResult]
-	emptySnapshotsBlocked atomic.Uint64
+	localVersion                 atomic.Uint64
+	localLast                    atomic.Pointer[reconcileResult]
+	emptySnapshotsBlocked        atomic.Uint64
+	inconsistentSnapshotsBlocked atomic.Uint64
 
 	// authWantedButExtAuthzOff counts reconciles where a route requested auth but
 	// ext_authz was globally disabled (so auth could not be enforced). A loud
@@ -67,6 +68,19 @@ func NewReconciler(c cachev3.SnapshotCache, s store.Store, nodeID string, log *s
 		triggerCh:  make(chan struct{}, 1),
 		allowEmpty: allowEmptySnapshot(),
 	}
+}
+
+// InconsistentSnapshotsBlocked reports how many times the consistency guard has
+// kept the last-good config instead of publishing an inconsistent snapshot.
+func (r *Reconciler) InconsistentSnapshotsBlocked() uint64 {
+	return r.inconsistentSnapshotsBlocked.Load()
+}
+
+// shouldBlockInconsistent reports whether snap must be withheld to keep the
+// last-good config: an inconsistent snapshot is blocked ONLY once a healthy one
+// has been published (hasPrev) — first boot is exempt.
+func shouldBlockInconsistent(snap *cachev3.Snapshot, hasPrev bool) bool {
+	return hasPrev && snap.Consistent() != nil
 }
 
 // EmptySnapshotsBlocked reports how many times the empty-collapse guard has
@@ -208,8 +222,22 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("new snapshot: %w", err)
 	}
-	if err := snap.Consistent(); err != nil {
-		r.log.Warn("snapshot not internally consistent", "err", err)
+	// Fail-static bad-config guard: an internally-inconsistent snapshot (e.g. a
+	// listener referencing an absent route config, or an EDS cluster with no
+	// endpoint assignment) would blackhole traffic if pushed. Once a healthy
+	// snapshot exists (prev != nil), refuse it and keep the last-good config;
+	// first boot is exempt (nothing to keep — surface it as a warning).
+	if shouldBlockInconsistent(snap, prev != nil) {
+		r.inconsistentSnapshotsBlocked.Add(1)
+		r.log.Error("refusing to publish inconsistent snapshot; keeping last-good config",
+			"err", snap.Consistent(),
+			"last_good_version", prev.Version,
+			"blocked_total", r.inconsistentSnapshotsBlocked.Load(),
+		)
+		return nil
+	}
+	if cErr := snap.Consistent(); cErr != nil {
+		r.log.Warn("first snapshot not internally consistent; publishing (no last-good yet)", "err", cErr)
 	}
 
 	nodes := r.targetNodes()
