@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/edge-infra/control-plane/internal/issuer"
+	"github.com/edge-infra/control-plane/internal/ratelimit"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -75,6 +77,18 @@ func runServe(log *slog.Logger) error {
 	}
 	minter := issuer.NewMinter(keys, cfg.IssuerURL, cfg.Audience, cfg.TokenTTL)
 	srv := issuer.NewServer(store, minter, keys, log)
+	// SEC-1: the login throttle is in-memory by default (per-replica, no external dependency). When
+	// ISSUER_REDIS_ADDR is set, back it with the shared Redis so the per-account/per-IP ceiling holds
+	// across replicas — the documented "use Redis if available" choice.
+	if addr := os.Getenv("ISSUER_REDIS_ADDR"); addr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("ISSUER_REDIS_PASSWORD")})
+		srv = srv.WithThrottle(ratelimit.New(rdb),
+			ratelimit.Rule{Capacity: 10, RatePerSec: 0.5},
+			ratelimit.Rule{Capacity: 5, RatePerSec: 0.1})
+		log.Info("login throttle: redis-backed (distributed across replicas)", "addr", addr)
+	} else {
+		log.Info("login throttle: in-memory (per-replica); set ISSUER_REDIS_ADDR for a distributed ceiling")
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
