@@ -11,6 +11,16 @@ data:
       id: NODE_ID_PLACEHOLDER
       cluster: edge-proxy
     admin:
+      # ⚠ SEC-9 (VERIFIED — FIX NEEDS FOUNDER/ANDREW DECISION, see PR): the admin API is high-privilege
+      # (/config_dump, /quitquitquit, /runtime_modify) and here binds 0.0.0.0. With hostNetwork: true that
+      # exposes it on the node IP on every interface. The obvious fix — bind 127.0.0.1 — CANNOT be applied
+      # alone: this same admin port 9901 is load-bearing for the readiness/liveness probes (daemonset
+      # `port: admin`), Prometheus scraping (values.yaml prometheus.io/port: 9901), and the -admin Service.
+      # Binding to loopback breaks all three. The correct Envoy-best-practice fix is admin-on-loopback PLUS
+      # a dedicated stats/health listener exposing ONLY /ready + /stats/prometheus (proxied to the local
+      # admin), with the probes, the prometheus annotation, and the Service repointed to it. That topology
+      # is a design decision (port, endpoints, Service shape) needing cluster validation — documented here
+      # rather than guessed, and left functionally as-is to avoid shipping a probe/metrics outage.
       address:
         socket_address:
           address: 0.0.0.0
