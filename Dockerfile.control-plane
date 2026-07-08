@@ -1,10 +1,11 @@
 # Multi-stage build for the Go xDS control plane, token issuer, rate-limit
-# service, and TLS-secrets custodian.
+# service, TLS-secrets custodian, and shared-DB migrator.
 #
 #   docker build --target server     -t edge-control-plane .
 #   docker build --target issuer     -t edge-issuer        .
 #   docker build --target ratelimit  -t edge-ratelimit     .
 #   docker build --target secrets    -t edge-secrets       .
+#   docker build --target migrate    -t edge-migrate       .
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 WORKDIR /app
@@ -25,6 +26,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/ratelimit ./cmd/ratelimit
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/secrets ./cmd/secrets
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -o /bin/migrate ./cmd/migrate
 
 
 FROM gcr.io/distroless/static:nonroot AS server
@@ -53,3 +56,11 @@ COPY --from=builder /bin/secrets /secrets
 USER nonroot:nonroot
 EXPOSE 8082
 ENTRYPOINT ["/secrets"]
+
+
+# Applies both migration sets (control-plane + OSB) to the shared DB. Run as a
+# Helm pre-install/pre-upgrade hook Job, or standalone: DATABASE_URL=... /migrate
+FROM gcr.io/distroless/static:nonroot AS migrate
+COPY --from=builder /bin/migrate /migrate
+USER nonroot:nonroot
+ENTRYPOINT ["/migrate"]

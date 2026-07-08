@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "edge-control-plane.fullname" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-control-plane.labels" . | nindent 4 }}
+  annotations:
+    # Apply BOTH schema sets (control-plane + OSB) to the ONE shared database
+    # before the control-plane and OSB Deployments roll out, on every install and
+    # upgrade. The runner records applied files in schema_migrations, so a re-run
+    # is a no-op even though some migrations are not themselves idempotent.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "edge-control-plane.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "edge-control-plane.serviceAccountName" . }}
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.migrate.image.repository }}:{{ .Values.migrate.image.tag }}"
+          imagePullPolicy: {{ .Values.migrate.image.pullPolicy }}
+          env:
+            # The SAME shared-DB DSN the control-plane uses (co-location).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: {{ .Values.postgres.secretKey }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}

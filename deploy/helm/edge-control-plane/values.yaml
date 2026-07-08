@@ -5,6 +5,16 @@ image:
   tag: "447ceb18980fc02fdc7e28db16354c62e3018850"  # pin to the SHA you pushed
   pullPolicy: IfNotPresent
 
+# DB migrator (cmd/migrate) — applies the control-plane + OSB schemas to the
+# shared database as a pre-install/pre-upgrade hook (templates/migrate-job.yaml).
+# Non-Kubernetes equivalent: `DATABASE_URL=... edge-migrate`. See docs/migrations.md.
+migrate:
+  image:
+    repository: ghcr.io/gaboracnicolai/edge-migrate
+    tag: "latest"  # pin to the SHA you pushed
+    pullPolicy: IfNotPresent
+  resources: {}
+
 service:
   type: ClusterIP
   grpcPort: 18000
