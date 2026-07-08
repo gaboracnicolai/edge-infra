@@ -119,3 +119,61 @@ func TestHealthzOK(t *testing.T) {
 		t.Fatalf("healthz must be 200, got %d", rec.Code)
 	}
 }
+
+// doLoginFromIP posts a login from a specific client IP (RemoteAddr), so the
+// per-(IP+account) throttle can be exercised across distinct sources.
+func doLoginFromIP(t *testing.T, srv *Server, remoteAddr, email, password string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(loginRequest{Email: email, Password: password})
+	req := httptest.NewRequest("POST", "/login", bytes.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	return rec
+}
+
+// After maxFailures wrong-password attempts, the next attempt is throttled (429)
+// BEFORE argon2 runs — even with the CORRECT password.
+func TestLogin_ThrottledAfterFailures(t *testing.T) {
+	store := &fakeStore{login: &Login{ID: "u1", Email: "a@b.com", PasswordHash: mustHash(t, "right")}}
+	srv := testServer(t, store)
+	srv.throttle = NewThrottle(3, time.Minute, time.Hour)
+	for i := 0; i < 3; i++ {
+		if rec := doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: want 401; got %d", i, rec.Code)
+		}
+	}
+	rec := doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "right")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("after the limit the login must be throttled (429); got %d", rec.Code)
+	}
+}
+
+// The throttle is per-(IP+account): a different IP for the same account is not
+// locked — an attacker can't lock the victim out of their own network.
+func TestLogin_ThrottleIsPerIPAndAccount(t *testing.T) {
+	store := &fakeStore{login: &Login{ID: "u1", Email: "a@b.com", PasswordHash: mustHash(t, "right")}}
+	srv := testServer(t, store)
+	srv.throttle = NewThrottle(3, time.Minute, time.Hour)
+	for i := 0; i < 4; i++ {
+		doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "wrong")
+	}
+	if rec := doLoginFromIP(t, srv, "9.9.9.9:5", "a@b.com", "right"); rec.Code != http.StatusOK {
+		t.Errorf("a different IP for the same account must not be locked; got %d", rec.Code)
+	}
+}
+
+// A successful login within the limit resets the counter.
+func TestLogin_SuccessResetsThrottle(t *testing.T) {
+	store := &fakeStore{login: &Login{ID: "u1", Email: "a@b.com", PasswordHash: mustHash(t, "right")}}
+	srv := testServer(t, store)
+	srv.throttle = NewThrottle(3, time.Minute, time.Hour)
+	doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "wrong")
+	doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "wrong")
+	if rec := doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "right"); rec.Code != http.StatusOK {
+		t.Fatalf("a correct login within the limit must succeed; got %d", rec.Code)
+	}
+	if rec := doLoginFromIP(t, srv, "1.2.3.4:5", "a@b.com", "wrong"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("the counter must reset after a success; want 401 got %d", rec.Code)
+	}
+}

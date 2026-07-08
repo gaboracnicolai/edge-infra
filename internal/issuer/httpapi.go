@@ -5,9 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
+
+// clientIP is the remote host of the request, used (with the account) as the
+// brute-force throttle key. RemoteAddr only — the issuer is not fronted by an
+// untrusted proxy for /login, so X-Forwarded-For is deliberately NOT trusted.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
 
 // LoginStore is the store surface the HTTP layer needs. An interface so the
 // handlers can be tested against a fake without a database.
@@ -25,12 +38,17 @@ type Server struct {
 	// dummyHash equalizes verification time for unknown users so a caller
 	// cannot distinguish "no such user" from "wrong password" by timing.
 	dummyHash string
+	// throttle gates repeated failed logins per (client IP + account) before the
+	// expensive argon2 verify runs.
+	throttle *Throttle
 }
 
 // NewServer constructs the HTTP server.
 func NewServer(store LoginStore, minter *Minter, keys *KeySet, log *slog.Logger) *Server {
 	dummy, _ := HashPassword("unused-timing-equalizer")
-	return &Server{store: store, minter: minter, keys: keys, log: log, dummyHash: dummy}
+	// 5 consecutive failures per (IP+account) → lock, 1s doubling up to 15m.
+	throttle := NewThrottle(5, time.Second, 15*time.Minute)
+	return &Server{store: store, minter: minter, keys: keys, log: log, dummyHash: dummy, throttle: throttle}
 }
 
 // Routes returns the mux. Method-qualified patterns require Go 1.22+.
@@ -61,15 +79,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Brute-force gate: throttle repeated failures per (client IP + account)
+	// BEFORE the expensive argon2 verify (a 64 MiB DoS amplifier) — and before
+	// the DB lookup. Keyed so an attacker can neither lock other accounts nor
+	// lock a victim's own IP.
+	key := clientIP(r) + "|" + req.Email
+	if ok, retry := s.throttle.Allow(key); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeError(w, http.StatusTooManyRequests, "too many attempts")
+		return
+	}
+
 	login, err := s.store.GetLogin(r.Context(), req.Email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			// Verify against a throwaway hash so an unknown email takes the
 			// same time as a known one — no user-enumeration oracle.
 			_, _ = VerifyPassword(s.dummyHash, req.Password)
+			s.throttle.Fail(key)
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
+		// An infrastructure error is not an auth failure — do not count it.
 		s.log.Error("login lookup failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -79,11 +110,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// the same generic message, so the response never reveals which check
 	// failed.
 	if login.Disabled {
+		s.throttle.Fail(key)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	ok, err := VerifyPassword(login.PasswordHash, req.Password)
 	if err != nil || !ok {
+		s.throttle.Fail(key)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -94,6 +127,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.throttle.Reset(key) // a successful login clears this key's failure count
 	writeJSON(w, http.StatusOK, loginResponse{
 		AccessToken: token,
 		TokenType:   "Bearer",
