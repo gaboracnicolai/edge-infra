@@ -28,7 +28,9 @@ type SecretMeta struct {
 // SecretStore is the write/metadata surface the HTTP layer needs. An interface
 // so handlers are testable against a fake without a database.
 type SecretStore interface {
-	Upsert(ctx context.Context, name, certPEM, keyPEM string) error
+	// Upsert writes a secret by name. kind is "tls_certificate" (keyPEM is the
+	// matching key) or "validation_context" (a cert-only CA bundle; keyPEM "").
+	Upsert(ctx context.Context, name, certPEM, keyPEM, kind string) error
 	Delete(ctx context.Context, name string) (bool, error)
 	GetMeta(ctx context.Context, name string) (*SecretMeta, error)
 	Ping(ctx context.Context) error
@@ -67,15 +69,18 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 // Upsert writes (or rotates) a secret by name — the only production write path
 // to `secrets`. The id mirrors the name (the scheme controller/OSB rows use).
-func (s *Store) Upsert(ctx context.Context, name, certPEM, keyPEM string) error {
+func (s *Store) Upsert(ctx context.Context, name, certPEM, keyPEM, kind string) error {
+	// NULLIF stores a CA bundle's empty key as SQL NULL; a server cert's real key
+	// (never empty — validated upstream) is stored as-is.
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO secrets (id, name, cert_pem, key_pem)
-		VALUES ($1, $1, $2, $3)
+		INSERT INTO secrets (id, name, cert_pem, key_pem, kind)
+		VALUES ($1, $1, $2, NULLIF($3, ''), $4)
 		ON CONFLICT (name) DO UPDATE SET
 			cert_pem   = EXCLUDED.cert_pem,
 			key_pem    = EXCLUDED.key_pem,
+			kind       = EXCLUDED.kind,
 			updated_at = now()
-	`, name, certPEM, keyPEM)
+	`, name, certPEM, keyPEM, kind)
 	return err
 }
 

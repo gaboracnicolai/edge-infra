@@ -176,25 +176,48 @@ func (c *clientFlags) do(method, path string, body []byte) (*http.Response, erro
 func runPut(args []string) error {
 	fs := flag.NewFlagSet("put", flag.ContinueOnError)
 	name := fs.String("name", "", "secret name (required)")
-	certFile := fs.String("cert", "", "cert PEM file (required)")
-	keyFile := fs.String("key", "", "key PEM file (required)")
+	kind := fs.String("kind", "tls_certificate", "secret kind: tls_certificate | validation_context")
+	certFile := fs.String("cert", "", "cert PEM file (tls_certificate)")
+	keyFile := fs.String("key", "", "key PEM file (tls_certificate)")
+	caFile := fs.String("ca", "", "CA PEM file (validation_context)")
 	cf := addClientFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *name == "" || *certFile == "" || *keyFile == "" {
-		return errors.New("--name, --cert and --key are required")
+	if *name == "" {
+		return errors.New("--name is required")
 	}
-	cert, err := os.ReadFile(*certFile)
-	if err != nil {
-		return fmt.Errorf("read cert: %w", err)
+
+	body := map[string]string{"kind": *kind}
+	switch *kind {
+	case "validation_context":
+		if *caFile == "" {
+			return errors.New("--ca is required for kind=validation_context")
+		}
+		ca, err := os.ReadFile(*caFile)
+		if err != nil {
+			return fmt.Errorf("read ca: %w", err)
+		}
+		body["cert_pem"] = string(ca) // cert-only trust bundle; no key
+	case "tls_certificate":
+		if *certFile == "" || *keyFile == "" {
+			return errors.New("--cert and --key are required for kind=tls_certificate")
+		}
+		cert, err := os.ReadFile(*certFile)
+		if err != nil {
+			return fmt.Errorf("read cert: %w", err)
+		}
+		key, err := os.ReadFile(*keyFile)
+		if err != nil {
+			return fmt.Errorf("read key: %w", err)
+		}
+		body["cert_pem"], body["key_pem"] = string(cert), string(key)
+	default:
+		return fmt.Errorf("unknown --kind %q (want tls_certificate | validation_context)", *kind)
 	}
-	key, err := os.ReadFile(*keyFile)
-	if err != nil {
-		return fmt.Errorf("read key: %w", err)
-	}
-	body, _ := json.Marshal(map[string]string{"cert_pem": string(cert), "key_pem": string(key)})
-	resp, err := cf.do(http.MethodPut, "/v1/secrets/"+*name, body)
+
+	payload, _ := json.Marshal(body)
+	resp, err := cf.do(http.MethodPut, "/v1/secrets/"+*name, payload)
 	if err != nil {
 		return err
 	}
@@ -202,7 +225,7 @@ func runPut(args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("put failed: %s", resp.Status)
 	}
-	fmt.Printf("secret %q written\n", *name)
+	fmt.Printf("secret %q written (kind=%s)\n", *name, *kind)
 	return nil
 }
 

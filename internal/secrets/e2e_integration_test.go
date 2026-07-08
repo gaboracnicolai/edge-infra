@@ -96,6 +96,93 @@ func TestE2E_PutViaComponentThenRender(t *testing.T) {
 	}
 }
 
+// END-TO-END (CA bundle): an operator (mTLS) PUTs a cert-only client-CA trust
+// bundle THROUGH the component; the row lands kind=validation_context with a NULL
+// key; BuildSecrets serves it as a trusted_ca (validation_context), NOT a
+// tls_certificate. Proves the new custody kind end to end.
+func TestE2E_CABundlePutThenValidationContext(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL required (integration)")
+	}
+	ctx := context.Background()
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "TRUNCATE secrets, routes, gateways, clusters, endpoints CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := NewStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	serverCA := newTestCA(t, "server-ca")
+	adminCA := newTestCA(t, "edge-admin-ca")
+	ts := tlsTestServer(t, NewServer(st, "", discardLog()), serverCA, "", writeTemp(t, adminCA.certPEM))
+
+	// A client-CA trust bundle (cert-only), PUT with an operator cert.
+	clientCA := newTestCA(t, "client-ca")
+	opCert, opKey := adminCA.leaf(t, "operator", false)
+	body, _ := json.Marshal(putSecretRequest{CertPEM: string(clientCA.certPEM), Kind: kindValidationContext})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/v1/secrets/client-ca", bytes.NewReader(body))
+	resp, err := mtlsClient(t, serverCA.certPEM, opCert, opKey).Do(req)
+	if err != nil {
+		t.Fatalf("operator CA-bundle PUT: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CA bundle PUT: want 200; got %d", resp.StatusCode)
+	}
+
+	// The row: kind=validation_context, key_pem NULL.
+	var kind string
+	var keyNull bool
+	if err := conn.QueryRow(ctx,
+		"SELECT kind, key_pem IS NULL FROM secrets WHERE name='client-ca'").Scan(&kind, &keyNull); err != nil {
+		t.Fatalf("query secret: %v", err)
+	}
+	conn.Close(ctx)
+	if kind != "validation_context" {
+		t.Errorf("stored kind = %q; want validation_context", kind)
+	}
+	if !keyNull {
+		t.Error("a CA bundle must be stored with key_pem NULL")
+	}
+
+	// LoadSnapshot -> BuildSecrets serves it as a validation_context (trusted_ca).
+	pg, err := store.NewPostgresStore(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.Close()
+	snap, err := pg.LoadSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec := findSDSSecret(t, builders.BuildSecrets(snap.Secrets), "client-ca")
+	if sec.GetValidationContext() == nil {
+		t.Error("component-written CA bundle must render as a validation_context")
+	}
+	if sec.GetTlsCertificate() != nil {
+		t.Error("a CA bundle must NOT render as a tls_certificate")
+	}
+}
+
+func findSDSSecret(t *testing.T, res []cachetypes.Resource, name string) *tlsv3.Secret {
+	t.Helper()
+	for _, r := range res {
+		if s, ok := r.(*tlsv3.Secret); ok && s.GetName() == name {
+			return s
+		}
+	}
+	t.Fatalf("secret %q not in SDS output", name)
+	return nil
+}
+
 func listenerSNICert(res []cachetypes.Resource, listenerName, host string) string {
 	for _, r := range res {
 		l, ok := r.(*listenerv3.Listener)

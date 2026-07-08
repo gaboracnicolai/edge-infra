@@ -76,7 +76,10 @@ type Secret struct {
 	ID      string
 	Name    string
 	CertPEM string
-	KeyPEM  string
+	KeyPEM  string // empty for a validation_context (CA-only) secret
+	// Kind is "tls_certificate" (server cert+key) or "validation_context" (a
+	// cert-only client-CA trust bundle). Drives the SDS secret shape.
+	Kind string
 }
 
 // Snapshot is the full configuration state used to build an xDS snapshot.

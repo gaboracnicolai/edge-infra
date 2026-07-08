@@ -61,6 +61,9 @@ func (s *Server) authorize(r *http.Request) bool {
 type putSecretRequest struct {
 	CertPEM string `json:"cert_pem"`
 	KeyPEM  string `json:"key_pem"`
+	// Kind: "" (default) / "tls_certificate" = server cert+key; "validation_context"
+	// = a cert-only client-CA trust bundle (no key).
+	Kind string `json:"kind"`
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -74,18 +77,38 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := validateKeyPair(req.CertPEM, req.KeyPEM); err != nil {
-		// Never echo the material or a detailed parse error.
-		writeError(w, http.StatusBadRequest, "invalid cert/key pair")
+	kind := req.Kind
+	if kind == "" {
+		kind = kindTLSCertificate
+	}
+	switch kind {
+	case kindTLSCertificate:
+		if err := validateKeyPair(req.CertPEM, req.KeyPEM); err != nil {
+			// Never echo the material or a detailed parse error.
+			writeError(w, http.StatusBadRequest, "invalid cert/key pair")
+			return
+		}
+	case kindValidationContext:
+		// A CA bundle is cert-only; a key here is a contract violation.
+		if req.KeyPEM != "" {
+			writeError(w, http.StatusBadRequest, "validation_context takes no key")
+			return
+		}
+		if err := validateCABundle(req.CertPEM); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid CA bundle")
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "unknown kind")
 		return
 	}
-	if err := s.store.Upsert(r.Context(), name, req.CertPEM, req.KeyPEM); err != nil {
-		s.log.Error("secret upsert failed", "name", name, "err", err) // never the material
+	if err := s.store.Upsert(r.Context(), name, req.CertPEM, req.KeyPEM, kind); err != nil {
+		s.log.Error("secret upsert failed", "name", name, "kind", kind, "err", err) // never the material
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.log.Info("secret upserted", "name", name)
-	writeJSON(w, http.StatusOK, map[string]string{"name": name, "status": "ok"})
+	s.log.Info("secret upserted", "name", name, "kind", kind)
+	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": kind, "status": "ok"})
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {

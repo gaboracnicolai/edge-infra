@@ -36,7 +36,7 @@ done
 echo "==> applying BOTH migration sets to the one shared database"
 for f in migrations/0001_init.sql migrations/0002_controller_fields.sql \
          migrations/0003_service_policy.sql migrations/0004_auth_policy.sql \
-         migrations/0005_route_tls_secret.sql \
+         migrations/0005_route_tls_secret.sql migrations/0006_secret_kind.sql \
          osb/migrations/0001_osb.sql osb/migrations/0002_tenancy.sql; do
   docker exec -i "$PG" psql -U postgres -d edge -q -f - <"$f"
 done

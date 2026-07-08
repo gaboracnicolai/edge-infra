@@ -83,6 +83,35 @@ func pemBlock(typ string, der []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
 }
 
+// caCertPEM builds a self-signed cert PEM (no key returned) for CA-bundle tests:
+// a valid CA (isCA + future expiry), an expired CA, or a non-CA leaf.
+func caCertPEM(t *testing.T, cn string, notAfter time.Time, isCA bool) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-2 * time.Hour),
+		NotAfter:              notAfter,
+		IsCA:                  isCA,
+		BasicConstraintsValid: true,
+	}
+	if isCA {
+		tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature
+	} else {
+		tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pemBlock("CERTIFICATE", der)
+}
+
 func writeTemp(t *testing.T, data []byte) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "pem-*")
@@ -101,15 +130,15 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 // --- fake store (no DB) -----------------------------------------------------
 
 type fakeStore struct {
-	upserts, deletes  int
-	lastCert, lastKey string
-	metaFingerprint   string
-	deleteReturns     bool
+	upserts, deletes            int
+	lastCert, lastKey, lastKind string
+	metaFingerprint             string
+	deleteReturns               bool
 }
 
-func (f *fakeStore) Upsert(_ context.Context, _, certPEM, keyPEM string) error {
+func (f *fakeStore) Upsert(_ context.Context, _, certPEM, keyPEM, kind string) error {
 	f.upserts++
-	f.lastCert, f.lastKey = certPEM, keyPEM
+	f.lastCert, f.lastKey, f.lastKind = certPEM, keyPEM, kind
 	return nil
 }
 func (f *fakeStore) Delete(_ context.Context, _ string) (bool, error) {

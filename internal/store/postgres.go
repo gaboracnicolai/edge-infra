@@ -301,7 +301,7 @@ func loadEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
 
 func loadSecrets(ctx context.Context, q querier) ([]Secret, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, name, cert_pem, key_pem
+		SELECT id, name, cert_pem, COALESCE(key_pem, ''), COALESCE(kind, 'tls_certificate')
 		FROM secrets
 		ORDER BY name
 	`)
@@ -313,7 +313,7 @@ func loadSecrets(ctx context.Context, q querier) ([]Secret, error) {
 	var out []Secret
 	for rows.Next() {
 		var s Secret
-		if err := rows.Scan(&s.ID, &s.Name, &s.CertPEM, &s.KeyPEM); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.CertPEM, &s.KeyPEM, &s.Kind); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

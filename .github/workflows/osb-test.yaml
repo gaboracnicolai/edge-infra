@@ -88,6 +88,7 @@ jobs:
               "migrations/0003_service_policy.sql",
               "migrations/0004_auth_policy.sql",
               "migrations/0005_route_tls_secret.sql",
+              "migrations/0006_secret_kind.sql",
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
           ]
@@ -107,4 +108,4 @@ jobs:
       - name: Go cross-language E2E (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
       - name: Go edge-secrets custodian E2E (-count=1, no cached pass)
-        run: go test -count=1 -tags integration ./internal/secrets/ -run TestE2E_PutViaComponentThenRender
+        run: go test -count=1 -tags integration ./internal/secrets/ -run TestE2E
