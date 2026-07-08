@@ -4,23 +4,29 @@ name: OSB Test
 # — only images.yaml built the image, so the R4 translator's unit correctness
 # re-ran on no push. Two jobs:
 #   pytest       — fast, DB-free gate (mock suite); the always-green gate.
-#   integration  — the cross-language OSB -> data-plane E2E against a real
-#                  Postgres (Python translator writes; Go LoadSnapshot serves).
+#   integration  — the DB-backed integration E2E suite against a real Postgres:
+#                  the cross-language OSB -> data-plane E2E (Python translator
+#                  writes; Go LoadSnapshot serves) AND the edge-secrets custodian
+#                  E2E (operator mTLS write -> secrets row -> per-SNI render).
 #
 # GitHub path filters are workflow-level, so both jobs share the union of paths;
-# the fast pytest gate harmlessly also runs on internal/store/** changes (which
-# can affect the reader the translator targets).
+# the fast pytest gate harmlessly also runs on internal/store|secrets/** changes
+# (the mock suite is DB-free and unaffected).
 on:
   push:
     paths:
       - 'osb/**'
       - 'internal/store/**'
+      - 'internal/secrets/**'
+      - 'cmd/secrets/**'
       - '.github/workflows/osb-test.yaml'
   pull_request:
     branches: [main]
     paths:
       - 'osb/**'
       - 'internal/store/**'
+      - 'internal/secrets/**'
+      - 'cmd/secrets/**'
       - '.github/workflows/osb-test.yaml'
 
 jobs:
@@ -100,3 +106,5 @@ jobs:
         working-directory: osb
       - name: Go cross-language E2E (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
+      - name: Go edge-secrets custodian E2E (-count=1, no cached pass)
+        run: go test -count=1 -tags integration ./internal/secrets/ -run TestE2E_PutViaComponentThenRender
