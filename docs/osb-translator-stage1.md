@@ -37,9 +37,8 @@ worker's own transaction. The DSN values live in out-of-band Secrets, so the
 charts cannot set them — the operator must ensure:
 
 1. **Same database.** `edge-osb`'s `DATABASE_URL` (Secret `edge-osb-secrets`) and
-   `edge-control-plane` / `edge-controller`'s `POSTGRES_DSN` (Secret
-   `edge-control-plane-postgres`, key `dsn`) point at the **same** Postgres
-   database on the same instance.
+   `edge-control-plane`'s `POSTGRES_DSN` (Secret `edge-control-plane-postgres`,
+   key `dsn`) point at the **same** Postgres database on the same instance.
 2. **Both schemas applied there.** Apply both migration sets to that database
    (idempotent; `CREATE ... IF NOT EXISTS`):
 

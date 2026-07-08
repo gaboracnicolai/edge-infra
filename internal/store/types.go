@@ -102,6 +102,12 @@ type Store interface {
 	// LoadSnapshot returns the current desired state of every active resource.
 	LoadSnapshot(ctx context.Context) (*Snapshot, error)
 
+	// The write methods below have NO production caller since the CRD
+	// controllers were retired (R4): OSB is the sole writer of gateways/routes
+	// and it writes via the translator's direct SQL, not this interface. They are
+	// retained (implemented by PostgresStore) as the write-API a future thin
+	// OSB-adapter front-end for the kept api/v1alpha1 CR types could use.
+
 	// UpsertGateway inserts or updates a Gateway keyed by Name.
 	UpsertGateway(ctx context.Context, g Gateway) error
 

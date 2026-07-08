@@ -1,8 +1,7 @@
-# Multi-stage build for the Go xDS control plane, Kubernetes controller, token
-# issuer, rate-limit service, and TLS-secrets custodian.
+# Multi-stage build for the Go xDS control plane, token issuer, rate-limit
+# service, and TLS-secrets custodian.
 #
 #   docker build --target server     -t edge-control-plane .
-#   docker build --target controller -t edge-controller    .
 #   docker build --target issuer     -t edge-issuer        .
 #   docker build --target ratelimit  -t edge-ratelimit     .
 #   docker build --target secrets    -t edge-secrets       .
@@ -21,8 +20,6 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-w -s" -o /bin/controller ./cmd/controller
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/issuer ./cmd/issuer
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/ratelimit ./cmd/ratelimit
@@ -35,12 +32,6 @@ COPY --from=builder /bin/server /server
 USER nonroot:nonroot
 EXPOSE 18000 2112
 ENTRYPOINT ["/server"]
-
-
-FROM gcr.io/distroless/static:nonroot AS controller
-COPY --from=builder /bin/controller /controller
-USER nonroot:nonroot
-ENTRYPOINT ["/controller"]
 
 
 FROM gcr.io/distroless/static:nonroot AS issuer

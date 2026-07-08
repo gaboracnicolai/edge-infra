@@ -29,7 +29,6 @@ observe-down:
 # Lint every Helm chart with --strict.
 helm-lint:
 	helm lint --strict deploy/helm/edge-control-plane
-	helm lint --strict deploy/helm/edge-controller
 	helm lint --strict deploy/helm/edge-proxy
 	helm lint --strict deploy/helm/edge-osb
 	helm lint --strict deploy/helm/auth-service
@@ -40,8 +39,6 @@ helm-lint:
 helm-template-dry-run:
 	helm template edge-control-plane deploy/helm/edge-control-plane \
 	  --values deploy/envs/staging/values-control-plane.yaml
-	helm template edge-controller deploy/helm/edge-controller \
-	  --values deploy/envs/staging/values-controller.yaml
 	helm template edge-proxy deploy/helm/edge-proxy \
 	  --values deploy/envs/staging/values-proxy.yaml
 	helm template edge-osb deploy/helm/edge-osb \
@@ -75,8 +72,6 @@ argocd-apply:
 docker-build-local:
 	docker build -f Dockerfile.control-plane \
 	  --target server -t edge-control-plane:local .
-	docker build -f Dockerfile.control-plane \
-	  --target controller -t edge-controller:local .
 	docker build -f osb/Dockerfile \
 	  -t edge-osb:local .
 	cd auth-service && \
@@ -89,7 +84,7 @@ docker-build-local:
 
 # Diff every managed Application against its in-cluster state.
 argocd-diff:
-	@for app in edge-control-plane edge-controller edge-proxy \
+	@for app in edge-control-plane edge-proxy \
 	            edge-osb auth-service edge-issuer edge-ratelimit edge-policies monitoring; do \
 	    argocd app diff $$app --local; \
 	done
