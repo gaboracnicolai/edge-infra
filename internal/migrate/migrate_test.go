@@ -86,3 +86,108 @@ func TestApply_FreshDBIdempotent(t *testing.T) {
 		t.Errorf("schema_migrations has %d rows; want %d (all applied files)", count, n1)
 	}
 }
+
+func resetSchema(t *testing.T, ctx context.Context, dsn string) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+}
+
+func truncateTracking(t *testing.T, ctx context.Context, dsn string) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "TRUNCATE schema_migrations"); err != nil {
+		t.Fatalf("truncate tracking: %v", err)
+	}
+}
+
+var baselineSets = []migrate.Set{
+	{Name: "cp", FS: cpmig.FS},
+	{Name: "osb", FS: osbmig.FS},
+}
+
+// dead_letter (OSB 0003) is the latest migration — its presence stands in for
+// "the DB is at the current schema".
+const currentSchemaProbe = "to_regclass('public.dead_letter') IS NOT NULL"
+
+// A DB with the full schema but NO tracking (manually migrated) is adopted:
+// baseline records every file (running none), after which a normal migrate is a
+// no-op.
+func TestBaseline_AdoptsUntrackedSchema(t *testing.T) {
+	dsn := os.Getenv("MIGRATE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("MIGRATE_TEST_DSN required (a throwaway DB)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resetSchema(t, ctx, dsn)
+	if _, err := migrate.Apply(ctx, dsn, baselineSets); err != nil {
+		t.Fatal(err)
+	}
+	truncateTracking(t, ctx, dsn) // simulate a pre-runner, untracked deploy
+
+	n, err := migrate.Baseline(ctx, dsn, baselineSets, currentSchemaProbe)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("baseline must record the already-applied files")
+	}
+	applied, err := migrate.Apply(ctx, dsn, baselineSets)
+	if err != nil {
+		t.Fatalf("post-baseline migrate: %v", err)
+	}
+	if applied != 0 {
+		t.Errorf("after baseline, a normal migrate must be a no-op; applied %d", applied)
+	}
+}
+
+// Baseline refuses a DB that is NOT at the current schema — never marks a
+// migration applied whose effect is absent.
+func TestBaseline_RefusesWhenBehind(t *testing.T) {
+	dsn := os.Getenv("MIGRATE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("MIGRATE_TEST_DSN required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resetSchema(t, ctx, dsn)
+	// Apply ONLY the control-plane set — no OSB dead_letter → probe is false.
+	if _, err := migrate.Apply(ctx, dsn, []migrate.Set{{Name: "cp", FS: cpmig.FS}}); err != nil {
+		t.Fatal(err)
+	}
+	truncateTracking(t, ctx, dsn)
+	if _, err := migrate.Baseline(ctx, dsn, baselineSets, currentSchemaProbe); err == nil {
+		t.Error("baseline must refuse when the DB is not at the current schema")
+	}
+}
+
+// Baseline refuses a DB that already has tracking (already adopted).
+func TestBaseline_RefusesWhenAlreadyTracked(t *testing.T) {
+	dsn := os.Getenv("MIGRATE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("MIGRATE_TEST_DSN required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resetSchema(t, ctx, dsn)
+	if _, err := migrate.Apply(ctx, dsn, baselineSets); err != nil { // tracking populated
+		t.Fatal(err)
+	}
+	if _, err := migrate.Baseline(ctx, dsn, baselineSets, currentSchemaProbe); err == nil {
+		t.Error("baseline must refuse a DB that already has schema_migrations tracking")
+	}
+}

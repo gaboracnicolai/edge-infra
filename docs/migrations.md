@@ -53,7 +53,21 @@ to run every boot). It exits non-zero if any migration fails.
 On a **fresh** database the runner applies everything and records it. On a
 database that was migrated **manually/by an older deploy** (schema present, but no
 `schema_migrations` table), the runner would try to re-apply 0001…0007 and fail on
-the non-idempotent `ADD COLUMN` migrations. Such a database needs a one-time
-**baseline** — insert the already-applied filenames into `schema_migrations` so
-the runner skips them — before first use. A `migrate baseline` subcommand is a
-deliberate follow-up (see the Stage 4 report); it is not implemented here.
+the non-idempotent `ADD COLUMN` migrations. Adopt it with a one-time baseline:
+
+```
+DATABASE_URL='...' edge-migrate baseline
+```
+
+`baseline` records the already-applied filenames in `schema_migrations` **without
+running any SQL**, so the subsequent normal `migrate` is a no-op. It is guarded:
+
+- it **refuses** if `schema_migrations` already has rows (the DB is already
+  adopted — use the normal runner); and
+- it **refuses** unless the DB is at the **current** schema (a probe checks the
+  latest CP + OSB migration effects are present), so it can never mark a
+  genuinely-missing migration as applied — a partially-migrated DB must be brought
+  up with the normal `migrate` first.
+
+A genuinely-new migration added *after* a baseline is still applied normally by
+the next `migrate` (baseline only records the files present at adoption time).
