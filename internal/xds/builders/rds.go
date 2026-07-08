@@ -107,11 +107,12 @@ func routesFor(rs []store.Route) []*routev3.Route {
 		if r.RateLimitPerUnit > 0 {
 			tpfc[localRateLimitFilterName] = mustAny(perRouteLocalRateLimit(r))
 		}
-		// Per-service auth: ONLY the explicit "none" disables ext_authz on this
-		// route. Any other value (jwt, "", unknown) adds nothing → the global
-		// ext_authz filter applies → authenticated. This is the safe default —
-		// an unspecified or unrecognized policy can never disable auth.
-		if r.AuthPolicy == "none" {
+		// Per-service auth: disable ext_authz for "none" (explicit opt-out) and
+		// "mtls" (the downstream client cert IS the auth — don't also demand a
+		// JWT). Any other value (jwt, "", unknown) adds nothing → the global
+		// ext_authz filter applies → authenticated. Safe default: an unspecified
+		// or unrecognized policy can never disable auth.
+		if r.AuthPolicy == "none" || r.AuthPolicy == "mtls" {
 			tpfc[extAuthzFilterName] = mustAny(&extauthzv3.ExtAuthzPerRoute{
 				Override: &extauthzv3.ExtAuthzPerRoute_Disabled{Disabled: true},
 			})

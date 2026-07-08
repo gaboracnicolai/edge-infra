@@ -42,6 +42,7 @@ class ServiceSpec(BaseModel):
     port: int = Field(ge=1, le=65535)
     protocol: Literal["HTTP", "HTTPS"] = "HTTP"
     tls_secret_name: str | None = None
+    client_ca_secret_name: str | None = None
     auth_policy: Literal["none", "jwt", "mtls", "jwt_or_mtls"] = "jwt"
     rate_limit: RateLimitSpec | None = None
     health_check: HealthCheckSpec | None = None
@@ -73,6 +74,15 @@ class ServiceSpec(BaseModel):
             specvalidation.validate_secret_name(v)
         return v
 
+    @field_validator("client_ca_secret_name")
+    @classmethod
+    def _client_ca_secret_name_valid(cls, v: str | None) -> str | None:
+        """Same subdomain shape as tls_secret_name — a reference to a Slice-1
+        validation_context (client-CA) secret, interpolated into the SDS ref."""
+        if v is not None:
+            specvalidation.validate_secret_name(v)
+        return v
+
     @field_validator("node_selector")
     @classmethod
     def _node_selector_bounded(cls, v: dict[str, str]) -> dict[str, str]:
@@ -98,6 +108,10 @@ class ServiceSpec(BaseModel):
                 "auth_policy mtls/jwt_or_mtls requires protocol HTTPS "
                 "(transport-level; deferred to Stage 3b)"
             )
+        # mtls needs a client-CA to verify client certs against — requiring a
+        # client cert with no CA is a misconfiguration, rejected at submit.
+        if self.auth_policy == "mtls" and self.client_ca_secret_name is None:
+            raise ValueError("auth_policy mtls requires client_ca_secret_name")
         return self
 
 

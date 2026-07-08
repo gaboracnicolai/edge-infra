@@ -80,7 +80,7 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 		// HTTPS gateway — e.g. a controller-provisioned gateway with g.TLSSecret).
 		fc := &listenerv3.FilterChain{Filters: []*listenerv3.Filter{hcmFilter}}
 		if g.Protocol == "HTTPS" && g.TLSSecret != "" {
-			fc.TransportSocket = downstreamTLS(g.TLSSecret)
+			fc.TransportSocket = downstreamTLS(g.TLSSecret, "") // controller single-cert gateway: no mTLS
 		}
 		chains = []*listenerv3.FilterChain{fc}
 	}
@@ -101,7 +101,7 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 // Returns empty when no route carries a secret (the caller falls back to the
 // single-chain path).
 func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*listenerv3.FilterChain {
-	type pick struct{ secret, routeName string }
+	type pick struct{ secret, clientCA, routeName string }
 	byHost := map[string]pick{}
 	for _, r := range routes {
 		if r.TLSSecret == "" || len(r.Hosts) == 0 {
@@ -112,7 +112,7 @@ func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*list
 			continue // SNI needs a concrete host
 		}
 		if cur, ok := byHost[host]; !ok || r.Name < cur.routeName {
-			byHost[host] = pick{secret: r.TLSSecret, routeName: r.Name}
+			byHost[host] = pick{secret: r.TLSSecret, clientCA: r.ClientCASecret, routeName: r.Name}
 		}
 	}
 	hosts := make([]string, 0, len(byHost))
@@ -126,7 +126,7 @@ func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*list
 		chains = append(chains, &listenerv3.FilterChain{
 			FilterChainMatch: &listenerv3.FilterChainMatch{ServerNames: []string{h}},
 			Filters:          []*listenerv3.Filter{hcmFilter},
-			TransportSocket:  downstreamTLS(byHost[h].secret),
+			TransportSocket:  downstreamTLS(byHost[h].secret, byHost[h].clientCA),
 		})
 	}
 	return chains
@@ -271,14 +271,25 @@ func zeroPercent() *corev3.RuntimeFractionalPercent {
 	}
 }
 
-func downstreamTLS(secretName string) *corev3.TransportSocket {
-	ctx := &tlsv3.DownstreamTlsContext{
-		CommonTlsContext: &tlsv3.CommonTlsContext{
-			TlsCertificateSdsSecretConfigs: []*tlsv3.SdsSecretConfig{{
-				Name:      secretName,
+func downstreamTLS(secretName, clientCAName string) *corev3.TransportSocket {
+	common := &tlsv3.CommonTlsContext{
+		TlsCertificateSdsSecretConfigs: []*tlsv3.SdsSecretConfig{{
+			Name:      secretName,
+			SdsConfig: AdsConfigSource(),
+		}},
+	}
+	ctx := &tlsv3.DownstreamTlsContext{CommonTlsContext: common}
+	// Per-service downstream mTLS: when a client-CA is set, require a client cert
+	// and verify it against that CA — a Slice-1 validation_context secret served
+	// as trusted_ca via SDS. A plain HTTPS route (no client_ca) stays server-only.
+	if clientCAName != "" {
+		common.ValidationContextType = &tlsv3.CommonTlsContext_ValidationContextSdsSecretConfig{
+			ValidationContextSdsSecretConfig: &tlsv3.SdsSecretConfig{
+				Name:      clientCAName,
 				SdsConfig: AdsConfigSource(),
-			}},
-		},
+			},
+		}
+		ctx.RequireClientCertificate = wrapperspb.Bool(true)
 	}
 	return &corev3.TransportSocket{
 		Name: wellknown.TransportSocketTLS,

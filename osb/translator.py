@@ -136,20 +136,22 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         """
         INSERT INTO routes
             (id, name, gateway_id, hosts, path_prefix, cluster_name, timeout_seconds,
-             rate_limit_per_unit, rate_limit_unit, auth_policy, tls_secret_name, deleted_at)
-        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, $7, $8, NULL)
+             rate_limit_per_unit, rate_limit_unit, auth_policy, tls_secret_name,
+             client_ca_secret_name, deleted_at)
+        VALUES ($1, $1, $2, $3::text[], '/', $1, $4, $5, $6, $7, $8, $9, NULL)
         ON CONFLICT (name) DO UPDATE SET
-            gateway_id          = EXCLUDED.gateway_id,
-            hosts               = EXCLUDED.hosts,
-            path_prefix         = EXCLUDED.path_prefix,
-            cluster_name        = EXCLUDED.cluster_name,
-            timeout_seconds     = EXCLUDED.timeout_seconds,
-            rate_limit_per_unit = EXCLUDED.rate_limit_per_unit,
-            rate_limit_unit     = EXCLUDED.rate_limit_unit,
-            auth_policy         = EXCLUDED.auth_policy,
-            tls_secret_name     = EXCLUDED.tls_secret_name,
-            updated_at          = NOW(),
-            deleted_at          = NULL
+            gateway_id            = EXCLUDED.gateway_id,
+            hosts                 = EXCLUDED.hosts,
+            path_prefix           = EXCLUDED.path_prefix,
+            cluster_name          = EXCLUDED.cluster_name,
+            timeout_seconds       = EXCLUDED.timeout_seconds,
+            rate_limit_per_unit   = EXCLUDED.rate_limit_per_unit,
+            rate_limit_unit       = EXCLUDED.rate_limit_unit,
+            auth_policy           = EXCLUDED.auth_policy,
+            tls_secret_name       = EXCLUDED.tls_secret_name,
+            client_ca_secret_name = EXCLUDED.client_ca_secret_name,
+            updated_at            = NOW(),
+            deleted_at            = NULL
         """,
         dn,
         gateway,
@@ -159,6 +161,7 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         spec.rate_limit.unit if spec.rate_limit else None,
         spec.auth_policy,
         tls_secret,
+        spec.client_ca_secret_name,  # reference only — never CA material
     )
 
     log.info(

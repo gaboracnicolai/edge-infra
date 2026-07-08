@@ -300,6 +300,29 @@ async def test_auth_policy_flips_on_recreate(pool, cfg):
     assert ap2 == "jwt"
 
 
+# --- Stage 3b-mtls Slice 2: mtls writes the client-CA reference ----------------
+
+# An mtls HTTPS service writes client_ca_secret_name (REFERENCE only) onto the
+# derived route, alongside tls_secret_name + auth_policy; OSB writes no material.
+async def test_mtls_writes_client_ca_reference(pool, cfg):
+    spec = ServiceSpec(
+        name="secure-mtls", team="payments", host="mtls.example.com", port=8443,
+        protocol="HTTPS", tls_secret_name="srv-cert",
+        client_ca_secret_name="cli-ca", auth_policy="mtls",
+    )
+    await _create(pool, cfg, spec)
+    async with pool.acquire() as c:
+        rt = await c.fetchrow(
+            "SELECT auth_policy, tls_secret_name, client_ca_secret_name "
+            "FROM routes WHERE name='osb-payments-secure-mtls'"
+        )
+        material = await c.fetchrow("SELECT 1 FROM secrets WHERE name IN ('srv-cert', 'cli-ca')")
+    assert rt["auth_policy"] == "mtls"
+    assert rt["tls_secret_name"] == "srv-cert"
+    assert rt["client_ca_secret_name"] == "cli-ca"  # reference stamped on the route
+    assert material is None  # BOUNDARY: OSB referenced but wrote no cert/CA material
+
+
 # The osb-{team}- prefix keeps derived rows disjoint from controller-written
 # rows: a controller cluster with a user-chosen name is never touched.
 async def test_controller_rows_untouched(pool, cfg):

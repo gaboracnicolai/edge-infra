@@ -180,3 +180,37 @@ func TestBuildRouteConfigs_RateLimitAndAuthCoexist(t *testing.T) {
 		t.Error("ext_authz disable missing — map clobbered")
 	}
 }
+
+// ---- R4 Stage 3b-mtls Slice 2: mtls composition ---------------------------
+
+// COMPOSITION: an mtls route disables ext_authz (the client cert is the auth;
+// don't also demand a JWT), reusing the 3a-ii mechanism.
+func TestBuildRouteConfigs_MTLS_DisablesExtAuthz(t *testing.T) {
+	gw := sharedGateway()
+	route := store.Route{Name: "osb-mtls", GatewayID: "shared", ClusterName: "c", PathPrefix: "/", AuthPolicy: "mtls"}
+	res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+	pr, ok := extAuthzPerRoute(t, findRoute(t, res[0], "osb-mtls"))
+	if !ok {
+		t.Fatal("mtls route must disable ext_authz (client cert is the auth)")
+	}
+	if !pr.GetDisabled() {
+		t.Error("ExtAuthzPerRoute.Disabled must be true for mtls")
+	}
+}
+
+// mtls + rate_limit on one route → BOTH overrides render (map not clobbered).
+func TestBuildRouteConfigs_MTLSAndRateLimit_Coexist(t *testing.T) {
+	gw := sharedGateway()
+	route := store.Route{
+		Name: "osb-both", GatewayID: "shared", ClusterName: "c", PathPrefix: "/",
+		AuthPolicy: "mtls", RateLimitPerUnit: 50, RateLimitUnit: "SECOND",
+	}
+	res := BuildRouteConfigs([]store.Gateway{gw}, []store.Route{route}, RateLimitServiceOptions{})
+	tpfc := findRoute(t, res[0], "osb-both").GetTypedPerFilterConfig()
+	if _, ok := tpfc[localRateLimitFilterName]; !ok {
+		t.Error("rate_limit override missing — map clobbered")
+	}
+	if _, ok := tpfc[extAuthzFilterNameForTest]; !ok {
+		t.Error("ext_authz disable missing for mtls — map clobbered")
+	}
+}

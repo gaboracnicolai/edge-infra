@@ -96,13 +96,24 @@ async def test_provision_rejects_jwt_or_mtls_on_http(app_client, valid_spec):
     assert response.status_code == 422
 
 
-async def test_provision_accepts_mtls_on_https(app_client, valid_spec):
-    # HTTPS + mtls is accepted (stored, deferred to 3b) — not rejected.
+async def test_provision_accepts_mtls_with_client_ca(app_client, valid_spec):
+    # HTTPS + mtls + a client-CA is a complete, valid mtls spec → accepted.
+    valid_spec["protocol"] = "HTTPS"
+    valid_spec["tls_secret_name"] = "edge-cert"
+    valid_spec["auth_policy"] = "mtls"
+    valid_spec["client_ca_secret_name"] = "edge-client-ca"
+    response = await app_client.post("/v1/services", json=valid_spec)
+    assert response.status_code == 202
+
+
+async def test_provision_rejects_mtls_without_client_ca(app_client, valid_spec):
+    # mtls with NO client-CA is a misconfiguration (can't require a client cert
+    # with no CA to verify against) — rejected at the API boundary (Slice 2).
     valid_spec["protocol"] = "HTTPS"
     valid_spec["tls_secret_name"] = "edge-cert"
     valid_spec["auth_policy"] = "mtls"
     response = await app_client.post("/v1/services", json=valid_spec)
-    assert response.status_code == 202
+    assert response.status_code == 422
 
 
 async def test_provision_rejects_control_char_node_selector(app_client, valid_spec):

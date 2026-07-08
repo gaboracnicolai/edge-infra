@@ -47,6 +47,11 @@ type Route struct {
 	// the material from the secrets table); empty for HTTP routes. Never the key
 	// material itself — OSB writes only this reference (Stage 1 boundary).
 	TLSSecret string
+
+	// Per-service client-CA secret NAME (R4 Stage 3b-mtls) — for auth_policy=mtls,
+	// the validation_context (trusted_ca) the downstream client cert is verified
+	// against. A reference only; empty ⇒ no downstream mTLS on this route.
+	ClientCASecret string
 }
 
 // Cluster is the domain model for an Envoy upstream cluster.

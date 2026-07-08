@@ -89,6 +89,7 @@ jobs:
               "migrations/0004_auth_policy.sql",
               "migrations/0005_route_tls_secret.sql",
               "migrations/0006_secret_kind.sql",
+              "migrations/0007_route_client_ca.sql",
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
           ]

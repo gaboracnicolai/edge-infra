@@ -42,6 +42,23 @@ func listenerFrom(t *testing.T, res any) *listenerv3.Listener {
 	return l
 }
 
+// chainMTLS reports whether the chain's downstream TLS requires a client cert,
+// and the SDS name of the validation_context (client-CA) it verifies against.
+func chainMTLS(t *testing.T, fc *listenerv3.FilterChain) (requireClientCert bool, clientCAName string) {
+	t.Helper()
+	if fc.GetTransportSocket() == nil {
+		return false, ""
+	}
+	var ctx tlsv3.DownstreamTlsContext
+	if err := fc.GetTransportSocket().GetTypedConfig().UnmarshalTo(&ctx); err != nil {
+		t.Fatalf("unmarshal DownstreamTlsContext: %v", err)
+	}
+	if sds := ctx.GetCommonTlsContext().GetValidationContextSdsSecretConfig(); sds != nil {
+		clientCAName = sds.GetName()
+	}
+	return ctx.GetRequireClientCertificate().GetValue(), clientCAName
+}
+
 func hcmFromListener(t *testing.T, res any) *hcmv3.HttpConnectionManager {
 	t.Helper()
 	l, ok := res.(*listenerv3.Listener)
@@ -229,5 +246,72 @@ func TestBuildListeners_PerSNI_SameHostConflict_Deterministic(t *testing.T) {
 	}
 	if got := chainCertName(t, l.FilterChains[0]); got != "cert-a" {
 		t.Errorf("same-host conflict must deterministically pick smallest route name (cert-a); got %q", got)
+	}
+}
+
+// ---- R4 Stage 3b-mtls Slice 2: per-service downstream mTLS ----------------
+
+func mtlsGateway() store.Gateway {
+	return store.Gateway{ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}
+}
+
+// THE HANDSHAKE TEST (load-bearing): a per-SNI chain for a route WITH a client_ca
+// requires a client cert AND references that CA's validation_context via SDS — so
+// Envoy fails the TLS handshake for a caller with no/invalid client cert.
+func TestBuildListeners_MTLS_RequiresClientCert(t *testing.T) {
+	route := store.Route{
+		Name: "osb-a", GatewayID: "https", ClusterName: "osb-a", Hosts: []string{"a.example"},
+		PathPrefix: "/", TLSSecret: "sec-a", ClientCASecret: "ca-a", AuthPolicy: "mtls",
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{mtlsGateway()}, []store.Route{route},
+		RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	req, caName := chainMTLS(t, l.FilterChains[0])
+	if !req {
+		t.Error("mtls route: require_client_certificate must be true")
+	}
+	if caName != "ca-a" {
+		t.Errorf("validation_context SDS ref = %q; want ca-a", caName)
+	}
+	if chainCertName(t, l.FilterChains[0]) != "sec-a" {
+		t.Error("the server cert must still be served alongside the client-CA")
+	}
+}
+
+// A plain HTTPS route (no client_ca) is server-only — no client cert required.
+func TestBuildListeners_NoMTLS_ServerOnly(t *testing.T) {
+	route := store.Route{
+		Name: "osb-b", GatewayID: "https", ClusterName: "osb-b", Hosts: []string{"b.example"},
+		PathPrefix: "/", TLSSecret: "sec-b",
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{mtlsGateway()}, []store.Route{route},
+		RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	req, caName := chainMTLS(t, l.FilterChains[0])
+	if req || caName != "" {
+		t.Error("plain HTTPS route must NOT require a client cert or reference a client-CA")
+	}
+}
+
+// PER-SNI ISOLATION: one service's mTLS requirement never leaks onto another
+// service's SNI on the shared HTTPS listener.
+func TestBuildListeners_MTLS_PerSNIIsolation(t *testing.T) {
+	routes := []store.Route{
+		{Name: "osb-a", GatewayID: "https", ClusterName: "osb-a", Hosts: []string{"a.example"}, PathPrefix: "/", TLSSecret: "sec-a", ClientCASecret: "ca-a", AuthPolicy: "mtls"},
+		{Name: "osb-b", GatewayID: "https", ClusterName: "osb-b", Hosts: []string{"b.example"}, PathPrefix: "/", TLSSecret: "sec-b"},
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{mtlsGateway()}, routes,
+		RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	if len(l.FilterChains) != 2 {
+		t.Fatalf("want 2 SNI chains; got %d", len(l.FilterChains))
+	}
+	requires := map[string]bool{}
+	for _, fc := range l.FilterChains {
+		req, _ := chainMTLS(t, fc)
+		requires[fc.GetFilterChainMatch().GetServerNames()[0]] = req
+	}
+	if !requires["a.example"] {
+		t.Error("service A (mtls) must require a client cert on its SNI")
+	}
+	if requires["b.example"] {
+		t.Error("service B (plain HTTPS) must NOT require a client cert — no mtls leak across SNIs")
 	}
 }
