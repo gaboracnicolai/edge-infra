@@ -59,6 +59,17 @@ func run(log *slog.Logger) error {
 	}
 	defer pgStore.Close()
 
+	// R4 co-location invariant (fail-closed): the control-plane and OSB MUST share
+	// one database. Refuse to start if the configured DB is missing either the
+	// control-plane or the OSB schema — a divergent DSN is a misconfiguration, not
+	// a runtime state.
+	coCtx, coCancel := context.WithTimeout(rootCtx, 10*time.Second)
+	err = pgStore.VerifyColocation(coCtx)
+	coCancel()
+	if err != nil {
+		return fmt.Errorf("co-location self-check: %w", err)
+	}
+
 	cache := cachev3.NewSnapshotCache(true, cachev3.IDHash{}, slogCacheLogger{log: log})
 	reconciler := xds.NewReconciler(cache, pgStore, cfg.NodeID, log)
 	reconciler.WithRateLimit(builders.RateLimitOptions{

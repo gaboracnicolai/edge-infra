@@ -53,6 +53,36 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	return &PostgresStore{pool: pool}, nil
 }
 
+// VerifyColocation asserts the R4 invariant that the control-plane and OSB share
+// ONE database: the connected DB must contain BOTH the control-plane schema
+// (gateways) AND the OSB schema (services). A divergent deploy (the two services
+// pointed at different DBs, only one of which was migrated with both sets) fails
+// this check, so the caller can refuse to start (fail-closed). Reference:
+// docs/osb-translator-stage1.md.
+func (s *PostgresStore) VerifyColocation(ctx context.Context) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("colocation check: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var cpPresent, osbPresent bool
+	if err := tx.QueryRow(ctx,
+		`SELECT to_regclass('public.gateways') IS NOT NULL,
+		        to_regclass('public.services') IS NOT NULL`,
+	).Scan(&cpPresent, &osbPresent); err != nil {
+		return fmt.Errorf("colocation check query: %w", err)
+	}
+	if !cpPresent || !osbPresent {
+		return fmt.Errorf(
+			"co-location invariant violated: the shared database must contain BOTH the "+
+				"control-plane schema (gateways present=%v) and the OSB schema (services "+
+				"present=%v) — the control-plane and OSB must point at the SAME database",
+			cpPresent, osbPresent)
+	}
+	return nil
+}
+
 // Close releases all pooled connections.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
