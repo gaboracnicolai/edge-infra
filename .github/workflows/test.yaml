@@ -51,3 +51,7 @@ jobs:
           cache: true
       - name: go test
         run: go test ./... -count=1
+      # R1 live xDS mutual-TLS handshake validation. No DB/Docker — pure Go +
+      # in-memory certs — so it runs here rather than in the integration harness.
+      - name: xDS mTLS handshake (integration-tagged)
+        run: go test -tags integration ./cmd/server/ -run TestXDSMutualTLSHandshake -count=1
