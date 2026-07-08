@@ -28,8 +28,13 @@ docker rm -f "$PG" >/dev/null 2>&1 || true
 docker run -d --name "$PG" \
   -e POSTGRES_PASSWORD=itpass -e POSTGRES_DB=edge \
   -p "${PORT}:5432" postgres:16-alpine >/dev/null
-for _ in $(seq 1 30); do
-  docker exec "$PG" pg_isready -U postgres >/dev/null 2>&1 && break
+# Poll the EDGE database specifically, not pg_isready: during the container's
+# first-init pass Postgres briefly accepts connections on a bootstrap socket
+# before POSTGRES_DB=edge has been created, so pg_isready flips ready too early
+# and the migrations race against a not-yet-existing `edge` DB. `psql -d edge`
+# only succeeds once edge exists AND accepts connections — after init completes.
+for _ in $(seq 1 60); do
+  docker exec "$PG" psql -U postgres -d edge -c 'select 1' >/dev/null 2>&1 && break
   sleep 1
 done
 
