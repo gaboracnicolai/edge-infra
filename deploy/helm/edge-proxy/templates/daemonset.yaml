@@ -62,19 +62,26 @@ spec:
               containerPort: 80
               hostPort: 80
               protocol: TCP
+            # Admin is bound to 127.0.0.1 in the bootstrap (R7) — in-pod only, not
+            # a probe/scrape target.
             - name: admin
               containerPort: 9901
+              protocol: TCP
+            # Dedicated readiness endpoint (static bootstrap listener). The kubelet
+            # probes hit this on the pod IP, so the admin can stay localhost-only.
+            - name: health
+              containerPort: 9902
               protocol: TCP
           readinessProbe:
             httpGet:
               path: /ready
-              port: admin
+              port: health
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /ready
-              port: admin
+              port: health
             initialDelaySeconds: 15
             periodSeconds: 10
           resources:

@@ -11,9 +11,12 @@ data:
       id: NODE_ID_PLACEHOLDER
       cluster: edge-proxy
     admin:
+      # Bound to localhost ONLY (R7): the admin interface (/config_dump,
+      # /quitquitquit, …) must never be reachable from off-pod. Readiness is
+      # served by the dedicated static health listener below, not the admin.
       address:
         socket_address:
-          address: 0.0.0.0
+          address: 127.0.0.1
           port_value: 9901
     dynamic_resources:
       ads_config:
@@ -29,6 +32,44 @@ data:
         ads: {}
         resource_api_version: V3
     static_resources:
+      listeners:
+        # Dedicated readiness listener (R7). STATIC in the bootstrap, so it answers
+        # even before/without any xDS config — the kubelet readiness probe targets
+        # this (port 9902 /ready), never the localhost-only admin. The health_check
+        # filter returns 200 while serving and 503 during drain/shutdown.
+        - name: health
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 9902
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: health
+                    route_config:
+                      name: health
+                      virtual_hosts:
+                        - name: health
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 404
+                    http_filters:
+                      - name: envoy.filters.http.health_check
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+                          pass_through_mode: false
+                          headers:
+                            - name: ":path"
+                              string_match:
+                                exact: "/ready"
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
       clusters:
         - name: xds_cluster
           connect_timeout: 5s
