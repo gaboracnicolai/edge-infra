@@ -18,7 +18,7 @@ import metrics
 import translator
 import webhook
 from config import Settings
-from db import create_pool
+from db import create_pool, verify_colocation
 from models import ServiceSpec
 from tls import build_nats_tls
 
@@ -303,6 +303,7 @@ async def main() -> None:
     """Wire up the pool + JetStream and run the worker loop."""
     cfg = Settings()
     pool = await create_pool(cfg.database_url, ssl_mode=cfg.db_ssl_mode, ca_path=cfg.db_tls_ca)
+    await verify_colocation(pool)  # fail-closed: refuse if not co-located with the control-plane
     nats_tls = build_nats_tls(cfg.nats_tls_ca, cfg.nats_tls_cert, cfg.nats_tls_key)
     nc = await nats.connect(cfg.nats_url, tls=nats_tls)
     js = nc.jetstream()

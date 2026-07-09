@@ -28,3 +28,23 @@ async def create_pool(
         statement_cache_size=0,
         ssl=ssl_arg,
     )
+
+
+async def verify_colocation(pool) -> None:
+    """R4 co-location invariant (fail-closed): edge-osb and the control-plane MUST
+    share ONE database. Refuse to start if the connected DB is missing either the
+    OSB schema (services) or the control-plane schema (gateways) — a divergent DSN
+    is a misconfiguration, not a runtime state. Mirrors the Go
+    store.VerifyColocation so the invariant is enforced from both sides.
+    """
+    row = await pool.fetchrow(
+        "SELECT to_regclass('public.services') IS NOT NULL AS osb, "
+        "       to_regclass('public.gateways') IS NOT NULL AS cp"
+    )
+    if not row["osb"] or not row["cp"]:
+        raise RuntimeError(
+            "co-location invariant violated: the shared database must contain BOTH "
+            f"the OSB schema (services present={row['osb']}) and the control-plane "
+            f"schema (gateways present={row['cp']}) — edge-osb and the control-plane "
+            "must point at the SAME database"
+        )

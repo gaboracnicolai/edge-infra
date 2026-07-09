@@ -16,7 +16,7 @@ import broker
 import metrics
 import specvalidation
 from config import Settings
-from db import create_pool
+from db import create_pool, verify_colocation
 from models import ProvisionRequest, ProvisionResponse, ServiceSpec
 from security import (
     RequestIDMiddleware,
@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pool = pool
     app.state.js = js
     app.state.nc = nc
+    await verify_colocation(pool)  # fail-closed: refuse if not co-located with the control-plane
     await startup_tenancy_check(pool, cfg)  # fail-closed: refuse to start unconfigured
     log.info("osb broker ready", listen_port=cfg.listen_port)
     try:

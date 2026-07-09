@@ -60,7 +60,7 @@ export TEST_DATABASE_URL="$DSN"
 export OSB_PROVISION="$VENV/bin/python $REPO/osb/tools/provision.py"
 
 echo "==> python translator + tenancy integration suites"
-(cd osb && "$VENV/bin/pytest" tests/test_translator.py tests/test_tenancy.py -q)
+(cd osb && "$VENV/bin/pytest" tests/test_translator.py tests/test_tenancy.py tests/test_colocation.py -q)
 
 echo "==> go cross-language E2E (Python translator writes -> Go LoadSnapshot serves)"
 go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
