@@ -38,7 +38,10 @@ resources:
 
 podAnnotations:
   prometheus.io/scrape: "true"
-  prometheus.io/port: "9901"
+  # Scrape the dedicated stats listener (proxies /stats/prometheus from the
+  # localhost-only admin), NOT the admin port (9901, now 127.0.0.1-only).
+  prometheus.io/port: "9903"
+  prometheus.io/path: "/stats/prometheus"
 
 nameOverride: ""
 fullnameOverride: ""

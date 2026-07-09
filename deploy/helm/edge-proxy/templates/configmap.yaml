@@ -70,6 +70,40 @@ data:
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        # Prometheus metrics listener (R7 follow-up). STATIC, so it serves even
+        # with an empty xDS config. It proxies ONLY /stats/prometheus to the
+        # localhost admin (admin_stats cluster) and 404s everything else — so
+        # metrics are scrape-reachable off-pod while the admin mutation endpoints
+        # (/quitquitquit, /config_dump, …) stay unreachable via this port.
+        - name: stats
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 9903
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: stats
+                    route_config:
+                      name: stats
+                      virtual_hosts:
+                        - name: stats
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                path: "/stats/prometheus"
+                              route:
+                                cluster: admin_stats
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 404
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
       clusters:
         - name: xds_cluster
           connect_timeout: 5s
@@ -114,3 +148,17 @@ data:
                       matcher:
                         exact: {{ .Values.xds.controlPlaneHost }}
           {{- end }}
+        # Localhost-only admin, reached solely by the stats listener above to
+        # proxy /stats/prometheus. Never exposed directly.
+        - name: admin_stats
+          connect_timeout: 1s
+          type: STATIC
+          load_assignment:
+            cluster_name: admin_stats
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 9901

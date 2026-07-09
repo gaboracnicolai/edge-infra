@@ -72,6 +72,11 @@ spec:
             - name: health
               containerPort: 9902
               protocol: TCP
+            # Prometheus metrics (proxies /stats/prometheus from the localhost
+            # admin); scraped via the pod IP, admin stays localhost-only.
+            - name: stats
+              containerPort: 9903
+              protocol: TCP
           readinessProbe:
             httpGet:
               path: /ready
