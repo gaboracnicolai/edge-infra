@@ -33,3 +33,6 @@ auth-service/dist/
 
 # integration-test python venv (make test-integration)
 .venv-integration/
+
+# PKI/KEK bootstrap material (scripts/bootstrap-pki.sh) — NEVER commit
+.pki-bootstrap/
