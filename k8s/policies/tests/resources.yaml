@@ -45,3 +45,62 @@ spec:
     - port: 80
       targetPort: 8080
       nodePort: 30080
+---
+# SEC-3 NetworkPolicy fixtures for disallow-open-intra-namespace-ingress.
+# Scoped: intra-namespace ingress restricted to a specific workload + port → allowed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-gateway-scoped
+  namespace: backend
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app: track
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# Open: a bare podSelector {} intra-namespace ingress = the SEC-3 hole → denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-gateway-open
+  namespace: backend
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - podSelector: {}
+---
+# Adversarial: default-deny uses spec.podSelector {} as a SELECTOR (all pods this
+# policy applies to) with NO ingress rules — must NOT be flagged (it's not a
+# from-peer). Proves the guardrail targets ingress from-peers, not the selector.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: backend
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

@@ -4,6 +4,7 @@ metadata:
   name: disallow-public-backend-services
 policies:
   - ../disallow-public-backend-services.yaml
+  - ../disallow-open-intra-namespace-ingress.yaml
 resources:
   - resources.yaml
 results:
@@ -22,3 +23,18 @@ results:
     resources:
       - backend/lb-backend
       - backend/nodeport-backend
+  # SEC-3: scoped intra-namespace ingress + the default-deny selector pass;
+  # the all-pods (podSelector {}) intra-namespace rule is denied.
+  - policy: disallow-open-intra-namespace-ingress
+    rule: no-all-pods-ingress
+    kind: NetworkPolicy
+    result: pass
+    resources:
+      - backend/allow-from-gateway-scoped
+      - backend/default-deny
+  - policy: disallow-open-intra-namespace-ingress
+    rule: no-all-pods-ingress
+    kind: NetworkPolicy
+    result: fail
+    resources:
+      - backend/allow-from-gateway-open

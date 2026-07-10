@@ -40,6 +40,16 @@ spec:
       ports:
         - protocol: TCP
           port: 8080 # backend container port
-    # Intra-namespace traffic (e.g. the app reaching its own database).
+    # Intra-namespace traffic — scoped to the specific workload + port that legitimately needs it
+    # (e.g. the app reaching its own database). This deliberately does NOT use an empty `podSelector: {}`
+    # with no `ports:`: that re-opens every port between every pod in the namespace, defeating
+    # default-deny for lateral movement (a compromised pod could reach any peer on any port). Enumerate
+    # the real intra-namespace flows instead — replace the placeholders per namespace and add one
+    # from/ports block per legitimate flow.
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              app: <INTRA_NS_CLIENT_LABEL> # e.g. the app pod that talks to the database
+      ports:
+        - protocol: TCP
+          port: <INTRA_NS_PORT> # e.g. 5432 for Postgres — the specific service port, never all ports
