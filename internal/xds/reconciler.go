@@ -150,15 +150,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("load snapshot: %w", err)
 	}
 
-	// Authority-path signal: per-service auth is renderable ONLY when ext_authz is
+	// FAIL-CLOSED (CFG-1): per-service auth is renderable ONLY when ext_authz is
 	// globally configured (its filter needs the auth-service cluster/target, both
-	// gated on ExtAuthz.Enabled). If a route wants auth while ext_authz is off it
-	// is NOT authenticated — the gateway is already open — so signal loudly rather
-	// than let anyone believe per-service auth is active. Never a silent bypass.
+	// gated on ExtAuthz.Enabled). A route that wants auth (auth_policy != none)
+	// while ext_authz is off would serve UNAUTHENTICATED — an identity-bearing
+	// listener with an open gateway. REFUSE to build/publish the snapshot rather
+	// than serve it open (was warn-and-serve-open). The reconcile loop logs this
+	// and retries, keeping the last-good config (or nothing on first boot), so an
+	// operator who turns ext_authz off can never silently open an identity listener.
 	if !r.extAuthz.Enabled && builders.AnyRouteWantsAuth(domain.Routes) {
 		r.authWantedButExtAuthzOff.Add(1)
-		r.log.Warn("per-service auth_policy requested but ext_authz is globally disabled; " +
-			"affected routes are NOT authenticated (set EXT_AUTHZ_ENABLED and configure the auth-service)")
+		return fmt.Errorf("refusing to build snapshot: a route requests per-service auth " +
+			"(auth_policy != none) but ext_authz is globally disabled — an identity-bearing " +
+			"listener without ext_authz would serve unauthenticated; enable ext_authz " +
+			"(EXT_AUTHZ_ENABLED) and configure the auth-service, or set auth_policy=none")
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{

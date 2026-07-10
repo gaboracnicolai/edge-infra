@@ -58,10 +58,13 @@ func sampleSnapshot() *store.Snapshot {
 			{ID: "gw1", Name: "edge-http", Port: 8080, Protocol: "HTTP"},
 			{ID: "gw2", Name: "edge-https", Port: 8443, Protocol: "HTTPS", TLSSecret: "edge-cert"},
 		},
+		// Explicitly public (auth_policy=none) so the general reconcile-mechanics
+		// tests are decoupled from the CFG-1 ext_authz fail-closed guard; the
+		// auth-wanting path is exercised via authWantingSnapshot().
 		Routes: []store.Route{
-			{ID: "r1", Name: "api", GatewayID: "gw1", Hosts: []string{"api.example.com"}, PathPrefix: "/", ClusterName: "api-cluster"},
-			{ID: "r2", Name: "web", GatewayID: "gw1", Hosts: []string{"www.example.com"}, PathPrefix: "/", ClusterName: "web-cluster"},
-			{ID: "r3", Name: "tls", GatewayID: "gw2", Hosts: []string{"secure.example.com"}, PathPrefix: "/", ClusterName: "api-cluster"},
+			{ID: "r1", Name: "api", GatewayID: "gw1", Hosts: []string{"api.example.com"}, PathPrefix: "/", ClusterName: "api-cluster", AuthPolicy: "none"},
+			{ID: "r2", Name: "web", GatewayID: "gw1", Hosts: []string{"www.example.com"}, PathPrefix: "/", ClusterName: "web-cluster", AuthPolicy: "none"},
+			{ID: "r3", Name: "tls", GatewayID: "gw2", Hosts: []string{"secure.example.com"}, PathPrefix: "/", ClusterName: "api-cluster", AuthPolicy: "none"},
 		},
 		Clusters: []store.Cluster{
 			{ID: "c1", Name: "api-cluster", ConnectTimeout: 5 * time.Second, LbPolicy: "ROUND_ROBIN"},
@@ -76,6 +79,15 @@ func sampleSnapshot() *store.Snapshot {
 			{ID: "s1", Name: "edge-cert", CertPEM: "-----CERT-----", KeyPEM: "-----KEY-----"},
 		},
 	}
+}
+
+// authWantingSnapshot is a valid, non-empty snapshot in which one route requests
+// per-service auth (auth_policy != "none"). It exercises the CFG-1 fail-closed
+// guard: with ext_authz off it must be REFUSED; with ext_authz on it must publish.
+func authWantingSnapshot() *store.Snapshot {
+	s := sampleSnapshot()
+	s.Routes[0].AuthPolicy = "jwt" // one identity-bearing route
+	return s
 }
 
 func TestReconcile_PopulatesAllResourceTypes(t *testing.T) {
@@ -454,26 +466,43 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// R4 Stage 3a-ii — the DETECT+LOUD-SIGNAL path: per-service auth can be enforced
-// ONLY when ext_authz is globally configured. When it isn't but a route wants
-// auth, the reconciler must loudly signal (counter) — never silently imply auth.
-func TestReconcile_AuthWantedButExtAuthzOff_Signals(t *testing.T) {
+// CFG-1 (was R4 Stage 3a-ii DETECT+SIGNAL): per-service auth can be enforced ONLY
+// when ext_authz is globally configured. When it isn't but a route wants auth, the
+// reconciler must FAIL CLOSED — raise the loud signal (counter) AND refuse to
+// publish — never warn-and-serve-open, so an identity listener can't run unauthed.
+func TestReconcile_AuthWantedButExtAuthzOff_FailsClosed(t *testing.T) {
 	cache := newCache()
-	// ext_authz NOT configured (default zero value: Enabled=false); the sample
-	// routes want auth (auth_policy unset => authenticated by default).
-	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
-	require.NoError(t, r.Reconcile(context.Background()))
+	// ext_authz NOT configured (default zero value: Enabled=false); a route wants
+	// auth (auth_policy=jwt), so an identity-bearing listener is requested.
+	r := NewReconciler(cache, &fakeStore{snap: authWantingSnapshot()}, testNodeID, discardLogger())
+
+	// FAIL-CLOSED (CFG-1): Reconcile must REFUSE (error) rather than publish an
+	// identity-bearing listener that would serve unauthenticated.
+	require.Error(t, r.Reconcile(context.Background()),
+		"ext_authz off + routes want auth: Reconcile must refuse (fail-closed), not serve open")
 	if r.AuthWantedButExtAuthzOff() == 0 {
-		t.Fatal("ext_authz off + routes want auth: the loud signal must fire (counter > 0)")
+		t.Error("the loud signal must still fire (counter > 0)")
+	}
+	// Nothing published: no snapshot reaches the cache, so the proxy gets no
+	// config (fail-closed on first boot) — never an open identity listener.
+	if _, err := cache.GetSnapshot(testNodeID); err == nil {
+		t.Error("fail-closed: no snapshot must be published when ext_authz is off + auth is wanted")
 	}
 }
 
 func TestReconcile_ExtAuthzOn_NoAuthOffSignal(t *testing.T) {
 	cache := newCache()
-	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+	// Same auth-wanting route as the fail-closed test, but ext_authz IS configured:
+	// the identity-bearing listener is now backed by a real authz filter, so the
+	// reconciler must publish normally and NOT raise the auth-off signal.
+	r := NewReconciler(cache, &fakeStore{snap: authWantingSnapshot()}, testNodeID, discardLogger())
 	r.WithExtAuthz(builders.ExtAuthzOptions{Enabled: true, Address: "auth-service", Port: 9000})
 	require.NoError(t, r.Reconcile(context.Background()))
 	if got := r.AuthWantedButExtAuthzOff(); got != 0 {
 		t.Fatalf("ext_authz configured: the auth-off signal must NOT fire; got %d", got)
+	}
+	// A snapshot MUST be published — ext_authz-on is the path that serves auth.
+	if _, err := cache.GetSnapshot(testNodeID); err != nil {
+		t.Errorf("ext_authz on + auth wanted: a snapshot must be published; got %v", err)
 	}
 }
