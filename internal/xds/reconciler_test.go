@@ -506,3 +506,42 @@ func TestReconcile_ExtAuthzOn_NoAuthOffSignal(t *testing.T) {
 		t.Errorf("ext_authz on + auth wanted: a snapshot must be published; got %v", err)
 	}
 }
+
+// CFG-1 cutover end-to-end sanity: with ext_authz enabled AND the upstream mTLS
+// certs wired (the real prod cutover), a Reconcile over auth-wanting routes must
+// (1) PUBLISH a snapshot — not fail-closed — so the gateway serves, and (2) the
+// published auth_service cluster must carry mTLS (client cert + CA), so the
+// ext_authz leg to the TLS auth-service actually authenticates instead of failing
+// the handshake and denying all. This is the "gateway up AND authenticating" proof.
+func TestReconcile_ExtAuthzCutover_PublishesWithMTLS(t *testing.T) {
+	cache := newCache()
+	r := NewReconciler(cache, &fakeStore{snap: authWantingSnapshot()}, testNodeID, discardLogger())
+	r.WithExtAuthz(builders.ExtAuthzOptions{
+		Enabled:  true,
+		Address:  "auth-service.infra.svc.cluster.local",
+		Port:     50051,
+		CAFile:   "/etc/authz-client-tls/ca.crt",
+		CertFile: "/etc/authz-client-tls/tls.crt",
+		KeyFile:  "/etc/authz-client-tls/tls.key",
+	})
+
+	require.NoError(t, r.Reconcile(context.Background()), "enabled + certs: must publish, not fail-closed")
+	snap, err := cache.GetSnapshot(testNodeID)
+	require.NoError(t, err, "gateway must serve: a snapshot must be published")
+
+	var authCluster *clusterv3.Cluster
+	for _, res := range snap.GetResources(resourcev3.ClusterType) {
+		if c, ok := res.(*clusterv3.Cluster); ok && c.Name == "auth_service" {
+			authCluster = c
+		}
+	}
+	require.NotNil(t, authCluster, "the auth_service cluster must be published when ext_authz is enabled")
+	require.NotNil(t, authCluster.GetTransportSocket(),
+		"authenticating: the auth_service cluster must use TLS (else plaintext → deny-all against the TLS auth-service)")
+	var tlsCtx tlsv3.UpstreamTlsContext
+	require.NoError(t, authCluster.GetTransportSocket().GetTypedConfig().UnmarshalTo(&tlsCtx))
+	require.NotNil(t, tlsCtx.GetCommonTlsContext().GetValidationContext().GetTrustedCa(),
+		"must trust the CA to verify the auth-service server cert")
+	require.NotEmpty(t, tlsCtx.GetCommonTlsContext().GetTlsCertificates(),
+		"mTLS: must present the client cert the auth-service requires")
+}

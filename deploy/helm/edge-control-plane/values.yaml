@@ -36,19 +36,23 @@ rateLimit:
   fillIntervalMs: 1000
 
 # Gateway ext_authz (Envoy → auth-service gRPC). FAIL-CLOSED: if the
-# auth-service is unreachable Envoy denies. Opt-in (default off) because
-# enabling it without a reachable auth-service denies ALL traffic suite-wide —
-# flip it on at cutover once the auth front is deployed and verified.
+# auth-service is unreachable Envoy denies. Enabled at cutover: the auth front is
+# deployed and the reconciler now fail-closes if a route wants auth while this is
+# off (CFG-1), so leaving it off would take auth-wanting routes dark.
 extAuthz:
-  enabled: false
+  enabled: true
   address: auth-service.infra.svc.cluster.local
   port: 50051
-  # Upstream (m)TLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD — the
-  # proxy reads them, not the control plane. Leave caFile empty for plaintext;
-  # the auth-service deploys with TLS, so prod must set these.
-  caFile: ""
-  certFile: ""
-  keyFile: ""
+  # Upstream mTLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD — the proxy
+  # reads them, not the control plane; the reconciler only renders these path
+  # strings into the ext_authz cluster. The auth-service requires client-cert
+  # verification (AUTH_TLS_CA), so all three MUST be set and MUST match the
+  # edge-proxy mount (edge-proxy values extAuthz.clientTLS.mountPath =
+  # /etc/authz-client-tls, secret envoy-authz-client-tls-secret). caFile presence
+  # is what makes the reconciler render TLS (vs plaintext → deny-all).
+  caFile: /etc/authz-client-tls/ca.crt
+  certFile: /etc/authz-client-tls/tls.crt
+  keyFile: /etc/authz-client-tls/tls.key
 
 # Gateway rate-limit service (Envoy global ratelimit → RLS over gRPC) — the
 # cross-instance, identity-keyed shared layer. FAIL-OPEN: if the RLS is
