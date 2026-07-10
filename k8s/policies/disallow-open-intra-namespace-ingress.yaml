@@ -1,0 +1,43 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-open-intra-namespace-ingress
+  annotations:
+    policies.kyverno.io/title: Disallow all-pods intra-namespace ingress
+    policies.kyverno.io/category: Talyvor Edge Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      A backend NetworkPolicy ingress rule that allows traffic from an empty
+      podSelector ({}) permits EVERY pod in the namespace to reach the backend —
+      reopening the gateway-bypass / lateral-movement hole that default-deny is
+      meant to close (SEC-3). Scope intra-namespace ingress to the specific
+      client workload (podSelector.matchLabels) and port instead. Companion
+      guardrail to k8s/policies/backend-network-policies.yaml.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: no-all-pods-ingress
+      match:
+        any:
+          - resources:
+              kinds:
+                - NetworkPolicy
+      validate:
+        message: >-
+          NetworkPolicy '{{ request.object.metadata.name }}' has an ingress rule
+          allowing from an empty podSelector ({} = every pod in the namespace).
+          Scope it to a specific workload (podSelector.matchLabels) and port.
+        foreach:
+          - list: "request.object.spec.ingress[]"
+            foreach:
+              - list: "element.from[]"
+                deny:
+                  conditions:
+                    all:
+                      # A from-peer that carries a podSelector which is empty ({})
+                      # matches every pod. ipBlock peers (no podSelector) and
+                      # scoped peers (matchLabels present) are unaffected.
+                      - key: "{{ element.podSelector != null && length(not_null(element.podSelector.matchLabels, `{}`)) == `0` && length(not_null(element.podSelector.matchExpressions, `[]`)) == `0` }}"
+                        operator: Equals
+                        value: true
