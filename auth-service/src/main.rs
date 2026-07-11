@@ -26,6 +26,11 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<(), AppError> {
     init_tracing();
 
+    // Install the rustls crypto provider before any TLS config is built. With both
+    // aws-lc-rs (reqwest) and ring (tonic) linked, rustls 0.23 otherwise panics at
+    // serve time. See auth_service::install_default_crypto_provider.
+    auth_service::install_default_crypto_provider();
+
     let cfg = Config::from_env()?;
     info!(
         grpc_addr = %cfg.grpc_addr,
