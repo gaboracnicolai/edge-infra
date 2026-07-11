@@ -119,6 +119,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest",
  "rsa",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
