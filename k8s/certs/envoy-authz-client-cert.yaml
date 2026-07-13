@@ -1,0 +1,24 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: envoy-authz-client-cert
+  namespace: edge
+spec:
+  # Client identity the edge-proxy (Envoy) presents to the auth-service for the
+  # ext_authz gRPC leg. The auth-service requires mTLS (AUTH_TLS_CA set) and
+  # verifies the client cert chains to edge-internal-ca — so this MUST be issued
+  # by the same ClusterIssuer as auth-service-cert.yaml. Its ca.crt also lets
+  # Envoy verify the auth-service server cert (extAuthz.caFile).
+  secretName: envoy-authz-client-tls-secret
+  duration: 2160h   # 90 days
+  renewBefore: 360h # 15 days
+  commonName: envoy-authz-client
+  dnsNames:
+    - envoy-authz-client
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment

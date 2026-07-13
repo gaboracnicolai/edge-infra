@@ -36,19 +36,31 @@ rateLimit:
   fillIntervalMs: 1000
 
 # Gateway ext_authz (Envoy → auth-service gRPC). FAIL-CLOSED: if the
-# auth-service is unreachable Envoy denies. Opt-in (default off) because
-# enabling it without a reachable auth-service denies ALL traffic suite-wide —
-# flip it on at cutover once the auth front is deployed and verified.
+# auth-service is unreachable Envoy denies.
+#
+# BASE DEFAULT STAYS OFF (enabled: false). Do NOT flip this to true here: ArgoCD
+# auto-syncs base values (selfHeal, targetRevision: HEAD), so an enabled:true in
+# BASE = the prod cutover happens on merge — flipping auth ON before the operator
+# has verified the auth front is reachable = gateway deny-all. The cert paths below
+# are pre-wired but INERT while disabled (the reconciler only reads them when
+# enabled). The flip is a deliberate LAUNCH-DAY step, applied via an env overlay
+# (deploy/envs/prod/<region>/values-control-plane.yaml: extAuthz.enabled: true) or
+# a manual `helm --set` against a cluster confirmed ready — never a merge-time
+# side effect.
 extAuthz:
   enabled: false
   address: auth-service.infra.svc.cluster.local
   port: 50051
-  # Upstream (m)TLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD — the
-  # proxy reads them, not the control plane. Leave caFile empty for plaintext;
-  # the auth-service deploys with TLS, so prod must set these.
-  caFile: ""
-  certFile: ""
-  keyFile: ""
+  # Upstream mTLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD — the proxy
+  # reads them, not the control plane; the reconciler only renders these path
+  # strings into the ext_authz cluster (and only when enabled). The auth-service
+  # requires client-cert verification (AUTH_TLS_CA), so all three MUST be set and
+  # MUST match the edge-proxy mount (edge-proxy values extAuthz.clientTLS.mountPath
+  # = /etc/authz-client-tls, secret envoy-authz-client-tls-secret). caFile presence
+  # is what makes the reconciler render TLS (vs plaintext → deny-all).
+  caFile: /etc/authz-client-tls/ca.crt
+  certFile: /etc/authz-client-tls/tls.crt
+  keyFile: /etc/authz-client-tls/tls.key
 
 # Gateway rate-limit service (Envoy global ratelimit → RLS over gRPC) — the
 # cross-instance, identity-keyed shared layer. FAIL-OPEN: if the RLS is
