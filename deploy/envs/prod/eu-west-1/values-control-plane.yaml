@@ -7,3 +7,18 @@ affinity:
           matchLabels:
             app: edge-control-plane
         topologyKey: kubernetes.io/hostname
+
+# LAUNCH-DAY ext_authz cutover flip (CFG-1). The base chart default is
+# extAuthz.enabled: false (safe, inert); this overlay turns the gateway's
+# fail-closed auth ON for eu-west-1 via ArgoCD. Because ArgoCD auto-syncs
+# (selfHeal, targetRevision: HEAD), MERGING THIS = THE PROD CUTOVER.
+#
+# PREREQS — all must hold before this merges, or the gateway goes deny-all:
+#   1. #38 (fail-close reconciler + mTLS wiring) merged AND the control-plane
+#      image tag bumped to a build that carries the fail-close.
+#   2. auth-service front deployed, reachable on :50051, JWKS + mTLS verified.
+#   3. envoy-authz-client-cert applied (cert-manager) so the edge-proxy client
+#      cert secret (envoy-authz-client-tls-secret) exists and is mounted.
+# The cert paths are inherited from base values (already present, inert until now).
+extAuthz:
+  enabled: true
