@@ -91,6 +91,11 @@ func TestXDSRealEnvoyTLSVersion(t *testing.T) {
 	// cluster.xds_cluster.ssl.handshake count after giving it time to connect.
 	runEnvoy := func(t *testing.T, withTLSParams bool) int {
 		t.Helper()
+		linux := runtime.GOOS == "linux"
+		hostAddr := "host.docker.internal" // Docker Desktop reaches the host here
+		if linux {
+			hostAddr = "127.0.0.1" // with --network host, Envoy shares the runner net
+		}
 		params := ""
 		if withTLSParams {
 			params = "tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_protocol_version: TLSv1_3 }\n          " // 10-space indent to align with validation_context
@@ -116,7 +121,7 @@ static_resources:
         explicit_http_config: { http2_protocol_options: {} }
     load_assignment:
       cluster_name: xds_cluster
-      endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: host.docker.internal, port_value: %d } } } }] }]
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: %s, port_value: %d } } } }] }]
     transport_socket:
       name: envoy.transport_sockets.tls
       typed_config:
@@ -126,7 +131,7 @@ static_resources:
           %svalidation_context:
             trusted_ca: { filename: /certs/ca.crt }
             match_typed_subject_alt_names: [{ san_type: DNS, matcher: { exact: %s } }]
-`, port, xdsServerSAN, params, xdsServerSAN)
+`, hostAddr, port, xdsServerSAN, params, xdsServerSAN)
 		bootName := "bootstrap-noparams.yaml"
 		if withTLSParams {
 			bootName = "bootstrap-params.yaml"
@@ -135,30 +140,35 @@ static_resources:
 
 		name := "xds-tls-test-" + strconv.Itoa(port) + map[bool]string{true: "-p", false: "-n"}[withTLSParams]
 		_ = exec.Command("docker", "rm", "-f", name).Run()
-		// Explicitly publish the admin port (the envoy image does not EXPOSE 9901, so
-		// -P would not map it), to a random host port on loopback.
-		args := []string{"run", "-d", "--name", name, "-p", "127.0.0.1::9901", "-v", dir + ":/certs:ro"}
-		// Docker Desktop (mac/win) provides host.docker.internal built-in; on Linux
-		// it must be mapped to the host gateway. Adding it on mac overrides the
-		// working built-in, so only pass it on Linux.
-		if runtime.GOOS == "linux" {
-			args = append(args, "--add-host", "host.docker.internal:host-gateway")
+		args := []string{"run", "-d", "--name", name, "-v", dir + ":/certs:ro"}
+		statsURL := "" // set below per platform (envoy image has no wget/curl → scrape from the host)
+		if linux {
+			// Share the runner's network namespace so Envoy reaches the in-test
+			// server on 127.0.0.1 and its admin is directly queryable. (host.docker.
+			// internal via the bridge gateway is unreliable on CI runners.)
+			args = append(args, "--network", "host")
+			statsURL = "http://127.0.0.1:9901/stats?filter=cluster.xds_cluster.ssl.handshake"
+		} else {
+			// Docker Desktop: publish the admin port (envoy does not EXPOSE 9901).
+			args = append(args, "-p", "127.0.0.1::9901")
 		}
 		args = append(args, envoyImage, "-c", "/certs/"+bootName, "-l", "warning")
 		out, err := exec.Command("docker", args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("docker run envoy: %v\n%s", err, out)
 		}
-		t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+		// Remove at the END of this run (not test end) so sequential --network host
+		// runs don't collide on the admin port.
+		defer func() { _ = exec.Command("docker", "rm", "-f", name).Run() }()
 
-		// The envoy image ships no wget/curl, so scrape the admin via its host-mapped
-		// port with Go's http client (docker run -P publishes 9901).
-		pout, _ := exec.Command("docker", "port", name, "9901").CombinedOutput()
-		adminHostPort := strings.TrimSpace(string(pout))
-		if i := strings.LastIndex(adminHostPort, ":"); i >= 0 {
-			adminHostPort = adminHostPort[i+1:]
+		if !linux {
+			pout, _ := exec.Command("docker", "port", name, "9901").CombinedOutput()
+			adminHostPort := strings.TrimSpace(string(pout))
+			if i := strings.LastIndex(adminHostPort, ":"); i >= 0 {
+				adminHostPort = adminHostPort[i+1:]
+			}
+			statsURL = "http://127.0.0.1:" + adminHostPort + "/stats?filter=cluster.xds_cluster.ssl.handshake"
 		}
-		statsURL := "http://127.0.0.1:" + adminHostPort + "/stats?filter=cluster.xds_cluster.ssl.handshake"
 
 		// Poll ssl.handshake for up to ~20s.
 		var handshake int
@@ -182,11 +192,11 @@ static_resources:
 		if handshake == 0 {
 			logs, _ := exec.Command("docker", "logs", "--tail", "20", name).CombinedOutput()
 			var full []byte
-			if resp, e := http.Get("http://127.0.0.1:" + adminHostPort + "/stats?filter=cluster.xds_cluster"); e == nil {
+			if resp, e := http.Get(strings.Replace(statsURL, ".ssl.handshake", "", 1)); e == nil {
 				full, _ = io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
 			}
-			t.Logf("[diag withTLSParams=%v adminPort=%s] envoy logs:\n%s\n--- xds_cluster stats ---\n%s", withTLSParams, adminHostPort, logs, full)
+			t.Logf("[diag withTLSParams=%v] envoy logs:\n%s\n--- xds_cluster stats ---\n%s", withTLSParams, logs, full)
 		}
 		return handshake
 	}
