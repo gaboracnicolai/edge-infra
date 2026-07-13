@@ -22,6 +22,12 @@ spec:
       serviceAccountName: {{ include "auth-service.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: true
+        # Numeric UID/GID is REQUIRED: the distroless image's user is the NAME
+        # "nonroot", which the kubelet cannot verify as non-root at admission —
+        # runAsNonRoot alone then yields CreateContainerConfigError and the pod
+        # never starts. 65532 is the distroless nonroot uid:gid.
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
