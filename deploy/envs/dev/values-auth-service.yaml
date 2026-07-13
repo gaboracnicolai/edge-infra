@@ -1,0 +1,7 @@
+# Dev / single-node overlay (F9): stand the stack up on one node via its own GitOps.
+# 1 replica, no pod anti-affinity (prod requires 3 distinct nodes), and the ghcr
+# pull secret wired via chart values (no manual `kubectl patch sa`).
+replicaCount: 1
+affinity: {}
+imagePullSecrets:
+  - name: ghcr
