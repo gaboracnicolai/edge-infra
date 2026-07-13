@@ -137,6 +137,11 @@ static_resources:
 			bootName = "bootstrap-params.yaml"
 		}
 		writeTemp(t, dir, bootName, []byte(bootstrap))
+		// The envoy container runs non-root (uid 101); writeTemp uses 0600, so under
+		// strict Linux uids envoy can't read the mounted certs/bootstrap ("unable to
+		// read file"). Docker Desktop's loose fs hides this on macOS. Make them
+		// world-readable (and the dir traversable).
+		_ = exec.Command("chmod", "-R", "a+rX", dir).Run()
 
 		name := "xds-tls-test-" + strconv.Itoa(port) + map[bool]string{true: "-p", false: "-n"}[withTLSParams]
 		_ = exec.Command("docker", "rm", "-f", name).Run()
