@@ -2,6 +2,8 @@ apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: edge-internal-ca
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"  # after root-ca-bootstrap.yaml (wave -1)
 spec:
   ca:
     secretName: edge-root-ca-secret

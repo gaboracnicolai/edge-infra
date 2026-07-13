@@ -1,0 +1,36 @@
+# Root-CA bootstrap for the edge-internal-ca ClusterIssuer (cluster-issuer.yaml).
+#
+# That ClusterIssuer is a `ca` issuer keyed on secret `edge-root-ca-secret` — but
+# nothing else creates that secret, so without this file the entire cert chain
+# cannot issue (every Certificate stays pending → no TLS secrets → nothing starts).
+# This bootstraps the trust anchor: a selfSigned issuer mints an isCA cert whose
+# keypair lands in edge-root-ca-secret, which edge-internal-ca then signs leaves
+# with. Sync-wave "-1" so it applies before the CA ClusterIssuer (wave 0).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-root-ca
+  namespace: cert-manager   # cert-manager's cluster-resource namespace: where a ClusterIssuer's ca.secretName is read
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  isCA: true
+  commonName: edge-internal-ca
+  secretName: edge-root-ca-secret
+  duration: 87600h    # 10y root
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
