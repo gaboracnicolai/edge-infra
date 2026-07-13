@@ -1,0 +1,3 @@
+# Dev / single-node overlay (F9). edge-proxy is a DaemonSet (1 per node); no replica
+# or anti-affinity tuning needed. Kept for parity with the prod overlay set.
+{}

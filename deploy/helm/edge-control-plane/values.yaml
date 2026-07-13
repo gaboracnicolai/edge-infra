@@ -84,6 +84,10 @@ tls:
   existingSecret: edge-cp-tls-secret  # created by k8s/certs/control-plane-cert.yaml
   mountPath: /etc/xds-tls
 
+# Pull secret(s) for private images, wired onto the ServiceAccount so pods (and
+# hook Jobs) can pull without a manual `kubectl patch sa`. e.g. [{name: ghcr}].
+imagePullSecrets: []
+
 serviceAccount:
   create: true
   name: ""
