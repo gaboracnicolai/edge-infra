@@ -93,7 +93,7 @@ func TestXDSRealEnvoyTLSVersion(t *testing.T) {
 		t.Helper()
 		params := ""
 		if withTLSParams {
-			params = "tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_protocol_version: TLSv1_3 }\n            "
+			params = "tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_protocol_version: TLSv1_3 }\n          " // 10-space indent to align with validation_context
 		}
 		bootstrap := fmt.Sprintf(`
 admin: { address: { socket_address: { address: 0.0.0.0, port_value: 9901 } } }
@@ -197,9 +197,8 @@ static_resources:
 	// be established in THIS environment (e.g. macOS Docker host-networking to an
 	// ephemeral-port test server), skip rather than false-fail — the assertion is
 	// meaningful only where the harness can connect (Linux CI).
-	withParams := runEnvoy(t, true)
-	if withParams == 0 {
-		t.Skip("cannot establish a real-Envoy xDS handshake in this environment; run under Linux CI with Docker")
+	if runEnvoy(t, true) == 0 {
+		t.Fatal("real Envoy did NOT complete the xDS handshake WITH tls_params — the fix regressed or the harness broke")
 	}
 
 	// RED (the F10 bug): WITHOUT tls_params, the same real Envoy caps its upstream
