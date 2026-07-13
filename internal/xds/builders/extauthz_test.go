@@ -8,6 +8,7 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 
 	"github.com/edge-infra/control-plane/internal/store"
@@ -71,5 +72,57 @@ func TestBuildClusters_ExtAuthzDisabled_NoAuthServiceCluster(t *testing.T) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
 			t.Fatal("auth_service cluster must not be emitted when disabled")
 		}
+	}
+}
+
+func authServiceClusterFrom(t *testing.T, ea ExtAuthzOptions) *clusterv3.Cluster {
+	t.Helper()
+	for _, r := range BuildClusters(nil, ea, RateLimitServiceOptions{}) {
+		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
+			return c
+		}
+	}
+	t.Fatal("auth_service cluster not emitted")
+	return nil
+}
+
+// The ext_authz cutover: with the upstream CA + client cert/key set (mTLS to the
+// auth-service, which requires client-cert verification), the auth_service cluster
+// must carry a TLS transport socket that presents the client cert AND trusts the
+// CA. This is what lets the gateway serve WITH authentication rather than fail the
+// handshake (plaintext → deny-all).
+func TestBuildClusters_ExtAuthz_MTLSTransportWhenCertsSet(t *testing.T) {
+	ea := ExtAuthzOptions{
+		Enabled:  true,
+		Address:  "auth-service.infra.svc.cluster.local",
+		Port:     50051,
+		CAFile:   "/etc/authz-client-tls/ca.crt",
+		CertFile: "/etc/authz-client-tls/tls.crt",
+		KeyFile:  "/etc/authz-client-tls/tls.key",
+	}
+	c := authServiceClusterFrom(t, ea)
+	if c.GetTransportSocket() == nil {
+		t.Fatal("mTLS configured: auth_service cluster must have a TLS transport socket (else Envoy talks plaintext to a TLS auth-service and every request is denied)")
+	}
+	var ctx tlsv3.UpstreamTlsContext
+	if err := c.GetTransportSocket().GetTypedConfig().UnmarshalTo(&ctx); err != nil {
+		t.Fatalf("transport socket is not an UpstreamTlsContext: %v", err)
+	}
+	if ctx.GetCommonTlsContext().GetValidationContext().GetTrustedCa() == nil {
+		t.Error("upstream TLS must trust the CA (verify the auth-service server cert)")
+	}
+	if len(ctx.GetCommonTlsContext().GetTlsCertificates()) == 0 {
+		t.Error("mTLS: upstream must present a client certificate (auth-service requires client-cert verification)")
+	}
+}
+
+// Adversarial: with no CA file the cluster stays PLAINTEXT (no transport socket).
+// This is the pre-cutover state that would deny-all against a TLS auth-service —
+// the reason enabling ext_authz without wiring the certs is unsafe.
+func TestBuildClusters_ExtAuthz_PlaintextWhenNoCA(t *testing.T) {
+	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
+	c := authServiceClusterFrom(t, ea)
+	if c.GetTransportSocket() != nil {
+		t.Error("no CA file: cluster must be plaintext (no transport socket) — TLS only when CAFile is set")
 	}
 }

@@ -24,6 +24,22 @@ xds:
 tls:
   existingSecret: envoy-serving-tls-secret
 
+# ext_authz upstream client cert (edge-proxy → auth-service mTLS). The auth-service
+# requires client-cert verification, so Envoy must present this cert on the
+# ext_authz gRPC leg. This only MOUNTS the secret on the Envoy pod; the control
+# plane renders the ext_authz cluster and points at these files via its own
+# extAuthz.caFile/certFile/keyFile — whose directory MUST equal mountPath here.
+# Deploy order at cutover: apply k8s/certs/envoy-authz-client-cert.yaml FIRST (the
+# secret is cert-manager-issued, NOT ArgoCD-managed), then enable this + the
+# control-plane extAuthz together. The volume is required (not optional): if the
+# secret is absent the pod won't start — a loud, correct failure vs. silent
+# plaintext. Keep in lockstep with edge-control-plane extAuthz.enabled.
+extAuthz:
+  clientTLS:
+    enabled: true
+    existingSecret: envoy-authz-client-tls-secret
+    mountPath: /etc/authz-client-tls
+
 # Pull secret(s) for private images, wired onto the ServiceAccount so pods (and
 # hook Jobs) can pull without a manual `kubectl patch sa`. e.g. [{name: ghcr}].
 imagePullSecrets: []
