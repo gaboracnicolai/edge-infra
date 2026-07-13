@@ -135,6 +135,13 @@ data:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
               sni: {{ .Values.xds.controlPlaneHost }}
               common_tls_context:
+                # The control-plane xDS server requires TLS 1.3 (cmd/server/tls.go
+                # MinVersion). Without pinning the max here, Envoy's BoringSSL
+                # upstream default caps at TLS 1.2 and the handshake fails with a
+                # protocol_version alert — the proxy then never receives any config.
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                  tls_maximum_protocol_version: TLSv1_3
                 tls_certificates:
                   - certificate_chain:
                       filename: {{ .Values.xds.tls.mountPath }}/tls.crt
