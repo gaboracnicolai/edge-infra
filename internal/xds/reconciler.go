@@ -40,6 +40,7 @@ type Reconciler struct {
 
 	localVersion                 atomic.Uint64
 	localLast                    atomic.Pointer[reconcileResult]
+	lastSnap                     atomic.Pointer[cachev3.Snapshot]
 	emptySnapshotsBlocked        atomic.Uint64
 	inconsistentSnapshotsBlocked atomic.Uint64
 
@@ -174,6 +175,11 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	// Fast path: local state confirms nothing has changed on this replica.
 	prev := r.localLast.Load()
 	if prev != nil && prev.Hash == hash {
+		// Config is unchanged, but a proxy that connected since the last change
+		// holds no snapshot yet — the fan-out below only runs on a change. Catch up
+		// any newly-connected node so a restarted/scaled/new edge-proxy receives
+		// config on connect instead of staying dark until the next config change.
+		r.catchUpConnectedNodes(ctx, prev.Version)
 		return nil
 	}
 
@@ -247,6 +253,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	r.lastSnap.Store(snap)
 	r.localLast.Store(&reconcileResult{Version: version, Hash: hash})
 	r.log.Info("snapshot pushed",
 		"version", version,
@@ -337,6 +344,34 @@ func (r *Reconciler) targetNodes() []string {
 		out = append(out, r.nodeID)
 	}
 	return out
+}
+
+// catchUpConnectedNodes pushes the last-published snapshot to any connected node
+// (present in GetStatusKeys) that does not yet hold the current version. Called on
+// the unchanged-config fast path so a proxy that connects while config is stable
+// receives it on connect — without this, SetSnapshot only runs on a config change,
+// leaving a restarted/scaled/new edge-proxy with no config until the next change.
+//
+// NOTE: this shares the connected-node fan-out that XDS-1 (per-node SDS scoping)
+// would extend to per-node snapshots; keep them in mind together, but XDS-1 is out
+// of scope here.
+func (r *Reconciler) catchUpConnectedNodes(ctx context.Context, version string) {
+	snap := r.lastSnap.Load()
+	if snap == nil {
+		return
+	}
+	for _, n := range r.cache.GetStatusKeys() {
+		if cur, err := r.cache.GetSnapshot(n); err == nil && cur != nil &&
+			cur.GetVersion(resourcev3.ClusterType) == version {
+			continue // already has the current snapshot
+		}
+		if err := r.cache.SetSnapshot(ctx, n, snap); err != nil {
+			r.log.Warn("late-join catch-up failed", "node", n, "err", err)
+			continue
+		}
+		r.log.Info("late-join: pushed current snapshot to newly-connected node",
+			"node", n, "version", version)
+	}
 }
 
 func hashResources(m map[resourcev3.Type][]types.Resource) string {

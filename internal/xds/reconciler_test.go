@@ -10,12 +10,14 @@ import (
 	"time"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	streamv3 "github.com/envoyproxy/go-control-plane/pkg/server/stream/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -476,4 +478,38 @@ func TestReconcile_ExtAuthzOn_NoAuthOffSignal(t *testing.T) {
 	if got := r.AuthWantedButExtAuthzOff(); got != 0 {
 		t.Fatalf("ext_authz configured: the auth-off signal must NOT fire; got %d", got)
 	}
+}
+
+// F11: a proxy that connects while config is STABLE must still receive the
+// snapshot. Before the fix, the unchanged-config fast path returned before any
+// SetSnapshot, so a late-joining node stayed dark until the next config change.
+func TestReconcile_LateJoinNodeReceivesSnapshotWithoutConfigChange(t *testing.T) {
+	cache := newCache()
+	r := NewReconciler(cache, &fakeStore{snap: sampleSnapshot()}, testNodeID, discardLogger())
+
+	// Publish the config once (config now stable).
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	// A NEW proxy connects afterwards: registering a watch is what a real Envoy
+	// connection does, and it makes the node appear in GetStatusKeys().
+	const late = "late-joiner"
+	respCh := make(chan cachev3.Response, 1)
+	cancel := cache.CreateWatch(
+		&cachev3.Request{Node: &corev3.Node{Id: late}, TypeUrl: resourcev3.ClusterType},
+		streamv3.NewStreamState(true, nil), respCh)
+	defer cancel()
+
+	// Precondition: the late joiner has no snapshot yet.
+	if _, err := cache.GetSnapshot(late); err == nil {
+		t.Fatal("precondition: late joiner should have no snapshot before catch-up")
+	}
+
+	// Reconcile again with UNCHANGED config (same hash → fast path).
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	// The fix: the late joiner must now hold the current snapshot.
+	snap, err := cache.GetSnapshot(late)
+	require.NoError(t, err,
+		"a node that connected while config was stable must receive the snapshot on the next reconcile, not stay dark")
+	require.NotEmpty(t, snap.GetResources(resourcev3.ClusterType))
 }
