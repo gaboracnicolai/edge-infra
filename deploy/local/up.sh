@@ -19,6 +19,8 @@
 #   5  admin PKI (bootstrap-pki.sh) + app secrets
 #   6  migrate the shared DB (control-plane + OSB schemas)
 #   7  deploy all charts with dev overlays, extAuthz OFF
+#   8  seed two tenant backends + a gateway/route per tenant
+#   9  prove routable: a request per tenant through the node :443 hostPort
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -417,6 +419,113 @@ verify_phase7() {
   ok "Phase 7 verified (all required charts Ready via --wait)"
 }
 
+# ---- Phase 8 — seed two tenants (backends + gateway/route) -------------------
+phase8_seed() {
+  section "PHASE 8 — seed two tenant backends + a gateway/route per tenant"
+  # Preload the echo image (a tag, so kind load works), then the two backends.
+  if docker pull "$ECHO_IMAGE" >/dev/null 2>&1; then
+    kind load docker-image --name "$CLUSTER_NAME" "$ECHO_IMAGE" >/dev/null 2>&1 || true
+  else
+    warn "echo image not preloaded — nodes will pull at runtime"
+  fi
+  k apply -f "$LOCAL_DIR/manifests/tenants.yaml"
+  wait_rollout deploy/echo tenant-a 120s
+  wait_rollout deploy/echo tenant-b 120s
+
+  local ipA ipB pgpod
+  ipA="$(k -n tenant-a get svc echo -o jsonpath='{.spec.clusterIP}')"
+  ipB="$(k -n tenant-b get svc echo -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$ipA" ] && [ -n "$ipB" ] || die "could not resolve echo Service ClusterIPs"
+  log "tenant-a echo=$ipA:5678   tenant-b echo=$ipB:5678"
+
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  section "seeding gateway 'local-gw' (HTTP :443) + 2 host-routes (auth_policy=none)"
+  # This is the missing route source. Direct SQL (a tiny seed helper) mirrors
+  # translator.apply_create's columns but: (1) a plaintext-HTTP listener on :443
+  # to match the node hostPort, (2) upstream DECOUPLED from the match host (echo
+  # ClusterIP), and (3) auth_policy='none' — MANDATORY, since the xDS reconciler
+  # is fail-closed and withholds the WHOLE snapshot if any route wants auth while
+  # ext_authz is off.
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -f - <<SQL
+BEGIN;
+INSERT INTO gateways (id, name, port, protocol, node_selector)
+VALUES ('local-gw','local-gw',443,'HTTP','{}'::jsonb)
+ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port, protocol=EXCLUDED.protocol, updated_at=now();
+
+INSERT INTO clusters (id,name) VALUES ('tenant-a','tenant-a') ON CONFLICT (name) DO NOTHING;
+DELETE FROM endpoints WHERE cluster_id='tenant-a';
+INSERT INTO endpoints (id,cluster_id,address,port,weight) VALUES ('tenant-a-0','tenant-a','${ipA}',5678,1);
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('tenant-a','tenant-a','local-gw',ARRAY['tenant-a.local']::text[],'/','tenant-a',30,'none',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
+  cluster_name=EXCLUDED.cluster_name,timeout_seconds=EXCLUDED.timeout_seconds,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;
+
+INSERT INTO clusters (id,name) VALUES ('tenant-b','tenant-b') ON CONFLICT (name) DO NOTHING;
+DELETE FROM endpoints WHERE cluster_id='tenant-b';
+INSERT INTO endpoints (id,cluster_id,address,port,weight) VALUES ('tenant-b-0','tenant-b','${ipB}',5678,1);
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('tenant-b','tenant-b','local-gw',ARRAY['tenant-b.local']::text[],'/','tenant-b',30,'none',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
+  cluster_name=EXCLUDED.cluster_name,timeout_seconds=EXCLUDED.timeout_seconds,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;
+COMMIT;
+SQL
+  ok "routes seeded in Postgres"
+}
+
+verify_phase8() {
+  section "VERIFY Phase 8 — routes in Postgres AND published to Envoy"
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  echo "  routes (Postgres):"
+  k exec -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -tAc \
+    "select r.name||': host='||array_to_string(r.hosts,',')||' -> '||r.cluster_name||' (auth='||r.auth_policy||') on '||g.name||':'||g.port||'/'||g.protocol from routes r join gateways g on g.id=r.gateway_id where r.deleted_at is null order by 1;" \
+    | sed 's/^/    /'
+
+  # Reconciler polls Postgres every ~5s; wait for the snapshot to reach Envoy.
+  local ep dump i=0
+  ep="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].metadata.name}')"
+  while [ "$i" -lt 10 ]; do
+    dump="$(envoy_config_dump "$ep")"
+    if has "$dump" tenant-a && has "$dump" tenant-b; then break; fi
+    i=$((i + 1)); sleep 2
+  done
+  echo "  Envoy listeners:"
+  printf '%s' "$dump" | jq -r '.configs[]?.dynamic_listeners[]?.active_state.listener | "    "+(.name//"?")+" on :"+((.address.socket_address.port_value//0)|tostring)' 2>/dev/null | sort -u || true
+  echo "  Envoy clusters:"
+  printf '%s' "$dump" | jq -r '.configs[]?.dynamic_active_clusters[]?.cluster.name | "    "+.' 2>/dev/null | sort -u || true
+  echo "  Envoy vhost domains (Host match):"
+  printf '%s' "$dump" | jq -r '.configs[]?.dynamic_route_configs[]?.route_config.virtual_hosts[]?.domains[]? | "    "+.' 2>/dev/null | sort -u || true
+  if has "$dump" tenant-a && has "$dump" tenant-b; then
+    ok "both tenant routes published to Envoy (control-plane -> xDS)"
+  else
+    die "Envoy config_dump does not show both tenant routes"
+  fi
+}
+
+# ---- Phase 9 — prove routable ------------------------------------------------
+phase9_prove() {
+  local hp="${GATEWAY_HOST_PORT:-443}"
+  section "PHASE 9 — PROVE ROUTABLE (each tenant via node :$hp hostPort, ext_authz OFF)"
+  local i=0 ca cb a b cn
+  # Retry briefly: the :443 listener may land a beat after the clusters.
+  while [ "$i" -lt 10 ]; do
+    ca="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: tenant-a.local' "http://127.0.0.1:${hp}/" 2>/dev/null || true)"
+    cb="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: tenant-b.local' "http://127.0.0.1:${hp}/" 2>/dev/null || true)"
+    [ "$ca" = 200 ] && [ "$cb" = 200 ] && break
+    i=$((i + 1)); sleep 3
+  done
+  a="$(curl -s --max-time 6 -H 'Host: tenant-a.local' "http://127.0.0.1:${hp}/" 2>/dev/null || true)"
+  b="$(curl -s --max-time 6 -H 'Host: tenant-b.local' "http://127.0.0.1:${hp}/" 2>/dev/null || true)"
+  cn="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: nope.local' "http://127.0.0.1:${hp}/" 2>/dev/null || true)"
+  echo "  http://127.0.0.1:${hp}/  -H 'Host: tenant-a.local'  ->  HTTP $ca   body: $(printf '%s' "$a" | tr -d '\n')"
+  echo "  http://127.0.0.1:${hp}/  -H 'Host: tenant-b.local'  ->  HTTP $cb   body: $(printf '%s' "$b" | tr -d '\n')"
+  echo "  http://127.0.0.1:${hp}/  -H 'Host: nope.local'      ->  HTTP $cn   (expect 404 — no route)"
+  local pass=1
+  { [ "$ca" = 200 ] && has "$a" TENANT-A-BACKEND; } || pass=0
+  { [ "$cb" = 200 ] && has "$b" TENANT-B-BACKEND; } || pass=0
+  [ "$pass" = 1 ] || die "ROUTABLE PROOF FAILED — see the responses above"
+  ok "ROUTABLE: tenant-a.local & tenant-b.local each return 200 from their OWN backend, ext_authz OFF"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -432,7 +541,10 @@ main() {
   verify_phase6
   phase7_deploy
   verify_phase7
-  section "up.sh: Phases 1–7 complete."
+  phase8_seed
+  verify_phase8
+  phase9_prove
+  section "up.sh: FULL STANDUP COMPLETE — routable gateway, two tenants, ext_authz OFF."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

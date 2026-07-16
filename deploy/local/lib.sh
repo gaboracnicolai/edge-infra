@@ -60,6 +60,12 @@ h() { helm --kube-context "$KUBE_CONTEXT" "$@"; }
 # retry <tries> <sleep-seconds> <cmd...>
 retry() { local n="$1" s="$2"; shift 2; local i; for ((i=1; i<=n; i++)); do "$@" && return 0; sleep "$s"; done; return 1; }
 
+# has <haystack> <needle> — substring test with NO pipe. Deliberately avoids
+# `printf "$big" | grep -q`: with `set -o pipefail`, grep -q exits on first match
+# and SIGPIPEs the still-writing printf (exit 141), so the pipeline reports
+# failure DESPITE a match when the input exceeds the pipe buffer (~64 KiB).
+has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
 wait_nodes_ready() {
   section "waiting for all nodes Ready"
   k wait --for=condition=Ready nodes --all --timeout="${1:-240s}" \
