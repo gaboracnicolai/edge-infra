@@ -1,0 +1,55 @@
+# Dev-grade in-cluster NATS (JetStream ON) for edge-osb.
+#
+# edge-osb's broker creates a JetStream stream (EDGE, WORK_QUEUE) and the worker
+# binds a durable consumer, so JetStream (-js) must be enabled or edge-osb never
+# becomes Ready. Plaintext (:4222) — the OSB TLS-to-NATS is disabled via the
+# local chart overlay in Phase 7. Monitoring (:8222) backs the health probe.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: infra
+  labels: { app: nats, part-of: edge-local }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: nats }
+  template:
+    metadata:
+      labels: { app: nats, part-of: edge-local }
+    spec:
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          args: ["-js", "-sd", "/data", "-m", "8222"]
+          ports:
+            - { name: client,  containerPort: 4222 }
+            - { name: monitor, containerPort: 8222 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8222 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8222 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m,  memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: infra
+  labels: { app: nats, part-of: edge-local }
+spec:
+  selector: { app: nats }
+  ports:
+    - { name: client,  port: 4222, targetPort: 4222 }
+    - { name: monitor, port: 8222, targetPort: 8222 }

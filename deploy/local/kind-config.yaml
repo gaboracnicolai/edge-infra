@@ -1,0 +1,31 @@
+# kind cluster for the edge-infra local standup.
+#
+# - Multi-node (1 control-plane + 2 workers) so the edge-proxy DaemonSet fans out
+#   across real workers and per-node pod CIDRs are real (needed for the SEC-3
+#   NetworkPolicy proofs in a later run).
+# - Default CNI DISABLED: kindnet does NOT enforce NetworkPolicy. Calico owns the
+#   dataplane instead (installed by up.sh). Nodes stay NotReady until Calico is up.
+#
+# The cluster name is supplied by `kind create --name` (CLUSTER_NAME in lib.sh),
+# so it is intentionally omitted here.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  # Match Calico's default IPv4 pool so no pool re-tagging is needed post-install.
+  podSubnet: "192.168.0.0/16"
+nodes:
+  - role: control-plane
+  - role: worker
+    # This worker publishes the gateway ports to the host: a request to
+    # localhost:443 reaches THIS node's edge-proxy (Envoy runs hostNetwork+hostPort
+    # 443/80). edge-proxy is a DaemonSet with no control-plane toleration, so it
+    # schedules onto the workers — we pin the routable one here.
+    extraPortMappings:
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+  - role: worker

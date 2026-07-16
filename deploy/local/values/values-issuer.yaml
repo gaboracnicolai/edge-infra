@@ -1,0 +1,12 @@
+# Local overlay for edge-issuer (the migrate Job reuses the same image).
+image:
+  repository: edge-issuer
+  tag: local
+config:
+  # kid of the RSA signing key in the issuer-signing-keys secret (k1.pem, created
+  # in Phase 5). Required by the chart.
+  activeKid: k1
+# Same pre-install-hook vs ServiceAccount ordering issue as edge-control-plane
+# (the issuer's migrate Job is a pre-install hook). Use the `default` SA locally.
+serviceAccount:
+  create: false

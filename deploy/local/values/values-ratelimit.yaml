@@ -1,0 +1,4 @@
+# Local overlay for edge-ratelimit (image). Extended in Phase 7.
+image:
+  repository: edge-ratelimit
+  tag: local

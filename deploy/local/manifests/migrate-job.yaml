@@ -1,0 +1,36 @@
+# Phase 6 — migrate the ONE shared 'edge' DB. cmd/migrate (edge-migrate image)
+# applies BOTH embedded sets (control-plane migrations/* + osb/migrations/*),
+# idempotently, recording each in schema_migrations. Safe to re-run.
+#
+# This is the same work the edge-control-plane chart's pre-install migrate Job
+# does; running it explicitly here migrates + verifies before any service starts.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: edge-migrate-shared
+  namespace: infra
+  labels: { part-of: edge-local }
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: { part-of: edge-local }
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532        # distroless nonroot uid:gid
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: edge-migrate:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: edge-control-plane-postgres, key: dsn }

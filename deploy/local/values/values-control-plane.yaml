@@ -1,0 +1,23 @@
+# Local overlay for edge-control-plane. Layered on the chart values.yaml and
+# deploy/envs/dev/values-control-plane.yaml.
+image:
+  repository: edge-control-plane
+  tag: local
+migrate:
+  image:
+    repository: edge-migrate
+    tag: local
+# ext_authz stays OFF this entire run — the gateway comes up clean; the ext_authz
+# proofs are a later run. Already the chart default; set explicitly per the
+# standup requirement.
+extAuthz:
+  enabled: false
+# The chart's migrate Job is a pre-install HOOK that references the chart's
+# ServiceAccount — but that SA is a regular (post-hook) resource, so under raw
+# `helm install` the hook runs before the SA exists and the Job FailedCreates
+# ("serviceaccount not found"), hanging the release. (Works under ArgoCD, where
+# sync-waves apply everything together.) Use the always-present `default` SA
+# locally — the control-plane needs no special RBAC (it reads Postgres, not the
+# k8s API), and no chart template changes.
+serviceAccount:
+  create: false

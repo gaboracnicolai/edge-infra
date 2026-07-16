@@ -1,0 +1,20 @@
+# The two edge-infra namespaces.
+#  - infra: control-plane, issuer, auth-service, osb, ratelimit, secrets + the
+#           dev datastores (postgres, nats). Their cert-manager certs land here
+#           and the services address each other at *.infra.svc.cluster.local.
+#  - edge:  edge-proxy only. Its three envoy certs (serving / xds-client /
+#           authz-client) are issued in `edge`, and a pod can mount secrets only
+#           from its own namespace — so the proxy runs here and dials ...infra...
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    part-of: edge-local
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge
+  labels:
+    part-of: edge-local
