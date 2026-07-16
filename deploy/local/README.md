@@ -50,7 +50,7 @@ release is cleared before re-install.
 
 | # | Phase | Result |
 |---|-------|--------|
-| 1 | **Cluster + Calico** | Multi-node kind (1 cp + 2 workers), **default CNI disabled**, Calico installed (kindnet does not enforce NetworkPolicy — Calico is mandatory for the SEC-3 proofs). |
+| 1 | **Cluster + Calico** | Multi-node kind (1 cp + 2 workers), **default CNI disabled**, Calico installed (kindnet does not enforce NetworkPolicy). Sets `ipipMode=CrossSubnet` — kind nodes share one subnet, so native routing preserves the node IP as the source of the hostNetwork gateway (required for the SEC-3 gateway-allow; see adaptations). |
 | 2 | **Cluster deps** | cert-manager + Kyverno (server-side apply; its CRDs exceed the client-side limit) + dev Postgres (shared `edge` DB + issuer's `issuer` DB) + NATS (JetStream). |
 | 3 | **Images** | Builds **all 7** images (5 control-plane Go targets, edge-osb, auth-service in-container) and `kind load`s them. Extends `make docker-build-local` (which builds only 3). |
 | 4 | **Data-plane PKI** | Applies `k8s/certs/*` in order (selfsigned root → `edge-internal-ca` ClusterIssuer → 7 leaves); waits for the 7 tls secrets. |
@@ -59,6 +59,8 @@ release is cleared before re-install.
 | 7 | **Deploy** | `helm upgrade --install` for all 7 charts with dev + local overlays, `--wait`, **extAuthz OFF**. Envoy connects to the control-plane over mTLS xDS. |
 | 8 | **Seed** | Two tenant backends + the missing route source: a gateway on **:443** and a host-route per tenant (via direct SQL). |
 | 9 | **Prove** | A request per tenant through the node **:443** hostPort → 200 from the correct backend. |
+| 10 | **SEC-3 Property 1** (admission) | Applies the Kyverno guardrails (Enforce), then proves red-first: a NetworkPolicy allowing from an empty podSelector `{}` is **DENIED**; a NodePort backend Service is **DENIED**. |
+| 11 | **SEC-3 Property 2** (data-plane) | A pod-network attacker (IP outside NODE_CIDR) reaches each backend's ClusterIP with no policy (RED), then — after the resolved backend policy — is **dropped** while the node-`:443` gateway path stays **200** (two separate assertions). |
 
 ## Topology
 
@@ -88,6 +90,11 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
   withholds the entire snapshot if any route wants auth while `ext_authz` is off.
 - **:443 plaintext**: the seed gateway is protocol HTTP on port 443 (no TLS
   termination) so the routing proof is a clean plaintext request to the hostPort.
+- **Calico `CrossSubnet`** (SEC-3): with the manifest default `ipipMode=Always`,
+  cross-node hostNetwork traffic (the gateway) egresses via `tunl0` and takes the
+  tunnel's pod-CIDR IP as source — which would NOT match a node-CIDR ipBlock allow,
+  so the gateway would be dropped. kind nodes share one subnet, so `CrossSubnet`
+  uses native routing and preserves the node IP as source.
 
 ## Configuration (env knobs, see `lib.sh`)
 
@@ -102,14 +109,33 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
 | `lib.sh` | Shared config + helpers (sourced; no side effects). |
 | `kind-config.yaml` | Multi-node cluster, default CNI disabled, publishes 80/443. |
 | `up.sh` / `down.sh` | Phase-by-phase standup / teardown. |
-| `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends. |
+| `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker. |
 | `values/` | Per-chart local overlays (images + the adaptations above). |
 | `.pki-bootstrap/` | Generated admin PKI + KEK + signing key (gitignored). |
 
-## Run 2 (SEC-3 live enforcement) will need
+## SEC-3 live enforcement (phases 10-11)
 
-Calico is already enforcing (Phase 1), so the `k8s/policies/*` NetworkPolicies +
-Kyverno `ClusterPolicy` resources can be applied on top of this standup and their
-deny/allow behavior exercised between the `tenant-*`, `infra`, and `edge`
-namespaces. `ext_authz` stays OFF here — flipping it on is a separate run and
-requires the edge-proxy→auth-service mTLS leg to be wired first.
+Two properties, proven **red-first and separately**:
+
+1. **Admission (Kyverno)** — the guardrails reject rules that would re-open the
+   bypass/lateral-movement hole: a NetworkPolicy allowing from an empty
+   podSelector `{}`, and a LoadBalancer/NodePort backend Service. The resolved
+   ipBlock allow-from-gateway (no empty podSelector) is admitted.
+2. **Data-plane (Calico)** — a compromised **pod-network** foothold (attacker pod,
+   IP outside NODE_CIDR) can hit a backend's ClusterIP directly with no policy;
+   after the backend policy it is dropped, while the gateway path stays 200.
+
+### Honesty — the precision ceiling under hostNetwork
+
+The gateway (edge-proxy) runs `hostNetwork`, so its traffic to a backend carries
+the **node** IP, and the allow rule is therefore an `ipBlock` of the node CIDR.
+This means the control **drops pod-network footholds** — a compromised app pod,
+SSRF from a workload, a malicious sidecar (the realistic lateral-movement threat)
+— but it does **not** make the gateway the only possible source: **any** hostNetwork
+pod on a node would also match the node-CIDR allow. App-layer `x-gateway-auth`
+(ext_authz, a later run) is the backstop for gateway *identity*. What is proven
+here is exactly: pod-network → backend is dropped; node-network (the gateway) →
+backend on the echo port is allowed.
+
+`ext_authz` stays OFF this run — its cutover (the edge-proxy→auth-service mTLS leg)
+is a separate run.
