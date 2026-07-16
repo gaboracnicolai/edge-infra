@@ -1,0 +1,10 @@
+# Local overlay for edge-control-plane. Layered on top of the chart values.yaml
+# and deploy/envs/dev/values-control-plane.yaml. Phase 3: point at the locally
+# built images (charts default to ghcr.io/gaboracnicolai/*). Extended in Phase 7.
+image:
+  repository: edge-control-plane
+  tag: local
+migrate:
+  image:
+    repository: edge-migrate
+    tag: local

@@ -1,0 +1,12 @@
+# Local overlay for edge-osb. Note the chart reads api.image / worker.image
+# (NOT a top-level image.*), and api.replicaCount / worker.replicaCount (the dev
+# overlay's top-level replicaCount is a no-op). Extended in Phase 7 (DB/NATS TLS
+# off, replicas, allow-untenanted).
+api:
+  image:
+    repository: edge-osb
+    tag: local
+worker:
+  image:
+    repository: edge-osb
+    tag: local

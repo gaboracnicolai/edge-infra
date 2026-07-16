@@ -26,6 +26,11 @@ KYVERNO_VERSION="${KYVERNO_VERSION:-v1.16.0}"
 # In-cluster dev datastores (Phase 2) are dev-grade (ephemeral emptyDir, single
 # replica). Their images are pinned in deploy/local/manifests/{postgres,nats}.yaml.
 
+# Public images the stack pulls (pinned to the chart defaults). Loaded into the
+# cluster in Phase 3 to avoid docker-hub pull limits at pod-creation time.
+ENVOY_IMAGE="${ENVOY_IMAGE:-envoyproxy/envoy:v1.30.0@sha256:d7d501253a93f0b5fce8e0d3a24f3bef67372c50ed7ea922279c72fc1200be58}"
+BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}"
+
 # ---- logging -----------------------------------------------------------------
 if [ -t 1 ]; then
   C_BLUE=$'\033[1;34m'; C_GRN=$'\033[1;32m'; C_YEL=$'\033[1;33m'
@@ -60,3 +65,10 @@ wait_nodes_ready() {
 
 # wait_rollout <kind/name> <ns> [timeout]
 wait_rollout() { k -n "$2" rollout status "$1" --timeout="${3:-240s}"; }
+
+# apply_secret <ns> <type> <name> <create-args...> — idempotent create-or-update
+# (create --dry-run | apply), so re-runs never fail on an existing secret.
+apply_secret() {
+  local ns="$1" typ="$2" name="$3"; shift 3
+  k -n "$ns" create secret "$typ" "$name" "$@" --dry-run=client -o yaml | k apply -f -
+}

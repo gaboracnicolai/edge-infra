@@ -1,0 +1,5 @@
+# Local overlay for edge-issuer (image; the migrate Job reuses the same image
+# with args: [migrate], so this covers both). Extended in Phase 7.
+image:
+  repository: edge-issuer
+  tag: local
