@@ -21,6 +21,8 @@
 #   7  deploy all charts with dev overlays, extAuthz OFF
 #   8  seed two tenant backends + a gateway/route per tenant
 #   9  prove routable: a request per tenant through the node :443 hostPort
+#  10  SEC-3 Property 1 — Kyverno admission rejects open rules (red-first)
+#  11  SEC-3 Property 2 — Calico drops the bypass hop, gateway stays allowed
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -526,6 +528,177 @@ phase9_prove() {
   ok "ROUTABLE: tenant-a.local & tenant-b.local each return 200 from their OWN backend, ext_authz OFF"
 }
 
+# ---- Phase 10 — SEC-3 Property 1: Kyverno admission (red-first) --------------
+phase10_sec3_admission() {
+  section "PHASE 10 — SEC-3 Property 1: Kyverno admission rejects open rules (red-first)"
+  section "applying Kyverno guardrails (Enforce)"
+  k apply -f "$REPO_ROOT/k8s/policies/disallow-open-intra-namespace-ingress.yaml"
+  k apply -f "$REPO_ROOT/k8s/policies/disallow-public-backend-services.yaml"
+  k wait --for=condition=Ready clusterpolicy/disallow-open-intra-namespace-ingress --timeout=120s 2>/dev/null || true
+  k wait --for=condition=Ready clusterpolicy/disallow-public-backend-services   --timeout=120s 2>/dev/null || true
+
+  # RED-A (required): an ingress `from` with an EMPTY podSelector ({}) = every pod
+  # in the namespace — the exact lateral-movement hole. Must be DENIED at admission.
+  local bad; bad="$(mktemp)"
+  cat > "$bad" <<'NP'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sec3-red-open-ingress, namespace: tenant-a }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+NP
+  section "RED — an open (podSelector {}) NetworkPolicy MUST be DENIED"
+  local denied="" i=0 out
+  while [ "$i" -lt 20 ]; do
+    out="$(k apply -f "$bad" 2>&1 || true)"
+    if has "$out" denied || has "$out" disallow-open-intra-namespace-ingress; then denied="$out"; break; fi
+    k -n tenant-a delete networkpolicy sec3-red-open-ingress --ignore-not-found >/dev/null 2>&1 || true
+    i=$((i + 1)); sleep 3
+  done
+  rm -f "$bad"
+  [ -n "$denied" ] || die "guardrail NOT live: the open-podSelector NetworkPolicy was ADMITTED"
+  echo "  Kyverno denial:"; printf '%s\n' "$denied" | fold -s -w 96 | sed 's/^/    /'
+  ok "RED proven — Kyverno DENIED the open-podSelector NetworkPolicy"
+
+  # RED-B (supporting): a NodePort backend Service bypasses the gateway → DENIED.
+  local svc; svc="$(mktemp)"
+  cat > "$svc" <<'SVC'
+apiVersion: v1
+kind: Service
+metadata: { name: sec3-red-public, namespace: tenant-a }
+spec:
+  type: NodePort
+  selector: { app: echo }
+  ports: [{ port: 5678, targetPort: 5678 }]
+SVC
+  section "RED (supporting) — a NodePort backend Service MUST be DENIED"
+  out="$(k apply -f "$svc" 2>&1 || true)"; rm -f "$svc"
+  if has "$out" denied || has "$out" disallow-public-backend-services; then
+    echo "  Kyverno denial:"; printf '%s\n' "$out" | fold -s -w 96 | sed 's/^/    /'
+    ok "RED (supporting) proven — Kyverno DENIED the NodePort Service"
+  else
+    k -n tenant-a delete service sec3-red-public --ignore-not-found >/dev/null 2>&1 || true
+    warn "NodePort not denied — continuing (the required NetworkPolicy guardrail is proven)"
+  fi
+  ok "Phase 10 (Property 1) verified"
+}
+
+# ---- Phase 11 — SEC-3 Property 2: Calico data-plane (red-first) --------------
+phase11_sec3_dataplane() {
+  section "PHASE 11 — SEC-3 Property 2: Calico drops the bypass hop, gateway allowed (red-first)"
+
+  # NODE_CIDR = the kind docker network IPv4 subnet (the hostNetwork edge-proxy's
+  # source). Take the IPv4 line only (kind also has an IPv6 subnet).
+  local NODE_CIDR pfx
+  NODE_CIDR="$(docker network inspect kind --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/' | head -1)"
+  [ -n "$NODE_CIDR" ] || die "could not compute NODE_CIDR from docker network 'kind'"
+  pfx="$(printf '%s' "$NODE_CIDR" | cut -d/ -f1 | cut -d. -f1-2)"
+  log "NODE_CIDR=$NODE_CIDR  (/16 prefix '$pfx')  echo backend port=5678"
+
+  section "verify edge-proxy node IPs fall INSIDE NODE_CIDR (else gateway-allow won't match)"
+  local ip ok_nodes=1
+  for ip in $(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{range .items[*]}{.status.hostIP}{"\n"}{end}' | sort -u); do
+    if in_cidr16 "$pfx" "$ip"; then ok "edge-proxy node $ip ∈ $NODE_CIDR"; else warn "edge-proxy node $ip ∉ $NODE_CIDR"; ok_nodes=0; fi
+  done
+  [ "$ok_nodes" = 1 ] || die "an edge-proxy node IP is outside NODE_CIDR — the gateway-allow would not match"
+
+  section "deploy attacker (pod-network pod, neutral ns)"
+  if docker pull "$ATTACKER_IMAGE" >/dev/null 2>&1; then
+    kind load docker-image --name "$CLUSTER_NAME" "$ATTACKER_IMAGE" >/dev/null 2>&1 || true
+  else warn "attacker image not preloaded — node will pull at runtime"; fi
+  k apply -f "$LOCAL_DIR/manifests/sec3-attacker.yaml"
+  wait_rollout deploy/attacker sec3-attacker 120s
+  local atk_ip
+  atk_ip="$(k -n sec3-attacker get pod -l app=attacker -o jsonpath='{.items[0].status.podIP}')"
+  [ -n "$atk_ip" ] || die "attacker pod has no IP"
+  if in_cidr16 "$pfx" "$atk_ip"; then die "attacker IP $atk_ip is INSIDE NODE_CIDR — it would be allowed; proof invalid"; fi
+  ok "attacker pod IP $atk_ip ∉ NODE_CIDR $NODE_CIDR — a genuine pod-network source"
+
+  local ipA ipB
+  ipA="$(k -n tenant-a get svc echo -o jsonpath='{.spec.clusterIP}')"
+  ipB="$(k -n tenant-b get svc echo -o jsonpath='{.spec.clusterIP}')"
+  log "tenant-a echo ClusterIP=$ipA:5678   tenant-b echo ClusterIP=$ipB:5678"
+
+  # TRUE red baseline every run: remove any backend NetworkPolicies first.
+  section "RED baseline — delete any existing backend NetworkPolicies"
+  k -n tenant-a delete networkpolicy --all --ignore-not-found >/dev/null 2>&1 || true
+  k -n tenant-b delete networkpolicy --all --ignore-not-found >/dev/null 2>&1 || true
+  sleep 2
+
+  section "RED — attacker → each backend DIRECTLY (gateway bypass) MUST succeed"
+  local ra rb
+  ra="$(attacker_get "$ipA" 5678)"; rb="$(attacker_get "$ipB" 5678)"
+  echo "  attacker($atk_ip) -> tenant-a $ipA:5678  =>  $ra"
+  echo "  attacker($atk_ip) -> tenant-b $ipB:5678  =>  $rb"
+  { has "$ra" code=200 && has "$ra" TENANT-A-BACKEND; } || die "RED baseline broken: attacker couldn't reach tenant-a with no policy"
+  { has "$rb" code=200 && has "$rb" TENANT-B-BACKEND; } || die "RED baseline broken: attacker couldn't reach tenant-b with no policy"
+  ok "RED proven — with NO backend policy the bypass hop is OPEN (200 from each backend)"
+
+  # Resolve the template locally (NOT by editing k8s/policies): backend-ns -> each
+  # tenant, NODE_CIDR computed, ipBlock port = the REAL echo port 5678, intra-ns
+  # from/ports block DROPPED (a bare echo has no legitimate intra-ns client).
+  section "apply resolved backend policy (default-deny + allow ipBlock $NODE_CIDR:5678) to tenant-a, tenant-b"
+  local ns
+  for ns in tenant-a tenant-b; do
+    k apply -f - <<NP
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny-ingress, namespace: $ns, labels: { part-of: edge-local, sec3: "true" } }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-from-gateway, namespace: $ns, labels: { part-of: edge-local, sec3: "true" } }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: { cidr: $NODE_CIDR }
+      ports:
+        - { protocol: TCP, port: 5678 }
+NP
+  done
+  ok "backend policy applied (also Property 1 GREEN: the ipBlock policy is ADMITTED, not denied)"
+  sleep 3   # let Calico program the rules
+
+  section "GREEN (flip) — attacker → each backend now DROPPED"
+  local i=0 ga gb
+  while [ "$i" -lt 10 ]; do
+    ga="$(attacker_get "$ipA" 5678)"; gb="$(attacker_get "$ipB" 5678)"
+    { has "$ga" code=000 && has "$gb" code=000; } && break
+    i=$((i + 1)); sleep 2
+  done
+  echo "  attacker($atk_ip) -> tenant-a $ipA:5678  =>  $ga"
+  echo "  attacker($atk_ip) -> tenant-b $ipB:5678  =>  $gb"
+  has "$ga" code=000 || die "tenant-a bypass NOT dropped (expected timeout) — got: $ga"
+  has "$gb" code=000 || die "tenant-b bypass NOT dropped (expected timeout) — got: $gb"
+  ok "GREEN DROP proven — the cross-tenant bypass FLIPPED 200 -> dropped for BOTH tenants"
+
+  section "GREEN — the gateway path (node :443) stays ALLOWED"
+  local ca cb ba bb
+  ca="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: tenant-a.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+  ba="$(curl -s --max-time 6 -H 'Host: tenant-a.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+  cb="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: tenant-b.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+  bb="$(curl -s --max-time 6 -H 'Host: tenant-b.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+  echo "  gateway :443 Host tenant-a.local => HTTP $ca  $ba"
+  echo "  gateway :443 Host tenant-b.local => HTTP $cb  $bb"
+  { [ "$ca" = 200 ] && has "$ba" TENANT-A-BACKEND; } || die "gateway path to tenant-a BROKE under the policy"
+  { [ "$cb" = 200 ] && has "$bb" TENANT-B-BACKEND; } || die "gateway path to tenant-b BROKE under the policy"
+  ok "GREEN ALLOW proven — gateway :443 still 200 from each backend (source ∈ NODE_CIDR, allowed on :5678)"
+
+  section "confirm echo pods stay Ready under the policy (kubelet probes ride the node IP)"
+  k -n tenant-a rollout status deploy/echo --timeout=40s
+  k -n tenant-b rollout status deploy/echo --timeout=40s
+  ok "Phase 11 (Property 2) verified"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -544,7 +717,9 @@ main() {
   phase8_seed
   verify_phase8
   phase9_prove
-  section "up.sh: FULL STANDUP COMPLETE — routable gateway, two tenants, ext_authz OFF."
+  phase10_sec3_admission
+  phase11_sec3_dataplane
+  section "up.sh: FULL STANDUP COMPLETE — routable gateway + SEC-3 live enforcement (both flips), ext_authz OFF."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

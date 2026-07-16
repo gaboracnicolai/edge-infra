@@ -1,0 +1,39 @@
+# SEC-3 data-plane proof attacker (Phase 11).
+#
+# A NORMAL pod (NOT hostNetwork) in a neutral namespace, so its source IP is a
+# Calico POD IP (192.168.0.0/16) — OUTSIDE the node CIDR (172.19.0.0/16). That is
+# the crux of the proof: the backend allow-from-gateway rule is an ipBlock of the
+# node CIDR (the hostNetwork edge-proxy's source), so a pod-network source is NOT
+# allowed and must be dropped by default-deny. A hostNetwork attacker would carry
+# a node IP and be allowed — which is exactly the precision ceiling we call out.
+#
+# From here we curl each tenant's echo ClusterIP directly (gateway bypass). Both
+# hops are cross-tenant (attacker is in neither tenant namespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sec3-attacker
+  labels: { part-of: edge-local, role: attacker }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attacker
+  namespace: sec3-attacker
+  labels: { app: attacker, part-of: edge-local }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: attacker }
+  template:
+    metadata:
+      labels: { app: attacker, part-of: edge-local }
+    spec:
+      # hostNetwork intentionally omitted (false) — the source must be a POD IP.
+      containers:
+        - name: attacker
+          image: curlimages/curl:8.11.1
+          command: ["sleep", "infinity"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }

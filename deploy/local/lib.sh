@@ -33,6 +33,9 @@ BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03
 # Trivial echo backend for the two tenants (Phase 8). Kept in sync with
 # deploy/local/manifests/tenants.yaml.
 ECHO_IMAGE="${ECHO_IMAGE:-hashicorp/http-echo:0.2.3}"
+# Attacker pod for the SEC-3 data-plane proof (Phase 11): a pod-network pod (NOT
+# hostNetwork) with curl, so its source IP is a POD IP outside NODE_CIDR.
+ATTACKER_IMAGE="${ATTACKER_IMAGE:-curlimages/curl:8.11.1}"
 
 # ---- logging -----------------------------------------------------------------
 if [ -t 1 ]; then
@@ -65,6 +68,21 @@ retry() { local n="$1" s="$2"; shift 2; local i; for ((i=1; i<=n; i++)); do "$@"
 # and SIGPIPEs the still-writing printf (exit 141), so the pipeline reports
 # failure DESPITE a match when the input exceeds the pipe buffer (~64 KiB).
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
+# in_cidr16 <first-two-octets> <ip> — true if IP is in that /16. kind's node
+# network is always a /16 (e.g. 172.19.0.0/16); the trailing "." in the glob
+# stops 172.190.x from matching 172.19. No external tools.
+in_cidr16() { case "$2" in "$1".*) return 0 ;; *) return 1 ;; esac; }
+
+# attacker_get <ip> <port> — curl from the SEC-3 attacker pod (pod-network).
+# Echoes "code=<http_code> <body>". A Calico drop => curl -m times out => the
+# writer prints code=000 with an empty body; a hit => code=200 + the backend text.
+attacker_get() {
+  local ip="$1" port="$2" out
+  out="$(k -n sec3-attacker exec deploy/attacker -- \
+    curl -s -m 4 -w '\n%{http_code}' "http://${ip}:${port}/" 2>/dev/null || true)"
+  printf 'code=%s %s' "$(printf '%s\n' "$out" | tail -1)" "$(printf '%s\n' "$out" | head -1)"
+}
 
 wait_nodes_ready() {
   section "waiting for all nodes Ready"
