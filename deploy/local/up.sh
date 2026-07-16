@@ -64,6 +64,20 @@ phase1_cluster() {
   section "waiting for Calico control plane"
   k -n kube-system rollout status ds/calico-node --timeout=300s
   k -n kube-system rollout status deploy/calico-kube-controllers --timeout=300s
+
+  # kind nodes share ONE subnet, so IPIP encapsulation is unnecessary — and it
+  # actively breaks the SEC-3 gateway-allow: with ipipMode=Always, cross-node
+  # hostNetwork traffic (the edge-proxy gateway) egresses via tunl0 and takes the
+  # tunnel's POD-CIDR IP as source, which would NOT match a node-CIDR ipBlock allow.
+  # CrossSubnet => native routing for same-subnet nodes => the node IP is preserved
+  # as source (gateway matches NODE_CIDR), while pod sources stay real (the SEC-3
+  # drop still bites). Applied here, before any workload, so every connection is
+  # native from the start.
+  if k get ippool default-ipv4-ippool >/dev/null 2>&1; then
+    k patch ippool default-ipv4-ippool --type merge -p '{"spec":{"ipipMode":"CrossSubnet"}}' >/dev/null \
+      && ok "Calico ipipMode=CrossSubnet (node-IP source preserved for same-subnet nodes)" \
+      || warn "could not patch Calico IPPool to CrossSubnet"
+  fi
   ok "Calico running"
 }
 
@@ -668,30 +682,37 @@ NP
   ok "backend policy applied (also Property 1 GREEN: the ipBlock policy is ADMITTED, not denied)"
   sleep 3   # let Calico program the rules
 
-  section "GREEN (flip) — attacker → each backend now DROPPED"
-  local i=0 ga gb
-  while [ "$i" -lt 10 ]; do
+  # Converge: default-deny programs a beat before allow-from-gateway, so the
+  # gateway path can 503 briefly right after apply. Wait until BOTH the drop and
+  # the allow hold, then assert them SEPARATELY below.
+  section "GREEN — waiting for Calico to converge (attacker dropped AND gateway allowed)"
+  local i=0 ga gb ca cb
+  while [ "$i" -lt 20 ]; do
     ga="$(attacker_get "$ipA" 5678)"; gb="$(attacker_get "$ipB" 5678)"
-    { has "$ga" code=000 && has "$gb" code=000; } && break
+    ca="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'Host: tenant-a.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+    cb="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'Host: tenant-b.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+    if has "$ga" code=000 && has "$gb" code=000 && [ "$ca" = 200 ] && [ "$cb" = 200 ]; then break; fi
     i=$((i + 1)); sleep 2
   done
+
+  # (a) the bypass DROP — proven on its own.
+  section "GREEN (a) — attacker bypass DROPPED (flip from the RED success)"
   echo "  attacker($atk_ip) -> tenant-a $ipA:5678  =>  $ga"
   echo "  attacker($atk_ip) -> tenant-b $ipB:5678  =>  $gb"
   has "$ga" code=000 || die "tenant-a bypass NOT dropped (expected timeout) — got: $ga"
   has "$gb" code=000 || die "tenant-b bypass NOT dropped (expected timeout) — got: $gb"
   ok "GREEN DROP proven — the cross-tenant bypass FLIPPED 200 -> dropped for BOTH tenants"
 
-  section "GREEN — the gateway path (node :443) stays ALLOWED"
-  local ca cb ba bb
-  ca="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: tenant-a.local' http://127.0.0.1:443/ 2>/dev/null || true)"
+  # (b) the gateway path preserved — a SEPARATE assertion (never combined with the drop).
+  section "GREEN (b) — gateway path (node :443) still ALLOWED"
+  local ba bb
   ba="$(curl -s --max-time 6 -H 'Host: tenant-a.local' http://127.0.0.1:443/ 2>/dev/null || true)"
-  cb="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H 'Host: tenant-b.local' http://127.0.0.1:443/ 2>/dev/null || true)"
   bb="$(curl -s --max-time 6 -H 'Host: tenant-b.local' http://127.0.0.1:443/ 2>/dev/null || true)"
   echo "  gateway :443 Host tenant-a.local => HTTP $ca  $ba"
   echo "  gateway :443 Host tenant-b.local => HTTP $cb  $bb"
-  { [ "$ca" = 200 ] && has "$ba" TENANT-A-BACKEND; } || die "gateway path to tenant-a BROKE under the policy"
-  { [ "$cb" = 200 ] && has "$bb" TENANT-B-BACKEND; } || die "gateway path to tenant-b BROKE under the policy"
-  ok "GREEN ALLOW proven — gateway :443 still 200 from each backend (source ∈ NODE_CIDR, allowed on :5678)"
+  { [ "$ca" = 200 ] && has "$ba" TENANT-A-BACKEND; } || die "gateway path to tenant-a BROKE under the policy (HTTP $ca)"
+  { [ "$cb" = 200 ] && has "$bb" TENANT-B-BACKEND; } || die "gateway path to tenant-b BROKE under the policy (HTTP $cb)"
+  ok "GREEN ALLOW proven — gateway :443 still 200 from each backend (source node IP ∈ NODE_CIDR, allowed on :5678)"
 
   section "confirm echo pods stay Ready under the policy (kubelet probes ride the node IP)"
   k -n tenant-a rollout status deploy/echo --timeout=40s
