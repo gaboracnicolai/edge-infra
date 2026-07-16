@@ -1,12 +1,20 @@
-# Local overlay for edge-osb. Note the chart reads api.image / worker.image
-# (NOT a top-level image.*), and api.replicaCount / worker.replicaCount (the dev
-# overlay's top-level replicaCount is a no-op). Extended in Phase 7 (DB/NATS TLS
-# off, replicas, allow-untenanted).
+# Local overlay for edge-osb. The chart reads api.image / worker.image (NOT a
+# top-level image.*), and api.replicaCount / worker.replicaCount (the dev
+# overlay's top-level replicaCount is a no-op).
 api:
   image:
     repository: edge-osb
     tag: local
+  replicaCount: 1
 worker:
   image:
     repository: edge-osb
     tag: local
+  replicaCount: 1
+# Disable the chart's TLS block for dev — the datastores are plaintext (Postgres
+# sslmode=disable, NATS no TLS). `null` removes the chart default so NO
+# DB_SSL_MODE/NATS_TLS_* env or osb-tls mount is rendered (the chart couples DB
+# TLS and mutual NATS TLS into one `with .Values.tls` block, and config.py
+# refuses plaintext NATS once NATS_TLS_CA is set). DB_SSL_MODE=disable is instead
+# supplied via the edge-osb-secrets envFrom.
+tls: null

@@ -18,6 +18,7 @@
 #   4  data-plane PKI (cert-manager Certificates)
 #   5  admin PKI (bootstrap-pki.sh) + app secrets
 #   6  migrate the shared DB (control-plane + OSB schemas)
+#   7  deploy all charts with dev overlays, extAuthz OFF
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -263,6 +264,7 @@ phase5_secrets() {
   # zero tenant_api_keys (dev); DB/NATS TLS is turned off via the Phase-7 overlay.
   apply_secret "$INFRA_NS" generic edge-osb-secrets \
     --from-literal=DATABASE_URL="$OSB_DSN" \
+    --from-literal=DB_SSL_MODE="disable" \
     --from-literal=NATS_URL="nats://nats.${INFRA_NS}.svc.cluster.local:4222" \
     --from-literal=ALLOW_UNTENANTED="true"
 
@@ -335,6 +337,86 @@ verify_phase6() {
   ok "Phase 6 verified (control-plane + OSB schema present)"
 }
 
+# ---- Phase 7 — deploy all charts (extAuthz OFF) -----------------------------
+# helm_install <release> <namespace> — chart default values.yaml is implicit;
+# layer the dev overlay then the local overlay (each if present). --wait blocks
+# until Ready so the next chart's dependency is satisfied.
+helm_install() {
+  local rel="$1" ns="$2" suffix
+  suffix="${rel#edge-}"
+  local chart="$REPO_ROOT/deploy/helm/$rel"
+  local dev="$REPO_ROOT/deploy/envs/dev/values-${suffix}.yaml"
+  local loc="$LOCAL_DIR/values/values-${suffix}.yaml"
+  section "helm upgrade --install $rel -> ns/$ns"
+  # Clear a prior stuck/failed release (e.g. a hook that timed out) so a re-run
+  # proceeds cleanly instead of erroring on "another operation in progress".
+  local st
+  st="$(h status "$rel" -n "$ns" -o json 2>/dev/null | jq -r '.info.status // empty' 2>/dev/null || true)"
+  case "$st" in
+    pending-install|pending-upgrade|pending-rollback|failed|uninstalling)
+      warn "clearing prior '$st' release $rel"
+      h uninstall "$rel" -n "$ns" >/dev/null 2>&1 || true
+      k -n "$ns" delete job "${rel}-migrate" --ignore-not-found >/dev/null 2>&1 || true ;;
+  esac
+  set -- upgrade --install "$rel" "$chart" -n "$ns" --create-namespace
+  if [ -f "$dev" ]; then set -- "$@" -f "$dev"; fi
+  if [ -f "$loc" ]; then set -- "$@" -f "$loc"; fi
+  set -- "$@" --wait --timeout "${HELM_TIMEOUT:-300s}"
+  h "$@"
+}
+
+diag_fail() {  # <release> <ns> — dump why a chart didn't come up, then stop.
+  warn "deploy failed for $1 (ns $2) — diagnostics:"
+  k -n "$2" get pods -o wide 2>/dev/null || true
+  echo "  recent events:"
+  k -n "$2" get events --sort-by=.lastTimestamp 2>/dev/null | tail -15 || true
+  die "chart $1 failed to become Ready"
+}
+
+phase7_deploy() {
+  section "PHASE 7 — deploy charts (dev overlays, extAuthz OFF)"
+  # Order encodes dependencies: control-plane (xDS) first; issuer before
+  # auth-service (which fetches the issuer JWKS at startup); proxy after the
+  # control-plane is serving xDS.
+  helm_install edge-control-plane "$INFRA_NS" || diag_fail edge-control-plane "$INFRA_NS"
+  helm_install edge-issuer        "$INFRA_NS" || diag_fail edge-issuer "$INFRA_NS"
+  helm_install auth-service       "$INFRA_NS" || diag_fail auth-service "$INFRA_NS"
+  helm_install edge-osb           "$INFRA_NS" || diag_fail edge-osb "$INFRA_NS"
+  helm_install edge-proxy         edge        || diag_fail edge-proxy edge
+  # Auxiliary charts (not on the routing path). Best-effort so the run isn't
+  # blocked if a custodian/RLS detail needs tuning.
+  helm_install edge-ratelimit "$INFRA_NS" || warn "edge-ratelimit not Ready (auxiliary — continuing)"
+  helm_install edge-secrets   "$INFRA_NS" || warn "edge-secrets not Ready (auxiliary — continuing)"
+  ok "charts deployed"
+}
+
+verify_phase7() {
+  section "VERIFY Phase 7 — services Ready + Envoy connected to control-plane"
+  k get pods -n "$INFRA_NS" -o wide
+  echo; k get pods -n edge -o wide
+  echo
+  # Envoy admin is localhost-only in the pod (R7); reach it via a short-lived
+  # port-forward and confirm the xDS connection is up.
+  local ep
+  ep="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$ep" ] || ep="$(k -n edge get pod -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -n "$ep" ]; then
+    section "edge-proxy admin ($ep) — xDS link + received config"
+    k -n edge port-forward "pod/$ep" 19001:9901 >/dev/null 2>&1 &
+    local pf=$!; sleep 3
+    echo "  control_plane connection (1 = connected):"
+    curl -s --max-time 5 http://127.0.0.1:19001/stats 2>/dev/null \
+      | grep -E 'control_plane\.(connected_state|identifier)' | sed 's/^/    /' || true
+    echo "  received listeners / clusters:"
+    curl -s --max-time 5 http://127.0.0.1:19001/config_dump 2>/dev/null \
+      | jq -r '[.configs[]?.dynamic_listeners[]?]|length as $l|null|"    dynamic_listeners=\($l)"' 2>/dev/null || true
+    curl -s --max-time 5 http://127.0.0.1:19001/config_dump 2>/dev/null \
+      | jq -r '[.configs[]?.dynamic_active_clusters[]?]|length as $c|null|"    dynamic_active_clusters=\($c)"' 2>/dev/null || true
+    kill "$pf" >/dev/null 2>&1 || true; wait "$pf" 2>/dev/null || true
+  fi
+  ok "Phase 7 verified (all required charts Ready via --wait)"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -348,7 +430,9 @@ main() {
   verify_phase5
   phase6_migrate
   verify_phase6
-  section "up.sh: Phases 1–6 complete."
+  phase7_deploy
+  verify_phase7
+  section "up.sh: Phases 1–7 complete."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

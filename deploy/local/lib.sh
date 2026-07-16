@@ -30,6 +30,9 @@ KYVERNO_VERSION="${KYVERNO_VERSION:-v1.16.0}"
 # cluster in Phase 3 to avoid docker-hub pull limits at pod-creation time.
 ENVOY_IMAGE="${ENVOY_IMAGE:-envoyproxy/envoy:v1.30.0@sha256:d7d501253a93f0b5fce8e0d3a24f3bef67372c50ed7ea922279c72fc1200be58}"
 BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}"
+# Trivial echo backend for the two tenants (Phase 8). Kept in sync with
+# deploy/local/manifests/tenants.yaml.
+ECHO_IMAGE="${ECHO_IMAGE:-hashicorp/http-echo:0.2.3}"
 
 # ---- logging -----------------------------------------------------------------
 if [ -t 1 ]; then
@@ -71,4 +74,18 @@ wait_rollout() { k -n "$2" rollout status "$1" --timeout="${3:-240s}"; }
 apply_secret() {
   local ns="$1" typ="$2" name="$3"; shift 3
   k -n "$ns" create secret "$typ" "$name" "$@" --dry-run=client -o yaml | k apply -f -
+}
+
+# envoy_config_dump <edge-proxy-pod> — fetch the Envoy admin /config_dump. The
+# admin is localhost-only in the pod (R7), so reach it via a short-lived
+# port-forward. Echoes the JSON (empty string on failure).
+envoy_config_dump() {
+  local pod="$1" out
+  k -n edge port-forward "pod/$pod" 19001:9901 >/dev/null 2>&1 &
+  local pf=$!
+  sleep 5
+  out="$(curl -s --max-time 8 http://127.0.0.1:19001/config_dump 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  printf '%s' "$out"
 }
