@@ -17,6 +17,7 @@
 #   3  build local images (all 7 targets) + load into the cluster
 #   4  data-plane PKI (cert-manager Certificates)
 #   5  admin PKI (bootstrap-pki.sh) + app secrets
+#   6  migrate the shared DB (control-plane + OSB schemas)
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -305,6 +306,35 @@ verify_phase5() {
   ok "Phase 5 verified"
 }
 
+# ---- Phase 6 — migrate the shared DB ----------------------------------------
+phase6_migrate() {
+  section "PHASE 6 — migrate the shared 'edge' DB (control-plane + OSB schemas)"
+  # Job is not re-appliable once complete; recreate it (migrate is idempotent).
+  k -n "$INFRA_NS" delete job edge-migrate-shared --ignore-not-found >/dev/null 2>&1 || true
+  k apply -f "$LOCAL_DIR/manifests/migrate-job.yaml"
+  section "waiting for the migrate Job to complete"
+  if ! k -n "$INFRA_NS" wait --for=condition=complete job/edge-migrate-shared --timeout=180s 2>/dev/null; then
+    warn "migrate Job did not report complete — logs:"
+    k -n "$INFRA_NS" logs job/edge-migrate-shared || true
+    die "migrate Job failed"
+  fi
+  k -n "$INFRA_NS" logs job/edge-migrate-shared | tail -25
+  ok "migrations applied"
+}
+
+verify_phase6() {
+  section "VERIFY Phase 6 — schema present in the shared 'edge' DB"
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  echo "  public tables:"
+  k exec -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -tAc \
+    "select string_agg(table_name, ', ' order by table_name) from information_schema.tables where table_schema='public';"
+  local core
+  core="$(k exec -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -tAc \
+    "select count(*) from information_schema.tables where table_schema='public' and table_name in ('gateways','routes','clusters','endpoints');" | tr -d '[:space:]')"
+  [ "$core" = "4" ] || die "core routing tables missing (gateways/routes/clusters/endpoints found: $core/4)"
+  ok "Phase 6 verified (control-plane + OSB schema present)"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -316,7 +346,9 @@ main() {
   verify_phase4
   phase5_secrets
   verify_phase5
-  section "up.sh: Phases 1–5 complete."
+  phase6_migrate
+  verify_phase6
+  section "up.sh: Phases 1–6 complete."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
