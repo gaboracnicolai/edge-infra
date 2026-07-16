@@ -15,6 +15,8 @@
 #   1  kind cluster (no default CNI) + Calico
 #   2  cluster deps: cert-manager, Kyverno, Postgres, NATS
 #   3  build local images (all 7 targets) + load into the cluster
+#   4  data-plane PKI (cert-manager Certificates)
+#   5  admin PKI (bootstrap-pki.sh) + app secrets
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -182,6 +184,127 @@ verify_phase3() {
   ok "Phase 3 verified"
 }
 
+# ---- Phase 4 — data-plane PKI (cert-manager Certificates) -------------------
+phase4_dataplane_pki() {
+  section "PHASE 4 — data-plane PKI (cert-manager Certificates)"
+  # Order matters: selfSigned root -> CA ClusterIssuer -> leaves.
+  section "root CA bootstrap (selfsigned-bootstrap -> edge-root-ca)"
+  k apply -f "$REPO_ROOT/k8s/certs/root-ca-bootstrap.yaml"
+  k -n cert-manager wait --for=condition=Ready certificate/edge-root-ca --timeout=180s
+
+  section "edge-internal-ca ClusterIssuer"
+  k apply -f "$REPO_ROOT/k8s/certs/cluster-issuer.yaml"
+  k wait --for=condition=Ready clusterissuer/edge-internal-ca --timeout=120s
+
+  section "leaf Certificates (4 in $INFRA_NS, 3 in edge)"
+  local c
+  for c in auth-service-cert control-plane-cert issuer-cert osb-client-cert \
+           envoy-serving-cert envoy-xds-client-cert envoy-authz-client-cert; do
+    k apply -f "$REPO_ROOT/k8s/certs/$c.yaml"
+  done
+  section "waiting for leaf Certificates Ready"
+  k -n "$INFRA_NS" wait --for=condition=Ready certificate --all --timeout=180s
+  k -n edge        wait --for=condition=Ready certificate --all --timeout=180s
+  ok "all Certificates issued"
+}
+
+verify_phase4() {
+  section "VERIFY Phase 4 — cert-manager minted every expected secret"
+  local s ok_all=1
+  for s in auth-service-tls-secret edge-cp-tls-secret issuer-tls-secret osb-client-tls-secret; do
+    if k -n "$INFRA_NS" get secret "$s" >/dev/null 2>&1; then ok "$INFRA_NS/$s"; else warn "MISSING $INFRA_NS/$s"; ok_all=0; fi
+  done
+  for s in envoy-serving-tls-secret envoy-xds-client-tls-secret envoy-authz-client-tls-secret; do
+    if k -n edge get secret "$s" >/dev/null 2>&1; then ok "edge/$s"; else warn "MISSING edge/$s"; ok_all=0; fi
+  done
+  [ "$ok_all" = 1 ] || die "some cert-manager secrets are missing"
+  ok "Phase 4 verified"
+}
+
+# ---- Phase 5 — admin PKI (bootstrap-pki.sh) + app secrets -------------------
+phase5_secrets() {
+  section "PHASE 5 — admin PKI + app secrets"
+  local PKI="$LOCAL_DIR/.pki-bootstrap"
+
+  # 1. Admin-plane PKI material — reuse if already generated so the KEK stays
+  #    stable across re-runs (the control-plane must share it with the custodian).
+  if [ -f "$PKI/admin-ca.crt" ] && [ -f "$PKI/server.crt" ] \
+     && [ -f "$PKI/server.key" ] && [ -f "$PKI/secret_kek.b64" ]; then
+    log "reusing admin PKI material in .pki-bootstrap"
+  else
+    section "generating admin PKI (scripts/bootstrap-pki.sh)"
+    rm -rf "$PKI"
+    # Redirect stdout: the banner echoes the KEK — keep it out of logs.
+    EDGE_NAMESPACE="$INFRA_NS" bash "$REPO_ROOT/scripts/bootstrap-pki.sh" "$PKI" >/dev/null
+  fi
+  local KEK; KEK="$(cat "$PKI/secret_kek.b64")"
+
+  # 2. Issuer RSA signing key (kid=k1) — reuse if present. activeKid is set in the
+  #    Phase-7 issuer overlay to match.
+  [ -f "$PKI/k1.pem" ] || openssl genrsa -out "$PKI/k1.pem" 2048 2>/dev/null
+
+  # DSNs — sslmode=disable locally (prod uses TLS). One shared 'edge' DB for
+  # control-plane + osb + secrets; issuer has its own 'issuer' DB.
+  local PGH="postgres.${INFRA_NS}.svc.cluster.local"
+  local SHARED_DSN="postgres://postgres:edgedevpass@${PGH}:5432/edge?sslmode=disable"
+  local OSB_DSN="postgresql://postgres:edgedevpass@${PGH}:5432/edge?sslmode=disable"
+  local ISSUER_DSN="postgres://postgres:edgedevpass@${PGH}:5432/issuer?sslmode=disable"
+  local ISSUER_URL="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"
+  local AUD="edge-gateway"
+
+  section "app + custodian secrets in $INFRA_NS"
+  # control-plane: shared-DB DSN (key 'dsn') + SECRET_KEK
+  apply_secret "$INFRA_NS" generic edge-control-plane-postgres \
+    --from-literal=dsn="$SHARED_DSN" \
+    --from-literal=SECRET_KEK="$KEK"
+
+  # edge-osb: same shared DB + NATS. ALLOW_UNTENANTED lets the broker boot with
+  # zero tenant_api_keys (dev); DB/NATS TLS is turned off via the Phase-7 overlay.
+  apply_secret "$INFRA_NS" generic edge-osb-secrets \
+    --from-literal=DATABASE_URL="$OSB_DSN" \
+    --from-literal=NATS_URL="nats://nats.${INFRA_NS}.svc.cluster.local:4222" \
+    --from-literal=ALLOW_UNTENANTED="true"
+
+  # edge-issuer: its own DB + iss/aud (self-migrated by the chart's migrate Job).
+  apply_secret "$INFRA_NS" generic issuer-secrets \
+    --from-literal=ISSUER_URL="$ISSUER_URL" \
+    --from-literal=ISSUER_AUDIENCE="$AUD" \
+    --from-literal=ISSUER_DATABASE_URL="$ISSUER_DSN"
+  apply_secret "$INFRA_NS" generic issuer-signing-keys \
+    --from-file=k1.pem="$PKI/k1.pem"
+
+  # auth-service: JWKS -> issuer (https + SAN match); iss/aud match; >=16-char secret.
+  apply_secret "$INFRA_NS" generic auth-service-secrets \
+    --from-literal=JWKS_URL="${ISSUER_URL}/.well-known/jwks.json" \
+    --from-literal=JWT_ISSUER="$ISSUER_URL" \
+    --from-literal=JWT_AUDIENCE="$AUD" \
+    --from-literal=GATEWAY_AUTH_SECRET="local-dev-gateway-auth-secret-0123456789"
+
+  # edge-secrets custodian (out-of-band admin PKI from bootstrap-pki.sh).
+  apply_secret "$INFRA_NS" generic edge-admin-ca \
+    --from-file=ca.crt="$PKI/admin-ca.crt"
+  apply_secret "$INFRA_NS" tls edge-secrets-tls \
+    --cert="$PKI/server.crt" --key="$PKI/server.key"
+  apply_secret "$INFRA_NS" generic edge-secrets-config \
+    --from-literal=SECRET_KEK="$KEK" \
+    --from-literal=SECRETS_DATABASE_URL="$SHARED_DSN" \
+    --from-literal=SECRETS_ADMIN_API_KEY="local-dev-admin-key"
+
+  ok "secrets created"
+}
+
+verify_phase5() {
+  section "VERIFY Phase 5 — all referenced app secrets exist in $INFRA_NS"
+  local s ok_all=1
+  for s in edge-control-plane-postgres edge-osb-secrets issuer-secrets \
+           issuer-signing-keys auth-service-secrets edge-admin-ca \
+           edge-secrets-tls edge-secrets-config; do
+    if k -n "$INFRA_NS" get secret "$s" >/dev/null 2>&1; then ok "$s"; else warn "MISSING $s"; ok_all=0; fi
+  done
+  [ "$ok_all" = 1 ] || die "some app secrets are missing"
+  ok "Phase 5 verified"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -189,11 +312,15 @@ main() {
   verify_phase2
   phase3_images
   verify_phase3
-  section "up.sh: Phases 1–3 complete."
+  phase4_dataplane_pki
+  verify_phase4
+  phase5_secrets
+  verify_phase5
+  section "up.sh: Phases 1–5 complete."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
-# (e.g. `up.sh phase3_images verify_phase3` to re-run just Phase 3).
+# (e.g. `up.sh phase4_dataplane_pki verify_phase4` to re-run just Phase 4).
 if [ "$#" -gt 0 ]; then
   for _fn in "$@"; do "$_fn"; done
 else
