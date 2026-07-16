@@ -17,14 +17,14 @@ IMAGE_TAG="${IMAGE_TAG:-local}"               # local image tag the charts point
 
 # Pinned dependency versions (fetched at run time, like any kind bootstrap).
 # up.sh fails loudly if a URL is unreachable rather than standing up half a stack.
+# Pinned for k8s 1.35 (kind 0.31 default node image) — newest that supports it.
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-}"        # empty => kind's default for this kind binary
 CALICO_VERSION="${CALICO_VERSION:-v3.30.2}"
-CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
-KYVERNO_VERSION="${KYVERNO_VERSION:-v1.13.2}"
+CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.20.0}"
+KYVERNO_VERSION="${KYVERNO_VERSION:-v1.16.0}"
 
-# In-cluster dev datastores (Phase 2). Dev-grade: ephemeral, single replica.
-PG_IMAGE="${PG_IMAGE:-postgres:16-alpine}"
-NATS_IMAGE="${NATS_IMAGE:-nats:2.10-alpine}"
+# In-cluster dev datastores (Phase 2) are dev-grade (ephemeral emptyDir, single
+# replica). Their images are pinned in deploy/local/manifests/{postgres,nats}.yaml.
 
 # ---- logging -----------------------------------------------------------------
 if [ -t 1 ]; then

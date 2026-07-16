@@ -13,6 +13,7 @@
 #
 # Phases (built incrementally; see deploy/local/README.md):
 #   1  kind cluster (no default CNI) + Calico
+#   2  cluster deps: cert-manager, Kyverno, Postgres, NATS
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
@@ -67,9 +68,68 @@ verify_phase1() {
   ok "Phase 1 verified"
 }
 
+# ---- Phase 2 — cluster dependencies -----------------------------------------
+phase2_deps() {
+  section "PHASE 2 — cluster deps (cert-manager, Kyverno, Postgres, NATS)"
+
+  log "namespaces (infra, edge)"
+  k apply -f "$LOCAL_DIR/manifests/namespaces.yaml"
+
+  if k get deploy cert-manager -n cert-manager >/dev/null 2>&1; then
+    log "cert-manager already installed — reusing"
+  else
+    section "installing cert-manager $CERT_MANAGER_VERSION"
+    k apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+  fi
+  section "waiting for cert-manager"
+  k -n cert-manager wait --for=condition=Available deploy --all --timeout=300s
+  ok "cert-manager ready"
+
+  if k get crd clusterpolicies.kyverno.io >/dev/null 2>&1 \
+     && k get deploy kyverno-admission-controller -n kyverno >/dev/null 2>&1; then
+    log "Kyverno already installed — reusing"
+  else
+    section "installing Kyverno $KYVERNO_VERSION (server-side — its CRDs exceed the client-side annotation limit)"
+    k apply --server-side --force-conflicts \
+      -f "https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}/install.yaml"
+  fi
+  section "waiting for Kyverno (engine only — SEC-3 policies are a later run)"
+  k -n kyverno wait --for=condition=Available deploy --all --timeout=300s
+  ok "Kyverno ready"
+
+  section "Postgres (dev, in $INFRA_NS)"
+  k apply -f "$LOCAL_DIR/manifests/postgres.yaml"
+  wait_rollout deploy/postgres "$INFRA_NS" 240s
+  ok "Postgres ready"
+
+  section "NATS (dev JetStream, in $INFRA_NS)"
+  k apply -f "$LOCAL_DIR/manifests/nats.yaml"
+  wait_rollout deploy/nats "$INFRA_NS" 240s
+  ok "NATS ready"
+}
+
+verify_phase2() {
+  section "VERIFY Phase 2"
+  k get pods -n cert-manager
+  echo
+  k get pods -n kyverno
+  echo
+  k get pods,svc -n "$INFRA_NS" -l part-of=edge-local
+  echo
+  # Prove the shared DB actually accepts queries and both databases exist.
+  local pgpod
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -tAc \
+    "select 'edge db reachable, datnames='||string_agg(datname,',') from pg_database where datname in ('edge','issuer');" \
+    && ok "Postgres serving; edge + issuer databases present"
+  ok "Phase 2 verified"
+}
+
 main() {
   phase1_cluster
   verify_phase1
-  section "up.sh: Phase 1 complete."
+  phase2_deps
+  verify_phase2
+  section "up.sh: Phases 1–2 complete."
 }
 main "$@"

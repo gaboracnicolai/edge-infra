@@ -1,0 +1,86 @@
+# Dev-grade in-cluster Postgres for the local standup.
+#
+# Holds BOTH logical databases the stack needs:
+#   - `edge`   the ONE shared DB (control-plane migrations/* + osb/migrations/*),
+#              migrated by cmd/migrate in Phase 6.
+#   - `issuer` edge-issuer's OWN separate DB (self-migrated on startup).
+#
+# Ephemeral (emptyDir) + single replica — a throwaway local datastore. The
+# password is a well-known dev secret; sslmode=disable locally (prod uses TLS).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres
+  namespace: infra
+  labels: { app: postgres, part-of: edge-local }
+stringData:
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: edgedevpass
+  POSTGRES_DB: edge
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-initdb
+  namespace: infra
+  labels: { app: postgres, part-of: edge-local }
+data:
+  # Runs once, during first-init, before Postgres accepts external connections
+  # (docker-entrypoint-initdb.d). edge-issuer needs its own database.
+  01-create-issuer-db.sql: |
+    CREATE DATABASE issuer;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: infra
+  labels: { app: postgres, part-of: edge-local }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres, part-of: edge-local }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef: { name: postgres }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: initdb, mountPath: /docker-entrypoint-initdb.d }
+          readinessProbe:
+            # -h 127.0.0.1 only succeeds once the REAL server is up on TCP (not
+            # the init-time unix socket) — so readiness can't flip early.
+            exec: { command: ["sh", "-c", "pg_isready -U postgres -d edge -h 127.0.0.1"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["sh", "-c", "pg_isready -U postgres -h 127.0.0.1"] }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: "1",  memory: 512Mi }
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: initdb
+          configMap: { name: postgres-initdb }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: infra
+  labels: { app: postgres, part-of: edge-local }
+spec:
+  selector: { app: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: 5432 }
