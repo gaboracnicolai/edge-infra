@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -81,7 +82,53 @@ func (r *Reconciler) InconsistentSnapshotsBlocked() uint64 {
 // last-good config: an inconsistent snapshot is blocked ONLY once a healthy one
 // has been published (hasPrev) — first boot is exempt.
 func shouldBlockInconsistent(snap *cachev3.Snapshot, hasPrev bool) bool {
-	return hasPrev && snap.Consistent() != nil
+	return hasPrev && snapshotConsistencyError(snap) != nil
+}
+
+// snapshotConsistencyError returns the reason a snapshot must not be published, or
+// nil if it is safe. It combines two fail-static checks:
+//   - Envoy's own Snapshot.Consistent() — dangling CDS->EDS (an EDS cluster with no
+//     endpoint assignment) or LDS->RDS (a listener referencing an absent route
+//     config) references. NOTE: the current builders cannot actually emit either
+//     (BuildEndpoints emits a CLA per cluster; BuildListeners/BuildRouteConfigs both
+//     iterate the same gateways), so this arm is defence-in-depth against a future
+//     builder regression.
+//   - danglingRouteClusterError — a route whose target cluster is absent from CDS.
+//     Consistent() does NOT traverse route->cluster references, yet this IS
+//     producible by the data path (a routes row left pointing at a deleted/absent
+//     cluster), and Envoy would blackhole it. This is the reachable R8 case.
+func snapshotConsistencyError(snap *cachev3.Snapshot) error {
+	if err := snap.Consistent(); err != nil {
+		return err
+	}
+	return danglingRouteClusterError(snap)
+}
+
+// danglingRouteClusterError returns an error naming the first RDS route that
+// forwards to a cluster absent from CDS (Envoy would blackhole it), or nil when
+// every single-cluster route action targets a cluster present in CDS. Weighted /
+// redirect / non-forwarding actions have an empty GetCluster() and are skipped.
+func danglingRouteClusterError(snap *cachev3.Snapshot) error {
+	clusters := snap.GetResources(resourcev3.ClusterType)
+	for _, res := range snap.GetResources(resourcev3.RouteType) {
+		rc, ok := res.(*routev3.RouteConfiguration)
+		if !ok {
+			continue
+		}
+		for _, vh := range rc.GetVirtualHosts() {
+			for _, rt := range vh.GetRoutes() {
+				name := rt.GetRoute().GetCluster()
+				if name == "" {
+					continue
+				}
+				if _, present := clusters[name]; !present {
+					return fmt.Errorf("route %q on %q forwards to cluster %q absent from CDS (would blackhole)",
+						rt.GetName(), rc.GetName(), name)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // EmptySnapshotsBlocked reports how many times the empty-collapse guard has
@@ -233,21 +280,22 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("new snapshot: %w", err)
 	}
-	// Fail-static bad-config guard: an internally-inconsistent snapshot (e.g. a
-	// listener referencing an absent route config, or an EDS cluster with no
-	// endpoint assignment) would blackhole traffic if pushed. Once a healthy
-	// snapshot exists (prev != nil), refuse it and keep the last-good config;
-	// first boot is exempt (nothing to keep — surface it as a warning).
+	// Fail-static bad-config guard: an inconsistent snapshot — a dangling Envoy
+	// reference (CDS->EDS / LDS->RDS, via Consistent()) OR a route forwarding to a
+	// cluster absent from CDS (which Consistent() does NOT check but the data path
+	// CAN produce) — would blackhole traffic if pushed. Once a healthy snapshot
+	// exists (prev != nil), refuse it and keep the last-good config; first boot is
+	// exempt (nothing to keep — surface it as a warning).
 	if shouldBlockInconsistent(snap, prev != nil) {
 		r.inconsistentSnapshotsBlocked.Add(1)
 		r.log.Error("refusing to publish inconsistent snapshot; keeping last-good config",
-			"err", snap.Consistent(),
+			"err", snapshotConsistencyError(snap),
 			"last_good_version", prev.Version,
 			"blocked_total", r.inconsistentSnapshotsBlocked.Load(),
 		)
 		return nil
 	}
-	if cErr := snap.Consistent(); cErr != nil {
+	if cErr := snapshotConsistencyError(snap); cErr != nil {
 		r.log.Warn("first snapshot not internally consistent; publishing (no last-good yet)", "err", cErr)
 	}
 
