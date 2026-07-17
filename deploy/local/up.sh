@@ -23,6 +23,7 @@
 #   9  prove routable: a request per tenant through the node :443 hostPort
 #  10  SEC-3 Property 1 — Kyverno admission rejects open rules (red-first)
 #  11  SEC-3 Property 2 — Calico drops the bypass hop, gateway stays allowed
+#  12  CFG-1 flip + ext_authz LIVE — four properties, red-first, one at a time
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -720,6 +721,195 @@ NP
   ok "Phase 11 (Property 2) verified"
 }
 
+# ---- Phase 12 — CFG-1 flip + ext_authz LIVE (four properties, red-first) -----
+# helm_set_extauthz <true|false> — flip ext_authz LIVE via --set (the committed
+# local overlay stays enabled:false — base-off + deliberate flip, the real launch
+# model). helm only rolls the control-plane when the value actually changes.
+helm_set_extauthz() {
+  section "helm: ext_authz enabled=$1 (LIVE --set flip; overlay stays off)"
+  h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
+    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
+    -f "$LOCAL_DIR/values/values-control-plane.yaml" \
+    --set extAuthz.enabled="$1" --wait --timeout 200s
+  # The control-plane's snapshot version counter is per-process (non-HA), so it
+  # RESETS to v1 when the control-plane rolls on a flip. A still-connected
+  # edge-proxy that holds a higher version then rejects the new push as stale
+  # (cds/lds update_failure; the config silently never applies). A FRESH
+  # edge-proxy connection has no prior version and applies it cleanly — so roll
+  # edge-proxy after every flip.
+  section "roll edge-proxy for a fresh xDS connection (avoid the version-reset collision)"
+  k -n edge rollout restart ds/edge-proxy >/dev/null
+  k -n edge rollout status ds/edge-proxy --timeout=120s
+}
+
+# seed_secure_route / drop_secure_route — the secure.local (auth_policy='jwt')
+# route -> whoami, mirroring phase8's direct SQL. $1 = whoami ClusterIP (seed only).
+drop_secure_route() {
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -f - <<'SQL' >/dev/null
+DELETE FROM routes    WHERE name='secure-whoami';
+DELETE FROM endpoints WHERE cluster_id='secure-whoami';
+DELETE FROM clusters  WHERE name='secure-whoami';
+SQL
+}
+seed_secure_route() {
+  local wip="$1" pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -f - <<SQL >/dev/null
+INSERT INTO clusters (id,name) VALUES ('secure-whoami','secure-whoami') ON CONFLICT (name) DO NOTHING;
+DELETE FROM endpoints WHERE cluster_id='secure-whoami';
+INSERT INTO endpoints (id,cluster_id,address,port,weight) VALUES ('secure-whoami-0','secure-whoami','${wip}',80,1);
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('secure-whoami','secure-whoami','local-gw',ARRAY['secure.local']::text[],'/','secure-whoami',30,'jwt',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
+  cluster_name=EXCLUDED.cluster_name,timeout_seconds=EXCLUDED.timeout_seconds,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;
+SQL
+}
+
+phase12_extauthz_cutover() {
+  section "PHASE 12 — CFG-1 flip + ext_authz LIVE (four properties, red-first)"
+  local AUD="edge-gateway"   # issuer ISSUER_AUDIENCE == auth-service JWT_AUDIENCE (Phase 5)
+  local ISS="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"  # iss == JWT_ISSUER
+
+  # ---- reset to a clean PRE-FLIP state (idempotent re-runs) ----
+  section "reset — remove secure.local + ensure ext_authz OFF (safe: no jwt route present)"
+  drop_secure_route
+  helm_set_extauthz false
+  retry 20 2 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 -H 'Host: tenant-a.local' http://127.0.0.1:443/)\" = 200 ]" \
+    && ok "pre-flip baseline serving (ext_authz OFF, none-routes up)" || die "pre-flip baseline not serving"
+
+  # ---- PREREQ GATE — the deny-all trap (flip ONLY if BOTH pass) ----
+  section "PREREQ GATE — deny-all-trap (flip only if BOTH pass, else STOP)"
+  k -n "$INFRA_NS" wait --for=condition=Available deploy/auth-service --timeout=60s >/dev/null 2>&1 \
+    || die "PREREQ FAIL: auth-service not Available (JWKS-at-boot would have failed it)"
+  local eps; eps="$(k -n "$INFRA_NS" get endpoints auth-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)"
+  [ -n "$eps" ] || die "PREREQ FAIL: auth-service Service has no ready endpoints (:50051 unreachable)"
+  ok "(1) auth-service Ready + endpoints [$eps]; Ready ⇒ JWKS-at-boot succeeded (it fails to boot otherwise)"
+  k -n edge exec "$(ep_pod)" -- ls -l /etc/authz-client-tls/ca.crt >/dev/null 2>&1 \
+    && ok "(2) edge-proxy has /etc/authz-client-tls/ca.crt mounted (mTLS caFile present)" \
+    || die "PREREQ FAIL: edge-proxy lacks /etc/authz-client-tls/ca.crt — flipping renders plaintext ⇒ deny-all"
+
+  # ---- header-reflecting backend ----
+  section "deploy whoami (header-reflecting backend for secure.local)"
+  if docker pull "$WHOAMI_IMAGE" >/dev/null 2>&1; then kind load docker-image --name "$CLUSTER_NAME" "$WHOAMI_IMAGE" >/dev/null 2>&1 || true; fi
+  k apply -f "$LOCAL_DIR/manifests/secure-backend.yaml"
+  wait_rollout deploy/whoami tenant-secure 120s
+  local wip; wip="$(k -n tenant-secure get svc whoami -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$wip" ] || die "whoami ClusterIP unresolved"
+  log "whoami ClusterIP=$wip:80"
+
+  # ================= PROPERTY 4 — CFG-1 config-time guard (red-first, BEFORE flip) ==========
+  section "PROPERTY 4 (red-first) — CFG-1 guard REFUSES the jwt route while ext_authz OFF"
+  local before_ver; before_ver="$(envoy_config_dump "$(ep_pod)" | jq -r '[.configs[]?.dynamic_route_configs[]?.version_info]|sort|join(",")' 2>/dev/null)"
+  log "Envoy route-config version(s) BEFORE seeding secure.local: ${before_ver:-<none>}"
+  seed_secure_route "$wip"
+  sleep 10   # reconciler polls every ~5s; let it hit the guard
+  echo "  control-plane refusal log:"
+  k -n "$INFRA_NS" logs deploy/edge-control-plane --tail=80 2>/dev/null \
+    | grep -aiE 'refusing to build snapshot|auth_policy != none' | tail -2 | sed 's/^/    /' \
+    || die "P4 FAIL: no control-plane refusal log — the guard did not fire"
+  local dump after_ver
+  dump="$(envoy_config_dump "$(ep_pod)")"
+  after_ver="$(printf '%s' "$dump" | jq -r '[.configs[]?.dynamic_route_configs[]?.version_info]|sort|join(",")' 2>/dev/null)"
+  log "Envoy route-config version(s) AFTER: ${after_ver:-<none>}"
+  has "$dump" secure.local && die "P4 FAIL: secure.local present in Envoy — an auth-wanting route is served OPEN"
+  [ "$before_ver" = "$after_ver" ] && ok "Envoy snapshot version did NOT advance (${after_ver})" \
+    || warn "route-config version changed ($before_ver -> $after_ver) — but secure.local absent (below)"
+  local p4c; p4c="$(gw_code secure.local)"
+  [ "$p4c" != 200 ] || die "P4 FAIL: secure.local served 200 while ext_authz OFF (open identity listener)"
+  ok "P4 GREEN — control-plane refused; secure.local ABSENT from Envoy + not served ($p4c); tenant-a still $(gw_code tenant-a.local) (last-good retained)"
+
+  # ================= THE FLIP ==========
+  section "THE FLIP — ext_authz ON (live)"
+  helm_set_extauthz true
+  local i=0
+  while [ "$i" -lt 25 ]; do has "$(envoy_config_dump "$(ep_pod)")" secure.local && break; i=$((i + 1)); sleep 2; done
+  has "$(envoy_config_dump "$(ep_pod)")" secure.local || die "FLIP FAIL: secure.local not published after enabling ext_authz"
+  ok "FLIP done — ext_authz ON; secure.local published (now gated by ext_authz)"
+
+  # ================= PROPERTY 1 — valid JWT -> 200 + trusted injection (red-first) ==========
+  section "PROPERTY 1 (red-first) — valid JWT → 200 + TRUSTED header injection"
+  local UMAIL="dev@edge.local" UPASS="devpassword-abc12345"
+  k -n "$INFRA_NS" exec deploy/edge-issuer -- /issuer adduser --email "$UMAIL" --password "$UPASS" --team eng >/dev/null 2>&1 \
+    && log "created issuer user $UMAIL" || log "issuer user $UMAIL already exists (adduser idempotent)"
+  # Mint from the in-cluster OpenSSL curl pod (macOS system curl is LibreSSL and
+  # cannot handshake the issuer). Reaches edge-issuer.infra directly over TLS.
+  k -n tenant-secure wait --for=condition=Ready pod/minter --timeout=60s >/dev/null 2>&1 || true
+  local TOK="" mi=0
+  while [ "$mi" -lt 10 ]; do
+    TOK="$(k -n tenant-secure exec minter -- curl -sk --max-time 6 -X POST \
+      "https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081/login" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"$UMAIL\",\"password\":\"$UPASS\"}" 2>/dev/null \
+      | jq -r '.access_token // empty' 2>/dev/null || true)"
+    { [ -n "$TOK" ] && [ "$TOK" != null ]; } && break
+    mi=$((mi + 1)); sleep 2
+  done
+  { [ -n "$TOK" ] && [ "$TOK" != null ]; } || die "P1 FAIL: could not mint a JWT via POST /login"
+  ok "minted a real JWT via /login (aud=$AUD iss=$ISS; token len ${#TOK})"
+
+  local c1 b1
+  c1="$(gw_code secure.local -H "Authorization: Bearer $TOK")"
+  b1="$(gw_body secure.local -H "Authorization: Bearer $TOK")"
+  [ "$c1" = 200 ] || die "P1 FAIL: valid JWT did not yield 200 (got $c1)"
+  local low; low="$(printf '%s' "$b1" | tr 'A-Z' 'a-z')"
+  local hdr
+  for hdr in x-user-id x-user-email x-auth-iss x-gateway-auth; do
+    has "$low" "$hdr" || die "P1 FAIL: injected header '$hdr' absent from whoami reflection"
+  done
+  has "$low" "$UMAIL" || die "P1 FAIL: whoami did not reflect the JWT-derived email $UMAIL"
+  echo "  secure.local + valid JWT -> HTTP $c1; whoami reflected injected headers:"
+  printf '%s\n' "$b1" | grep -iE 'X-User-Id|X-User-Teams|X-User-Email|X-Auth-Iss|X-Gateway-Auth' | sed 's/^/    /'
+  ok "P1 GREEN — 200 + x-user-id/x-user-email/x-auth-iss/x-gateway-auth injected (JWT-derived)"
+
+  section "P1 anti-spoof — a client-forged x-user-email MUST be overwritten"
+  local bsp lsp
+  bsp="$(gw_body secure.local -H "Authorization: Bearer $TOK" -H 'x-user-email: attacker@evil.com')"
+  lsp="$(printf '%s' "$bsp" | tr 'A-Z' 'a-z')"
+  has "$lsp" 'attacker@evil.com' && die "P1 FAIL: forged x-user-email SURVIVED (client value not overwritten)"
+  has "$lsp" "$UMAIL" || die "P1 FAIL: JWT email missing after the spoof attempt"
+  echo "  forged 'x-user-email: attacker@evil.com' -> whoami shows: $(printf '%s' "$bsp" | grep -iE 'X-User-Email' | head -1 | sed 's/^ *//')"
+  ok "P1 anti-spoof GREEN — whoami shows the JWT email ($UMAIL); the forged attacker@evil.com was stripped"
+
+  local cc; cc="$(gw_code tenant-a.local)"
+  [ "$cc" = 200 ] || die "P1 FAIL: control tenant-a.local (none) not 200 (got $cc)"
+  ok "P1 control — tenant-a.local (auth_policy=none) with NO token still 200"
+
+  # ================= PROPERTY 2 — no/invalid JWT -> 401 (red-first) ==========
+  section "PROPERTY 2 (red-first) — no / invalid JWT → 401"
+  local c_none c_garbage
+  c_none="$(gw_code secure.local)"
+  c_garbage="$(gw_code secure.local -H 'Authorization: Bearer not-a-jwt')"
+  echo "  secure.local, no Authorization -> HTTP $c_none"
+  echo "  secure.local, garbage token    -> HTTP $c_garbage"
+  [ "$c_none" = 401 ]    || die "P2 FAIL: no-token got $c_none (expected 401)"
+  [ "$c_garbage" = 401 ] || die "P2 FAIL: garbage token got $c_garbage (expected 401)"
+  ok "P2 GREEN — secure.local without a valid JWT → 401 (no-token AND garbage)"
+
+  # ================= PROPERTY 3 — auth-service down -> fail-closed deny (red-first) ==========
+  section "PROPERTY 3 (red-first) — auth-service DOWN → fail-closed deny (failure_mode_allow:false)"
+  k -n "$INFRA_NS" scale deploy/auth-service --replicas=0 >/dev/null
+  k -n "$INFRA_NS" wait --for=delete pod -l app.kubernetes.io/name=auth-service --timeout=60s >/dev/null 2>&1 || true
+  sleep 3
+  local c_down; c_down="$(gw_code secure.local -H "Authorization: Bearer $TOK")"
+  echo "  secure.local + VALID JWT, auth-service DOWN -> HTTP $c_down"
+  [ "$c_down" != 200 ] || die "P3 FAIL: served 200 with auth-service DOWN — this would be fail-OPEN"
+  ok "P3 GREEN — with auth-service down, even a VALID JWT is DENIED ($c_down), never served (fail-closed)"
+
+  section "P3 recovery — scale auth-service back to 1"
+  k -n "$INFRA_NS" scale deploy/auth-service --replicas=1 >/dev/null
+  k -n "$INFRA_NS" rollout status deploy/auth-service --timeout=120s
+  local j=0 c_rec
+  while [ "$j" -lt 25 ]; do c_rec="$(gw_code secure.local -H "Authorization: Bearer $TOK")"; [ "$c_rec" = 200 ] && break; j=$((j + 1)); sleep 2; done
+  echo "  secure.local + VALID JWT, auth-service back -> HTTP $c_rec"
+  [ "$c_rec" = 200 ] || die "P3 FAIL: did not recover to 200 after auth-service returned (got $c_rec)"
+  ok "P3 recovery — auth-service back → secure.local + valid JWT → 200 again"
+
+  section "Phase 12 end state — ext_authz ON, secure.local(jwt) + tenant-a/b(none) all serving"
+  echo "    secure.local (jwt, valid token) -> HTTP $(gw_code secure.local -H "Authorization: Bearer $TOK")"
+  echo "    tenant-a.local (none, no token) -> HTTP $(gw_code tenant-a.local)"
+  echo "    tenant-b.local (none, no token) -> HTTP $(gw_code tenant-b.local)"
+  ok "Phase 12 (all four ext_authz properties) verified"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -740,7 +930,8 @@ main() {
   phase9_prove
   phase10_sec3_admission
   phase11_sec3_dataplane
-  section "up.sh: FULL STANDUP COMPLETE — routable gateway + SEC-3 live enforcement (both flips), ext_authz OFF."
+  phase12_extauthz_cutover
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 live enforcement + ext_authz LIVE (CFG-1 flip, four properties)."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

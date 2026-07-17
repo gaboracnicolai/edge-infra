@@ -1,0 +1,67 @@
+# Header-reflecting backend for the ext_authz proof (Phase 12).
+#
+# traefik/whoami echoes the REQUEST headers in its response body — so the identity
+# headers the auth-service injects on the OK path (x-user-id, x-user-email,
+# x-auth-iss, x-gateway-auth; all OverwriteIfExistsOrAdd) are visible in the curl
+# output. The Run-1 http-echo returns a static body and cannot show them.
+#
+# Reached via the seeded route secure.local (auth_policy='jwt'). No SEC-3
+# NetworkPolicy here — the ext_authz filter at the gateway is the control under
+# test, not the backend NetworkPolicy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-secure
+  labels: { part-of: edge-local, tenant: tenant-secure }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami
+  namespace: tenant-secure
+  labels: { app: whoami, part-of: edge-local }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: whoami }
+  template:
+    metadata:
+      labels: { app: whoami, part-of: edge-local }
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.4
+          args: ["--port", "80"]
+          ports: [{ name: http, containerPort: 80 }]
+          readinessProbe: { httpGet: { path: /health, port: http }, initialDelaySeconds: 2, periodSeconds: 3 }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami
+  namespace: tenant-secure
+  labels: { app: whoami, part-of: edge-local }
+spec:
+  selector: { app: whoami }
+  ports: [{ name: http, port: 80, targetPort: 80 }]
+---
+# In-cluster minter: an OpenSSL curl pod used to POST /login to the issuer. The
+# macOS system curl (LibreSSL) cannot TLS-handshake the issuer's Go server, and
+# this needs no host port-forward. Reaches edge-issuer.infra directly.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: minter
+  namespace: tenant-secure
+  labels: { app: minter, part-of: edge-local }
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "infinity"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits:   { cpu: 100m, memory: 64Mi }

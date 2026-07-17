@@ -36,6 +36,9 @@ ECHO_IMAGE="${ECHO_IMAGE:-hashicorp/http-echo:0.2.3}"
 # Attacker pod for the SEC-3 data-plane proof (Phase 11): a pod-network pod (NOT
 # hostNetwork) with curl, so its source IP is a POD IP outside NODE_CIDR.
 ATTACKER_IMAGE="${ATTACKER_IMAGE:-curlimages/curl:8.11.1}"
+# Header-reflecting backend for the ext_authz proof (Phase 12): whoami echoes the
+# request headers so the auth-service's injected identity headers are visible.
+WHOAMI_IMAGE="${WHOAMI_IMAGE:-traefik/whoami:v1.10.4}"
 
 # ---- logging -----------------------------------------------------------------
 if [ -t 1 ]; then
@@ -62,6 +65,12 @@ h() { helm --kube-context "$KUBE_CONTEXT" "$@"; }
 # ---- waiters -----------------------------------------------------------------
 # retry <tries> <sleep-seconds> <cmd...>
 retry() { local n="$1" s="$2"; shift 2; local i; for ((i=1; i<=n; i++)); do "$@" && return 0; sleep "$s"; done; return 1; }
+
+# gw_code <host> [extra curl args...] — HTTP status of a request through the node
+# :443 for the given Host. gw_body returns the response body. (Empty "$@" is safe
+# under set -u — only *named* arrays trip it, not the positional list.)
+gw_code() { local host="$1"; shift; curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H "Host: $host" "$@" http://127.0.0.1:443/ 2>/dev/null || true; }
+gw_body() { local host="$1"; shift; curl -s --max-time 6 -H "Host: $host" "$@" http://127.0.0.1:443/ 2>/dev/null || true; }
 
 # has <haystack> <needle> — substring test with NO pipe. Deliberately avoids
 # `printf "$big" | grep -q`: with `set -o pipefail`, grep -q exits on first match
@@ -99,6 +108,10 @@ apply_secret() {
   local ns="$1" typ="$2" name="$3"; shift 3
   k -n "$ns" create secret "$typ" "$name" "$@" --dry-run=client -o yaml | k apply -f -
 }
+
+# ep_pod — the current edge-proxy pod name (re-resolved each call, since a flip
+# rolls the DaemonSet and invalidates any cached name).
+ep_pod() { k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
 
 # envoy_config_dump <edge-proxy-pod> — fetch the Envoy admin /config_dump. The
 # admin is localhost-only in the pod (R7), so reach it via a short-lived
