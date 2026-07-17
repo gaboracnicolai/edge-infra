@@ -61,6 +61,7 @@ release is cleared before re-install.
 | 9 | **Prove** | A request per tenant through the node **:443** hostPort → 200 from the correct backend. |
 | 10 | **SEC-3 Property 1** (admission) | Applies the Kyverno guardrails (Enforce), then proves red-first: a NetworkPolicy allowing from an empty podSelector `{}` is **DENIED**; a NodePort backend Service is **DENIED**. |
 | 11 | **SEC-3 Property 2** (data-plane) | A pod-network attacker (IP outside NODE_CIDR) reaches each backend's ClusterIP with no policy (RED), then — after the resolved backend policy — is **dropped** while the node-`:443` gateway path stays **200** (two separate assertions). |
+| 12 | **CFG-1 flip + ext_authz LIVE** | Four properties, red-first: (P4) the CFG-1 guard refuses a jwt route while ext_authz is OFF; then the live flip; (P1) a real minted JWT → 200 + trusted identity-header injection (forged headers overwritten); (P2) no/invalid JWT → 401; (P3) auth-service down → fail-closed 403. |
 
 ## Topology
 
@@ -95,6 +96,15 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
   tunnel's pod-CIDR IP as source — which would NOT match a node-CIDR ipBlock allow,
   so the gateway would be dropped. kind nodes share one subnet, so `CrossSubnet`
   uses native routing and preserves the node IP as source.
+- **edge-proxy roll after an ext_authz flip** (CFG-1): the control-plane's xDS
+  snapshot version counter is per-process (non-HA), so it RESETS to `v1` when the
+  control-plane rolls on a flip. A still-connected edge-proxy holding a higher
+  version then rejects the new push as stale (`cds/lds update_failure`; the config
+  silently never applies). `helm_set_extauthz` rolls edge-proxy after every flip
+  so it reconnects fresh and applies the new config cleanly.
+- **In-cluster JWT minter** (Phase 12): the macOS system `curl` is LibreSSL and
+  cannot TLS-handshake the issuer's Go server, so the token is minted from an
+  in-cluster OpenSSL `curl` pod (`POST /login`) rather than a host port-forward.
 
 ## Configuration (env knobs, see `lib.sh`)
 
@@ -109,13 +119,13 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
 | `lib.sh` | Shared config + helpers (sourced; no side effects). |
 | `kind-config.yaml` | Multi-node cluster, default CNI disabled, publishes 80/443. |
 | `up.sh` / `down.sh` | Phase-by-phase standup / teardown. |
-| `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker. |
+| `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker, secure (whoami+minter) backend. |
 | `values/` | Per-chart local overlays (images + the adaptations above). |
 | `.pki-bootstrap/` | Generated admin PKI + KEK + signing key (gitignored). |
 
-## SEC-3 live enforcement (phases 10-11)
+## SEC-3 + ext_authz live enforcement (phases 10-12)
 
-Two properties, proven **red-first and separately**:
+### SEC-3 (phases 10-11) — two properties, proven **red-first and separately**:
 
 1. **Admission (Kyverno)** — the guardrails reject rules that would re-open the
    bypass/lateral-movement hole: a NetworkPolicy allowing from an empty
@@ -137,5 +147,36 @@ pod on a node would also match the node-CIDR allow. App-layer `x-gateway-auth`
 here is exactly: pod-network → backend is dropped; node-network (the gateway) →
 backend on the echo port is allowed.
 
-`ext_authz` stays OFF this run — its cutover (the edge-proxy→auth-service mTLS leg)
-is a separate run.
+### ext_authz cutover (phase 12) — four properties, red-first, one at a time
+
+`ext_authz` is **base-off + deliberate live flip** (the committed overlay stays
+`enabled:false`; the flip is `helm --set`). Before flipping, a **deny-all-trap
+gate**: auth-service Ready (⇒ JWKS-at-boot succeeded) AND edge-proxy actually has
+`/etc/authz-client-tls/ca.crt` mounted (no caFile ⇒ the ext_authz cluster renders
+plaintext ⇒ the fail-closed auth-service rejects it ⇒ deny-all). Flip only if both
+pass.
+
+1. **P4 CFG-1 guard** (pre-flip): a route with `auth_policy=jwt` while ext_authz is
+   OFF ⇒ the reconciler **refuses to publish** (an identity-bearing listener must
+   never serve open). The existing routes keep the last-good snapshot.
+2. **P1 valid JWT** ⇒ 200 + the auth-service injects trusted identity headers
+   (`x-user-id`, `x-user-email`, `x-auth-iss`, `x-user-teams`, `x-gateway-auth`);
+   a **client-forged** `x-user-email` is overwritten (OverwriteIfExistsOrAdd).
+3. **P2** no/invalid JWT ⇒ 401.
+4. **P3** auth-service down ⇒ **fail-closed 403** (`failure_mode_allow:false`);
+   recovers to 200.
+
+`none`-policy routes (tenant-a/b) are per-route ext_authz **Disabled**, so they keep
+serving without a token — the identity-header injection is only for the `jwt` route.
+
+**Rollback (safe):** a FULL revert — `--set extAuthz.enabled=false` **AND** remove
+the jwt route. Flipping `enabled=false` alone while the jwt route is present
+re-triggers the CFG-1 guard ⇒ deny-all. The end state is ext_authz **ON** with
+secure.local(jwt) + tenant-a/b(none) all serving.
+
+### Honesty — the SEC-3 precision ceiling still applies
+
+SEC-3's ipBlock allow lets **any** hostNetwork pod on a node reach a backend; it
+drops pod-network footholds (compromised app pod, SSRF, malicious sidecar) but does
+not make the gateway the only possible source. ext_authz's `x-gateway-auth`
+transit-proof is the app-layer backstop for gateway *identity* — now live.
