@@ -24,6 +24,7 @@
 #  10  SEC-3 Property 1 — Kyverno admission rejects open rules (red-first)
 #  11  SEC-3 Property 2 — Calico drops the bypass hop, gateway stays allowed
 #  12  CFG-1 flip + ext_authz LIVE — four properties, red-first, one at a time
+#  13  R8 fail-static inconsistent-snapshot guard (live, red-first)
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -910,6 +911,67 @@ phase12_extauthz_cutover() {
   ok "Phase 12 (all four ext_authz properties) verified"
 }
 
+# ---- Phase 13 — R8 fail-static inconsistent-snapshot guard (live) -----------
+# drop_ghost_route removes the injected dangling route (idempotent).
+drop_ghost_route() {
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 \
+    -c "DELETE FROM routes WHERE name='r8-ghost';" >/dev/null
+}
+
+phase13_inconsistent_guard() {
+  section "PHASE 13 — R8 fail-static inconsistent-snapshot guard (live, red-first)"
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  drop_ghost_route   # clean any prior injection (idempotent)
+
+  # RED baseline: a HEALTHY snapshot is serving (last-good exists); capture Envoy's
+  # route-config version so we can prove it does NOT advance.
+  section "RED baseline — tenant-a/b serve 200; capture Envoy route-config version"
+  local ca cb; ca="$(gw_code tenant-a.local)"; cb="$(gw_code tenant-b.local)"
+  { [ "$ca" = 200 ] && [ "$cb" = 200 ]; } || die "R8 baseline broken: tenant-a/b not both 200 ($ca/$cb)"
+  local before_ver; before_ver="$(envoy_config_dump "$(ep_pod)" | jq -r '[.configs[]?.dynamic_route_configs[]?.version_info]|sort|join(",")' 2>/dev/null)"
+  log "tenant-a=$ca tenant-b=$cb ; Envoy route-config version BEFORE: ${before_ver:-<none>}"
+
+  # Inject the inconsistency the guard reliably catches AND the data path can
+  # produce: a route -> a cluster with NO clusters row (dangling RDS->CDS, which
+  # Envoy's Consistent() misses but the widened R8 check blocks). auth_policy='none'
+  # so CFG-1 does NOT also fire. Injected AFTER a healthy snapshot exists.
+  section "inject a dangling route (r8-ghost -> a nonexistent cluster) via the data path"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -f - <<'SQL' >/dev/null
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('r8-ghost','r8-ghost','local-gw',ARRAY['r8-ghost.local']::text[],'/','r8-ghost-cluster-absent',30,'none',NULL)
+ON CONFLICT (name) DO UPDATE SET cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,deleted_at=NULL,updated_at=now();
+SQL
+  sleep 10   # let the reconciler poll (~5s) + hit the guard
+
+  # GREEN (fail-static, LIVE): the control-plane REFUSED — its log carries the
+  # refusal + blocked_total (the InconsistentSnapshotsBlocked counter); Envoy's
+  # route-config version did not advance; the bad route is ABSENT from Envoy;
+  # tenant-a/b STILL serve 200.
+  section "GREEN — control-plane REFUSED; last-good retained"
+  echo "  control-plane refusal log (carries blocked_total = the counter):"
+  k -n "$INFRA_NS" logs deploy/edge-control-plane --tail=120 2>/dev/null \
+    | grep -aiE 'refusing to publish inconsistent snapshot|absent from CDS|blocked_total' | tail -1 | sed 's/^/    /' \
+    || die "R8 FAIL: no 'refusing to publish inconsistent snapshot' log — the guard did not fire (control-plane lacks the R8 widening?)"
+  local dump after_ver
+  dump="$(envoy_config_dump "$(ep_pod)")"
+  after_ver="$(printf '%s' "$dump" | jq -r '[.configs[]?.dynamic_route_configs[]?.version_info]|sort|join(",")' 2>/dev/null)"
+  log "Envoy route-config version AFTER: ${after_ver:-<none>}"
+  has "$dump" r8-ghost && die "R8 FAIL: the dangling route r8-ghost IS in Envoy — the inconsistent snapshot was published"
+  [ "$before_ver" = "$after_ver" ] && ok "Envoy route-config version did NOT advance ($after_ver)" \
+    || warn "route-config version changed ($before_ver -> $after_ver) — but r8-ghost is absent (asserted above)"
+  local ca2 cb2; ca2="$(gw_code tenant-a.local)"; cb2="$(gw_code tenant-b.local)"
+  { [ "$ca2" = 200 ] && [ "$cb2" = 200 ]; } || die "R8 FAIL: tenant-a/b broke under the inconsistent snapshot ($ca2/$cb2)"
+  ok "GREEN — r8-ghost ABSENT from Envoy; version unchanged; tenant-a=$ca2 tenant-b=$cb2 (last-good served)"
+
+  # Clean up so the phase leaves a consistent, re-runnable state.
+  section "cleanup — remove the dangling route; confirm the reconciler resumes"
+  drop_ghost_route
+  local i=0
+  while [ "$i" -lt 15 ]; do [ "$(gw_code tenant-a.local)" = 200 ] && break; i=$((i + 1)); sleep 2; done
+  ok "Phase 13 (R8 inconsistent guard) verified — cleaned up; tenant-a/b serving"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -931,7 +993,8 @@ main() {
   phase10_sec3_admission
   phase11_sec3_dataplane
   phase12_extauthz_cutover
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 live enforcement + ext_authz LIVE (CFG-1 flip, four properties)."
+  phase13_inconsistent_guard
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
