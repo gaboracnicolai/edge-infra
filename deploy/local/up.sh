@@ -972,6 +972,87 @@ SQL
   ok "Phase 13 (R8 inconsistent guard) verified — cleaned up; tenant-a/b serving"
 }
 
+# ---- Phase 14 — fail-static guard counters exported as metrics (live) --------
+# inject_ghost_route inserts the dangling route (r8-ghost -> a nonexistent
+# cluster) via the data path so the reconciler's inconsistent-snapshot guard
+# trips. Same injection phase 13 uses; paired with drop_ghost_route.
+inject_ghost_route() {
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -f - <<'SQL' >/dev/null
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('r8-ghost','r8-ghost','local-gw',ARRAY['r8-ghost.local']::text[],'/','r8-ghost-cluster-absent',30,'none',NULL)
+ON CONFLICT (name) DO UPDATE SET cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,deleted_at=NULL,updated_at=now();
+SQL
+}
+
+# cp_scrape — the control-plane's /metrics text (fail-static guard counters) via a
+# short-lived port-forward to :2112 (the port the edge-control-plane chart declares
+# and Prometheus scrapes). Plain HTTP, so host curl (macOS LibreSSL) is fine.
+# Port-forward routes through the API server, so SEC-3 NetworkPolicies don't apply.
+# Echoes the exposition; empty on failure.
+cp_scrape() {
+  local lp="${CP_METRICS_LP:-12112}" pid out i=0
+  k -n "$INFRA_NS" port-forward deploy/edge-control-plane "${lp}:2112" >/dev/null 2>&1 &
+  pid=$!
+  while [ "$i" -lt 20 ]; do
+    out="$(curl -s --max-time 4 "http://127.0.0.1:${lp}/metrics" 2>/dev/null || true)"
+    [ -n "$out" ] && break
+    i=$((i + 1)); sleep 1
+  done
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" 2>/dev/null || true
+  printf '%s' "$out"
+}
+
+# blocked_of <metrics-text> <reason> — value of the
+# xds_snapshots_blocked_total{reason="<reason>"} series in the given exposition
+# (empty if the series is absent). The {reason=...} match skips the # HELP/# TYPE
+# lines, and the tiny doc makes the pipe SIGPIPE-safe.
+blocked_of() {
+  printf '%s\n' "$1" | grep -F "xds_snapshots_blocked_total{reason=\"$2\"}" | awk '{print $NF}' | tail -1
+}
+
+phase14_failstatic_metrics() {
+  section "PHASE 14 — fail-static guard counters exported as metrics (live, red-first)"
+  drop_ghost_route   # clean slate
+
+  # The metrics endpoint must be LIVE on :2112 — before this change nothing bound
+  # it, so the chart's already-configured Prometheus scrape got connection-refused.
+  section "scrape the control-plane /metrics on :2112 (the chart's declared scrape target)"
+  local m0; m0="$(cp_scrape)"
+  [ -n "$m0" ] || die "PHASE14 FAIL: /metrics on :2112 returned nothing — the metrics server is not serving (connection refused?)"
+  has "$m0" "xds_snapshots_blocked_total" || die "PHASE14 FAIL: xds_snapshots_blocked_total absent from the live /metrics"
+  echo "  live fail-static series:"; printf '%s\n' "$m0" | grep -F "xds_snapshots_blocked_total{" | sed 's/^/    /'
+
+  # RED baseline: capture the inconsistent-reason counter on the running process.
+  local before; before="$(blocked_of "$m0" inconsistent)"
+  [ -n "$before" ] || die "PHASE14 FAIL: the inconsistent series is absent (it must exist from t=0)"
+  log "baseline  xds_snapshots_blocked_total{reason=\"inconsistent\"} = $before"
+
+  # Trip the guard on the ACTUAL control-plane: inject a dangling route
+  # (auth_policy=none so CFG-1 does not also fire). The reconciler withholds the
+  # publish and increments the counter each poll while it is present.
+  section "inject a dangling route (r8-ghost -> absent cluster) to trip the guard"
+  inject_ghost_route
+  sleep 10   # reconciler poll (~5s) + guard trip
+
+  # GREEN: the exported counter ROSE on the live control-plane.
+  section "GREEN — the exported counter ROSE (prod can alert on this)"
+  local m1 after; m1="$(cp_scrape)"; after="$(blocked_of "$m1" inconsistent)"
+  [ -n "$after" ] || die "PHASE14 FAIL: could not read the inconsistent counter after injection"
+  log "after     xds_snapshots_blocked_total{reason=\"inconsistent\"} = $after"
+  awk -v a="$before" -v b="$after" 'BEGIN{exit !(b>a)}' \
+    || { drop_ghost_route; die "PHASE14 FAIL: the inconsistent counter did NOT rise ($before -> $after) — the metric is not wired to the guard"; }
+  ok "GREEN — xds_snapshots_blocked_total{reason=\"inconsistent\"} rose $before -> $after on the live control-plane"
+
+  # Cleanup so the phase leaves a consistent, re-runnable state.
+  section "cleanup — remove the dangling route; confirm serving resumes"
+  drop_ghost_route
+  local i=0
+  while [ "$i" -lt 15 ]; do [ "$(gw_code tenant-a.local)" = 200 ] && break; i=$((i + 1)); sleep 2; done
+  ok "Phase 14 (fail-static metrics) verified — cleaned up; tenant-a/b serving"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -994,7 +1075,8 @@ main() {
   phase11_sec3_dataplane
   phase12_extauthz_cutover
   phase13_inconsistent_guard
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard."
+  phase14_failstatic_metrics
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
