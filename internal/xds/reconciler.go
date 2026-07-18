@@ -48,6 +48,16 @@ type Reconciler struct {
 	// ext_authz was globally disabled (so auth could not be enforced). A loud
 	// signal — never a silent bypass.
 	authWantedButExtAuthzOff atomic.Uint64
+
+	// First-boot degraded-PUBLISH counters — distinct from the *Blocked guard
+	// counters above. On first boot (prev == nil) the empty-collapse and
+	// inconsistent guards are EXEMPT and the bad config IS published so a fresh edge
+	// can come up. That is the one path where bad config actually reaches Envoy;
+	// these count those publishes so it is observable (surfaced as
+	// xds_snapshots_published_degraded_total, NOT xds_snapshots_blocked_total —
+	// nothing was blocked).
+	emptyFirstBootPublished        atomic.Uint64
+	inconsistentFirstBootPublished atomic.Uint64
 }
 
 type reconcileResult struct {
@@ -140,6 +150,21 @@ func (r *Reconciler) EmptySnapshotsBlocked() uint64 {
 // auth while ext_authz was globally disabled. Exposed for tests and metrics.
 func (r *Reconciler) AuthWantedButExtAuthzOff() uint64 {
 	return r.authWantedButExtAuthzOff.Load()
+}
+
+// EmptyFirstBootPublished reports how many times a first-boot reconcile (no
+// last-good) PUBLISHED an empty snapshot (zero listeners or clusters) under the
+// empty-collapse guard's first-boot exemption — a degraded publish, not a block.
+func (r *Reconciler) EmptyFirstBootPublished() uint64 {
+	return r.emptyFirstBootPublished.Load()
+}
+
+// InconsistentFirstBootPublished reports how many times a first-boot reconcile (no
+// last-good) PUBLISHED an internally inconsistent snapshot (dangling route/cluster)
+// under the consistency guard's first-boot exemption — a degraded publish, not a
+// block.
+func (r *Reconciler) InconsistentFirstBootPublished() uint64 {
+	return r.inconsistentFirstBootPublished.Load()
 }
 
 // allowEmptySnapshot reports whether the empty-collapse guard is disabled via
@@ -255,19 +280,35 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	//
 	// TODO(f1-follow-up): widen the floor from "zero" to "collapsed far below
 	// last-good" (e.g. refuse if new listeners/clusters < ~50% of prev counts).
-	if prev != nil && !r.allowEmpty {
-		nListeners := len(resources[resourcev3.ListenerType])
-		nClusters := len(resources[resourcev3.ClusterType])
-		if nListeners == 0 || nClusters == 0 {
-			r.emptySnapshotsBlocked.Add(1)
-			r.log.Error("refusing to publish empty snapshot; keeping last-good config",
-				"new_listeners", nListeners,
-				"new_clusters", nClusters,
-				"last_good_version", prev.Version,
-				"blocked_total", r.emptySnapshotsBlocked.Load(),
-			)
-			return nil
-		}
+	nListeners := len(resources[resourcev3.ListenerType])
+	nClusters := len(resources[resourcev3.ClusterType])
+	emptySnapshot := nListeners == 0 || nClusters == 0
+
+	if prev != nil && !r.allowEmpty && emptySnapshot {
+		r.emptySnapshotsBlocked.Add(1)
+		r.log.Error("refusing to publish empty snapshot; keeping last-good config",
+			"new_listeners", nListeners,
+			"new_clusters", nClusters,
+			"last_good_version", prev.Version,
+			"blocked_total", r.emptySnapshotsBlocked.Load(),
+		)
+		return nil
+	}
+
+	// First-boot empty exemption (prev == nil): an empty snapshot IS published so a
+	// fresh edge can come up — but that removes every listener/cluster on the proxies,
+	// the least-observable degraded state in the reconciler (an empty snapshot is also
+	// internally consistent, so the inconsistency warn below never fires for it).
+	// Publish-anyway behaviour is unchanged; we only make it VISIBLE (warn + counter).
+	// Note: EDGE_ALLOW_EMPTY_SNAPSHOT with prev != nil stays intentionally silent — an
+	// operator opt-out, unchanged here.
+	if prev == nil && emptySnapshot {
+		r.emptyFirstBootPublished.Add(1)
+		r.log.Warn("first snapshot is empty (no listeners or clusters); publishing (no last-good yet)",
+			"new_listeners", nListeners,
+			"new_clusters", nClusters,
+			"degraded_total", r.emptyFirstBootPublished.Load(),
+		)
 	}
 
 	version, err := r.resolveVersion(ctx, hash)
@@ -295,7 +336,15 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		return nil
 	}
 	if cErr := snapshotConsistencyError(snap); cErr != nil {
-		r.log.Warn("first snapshot not internally consistent; publishing (no last-good yet)", "err", cErr)
+		// Reached only on first boot (prev == nil): when a last-good exists the block
+		// above returns first. The inconsistent snapshot IS published so a fresh edge
+		// can come up, but a dangling route/cluster will blackhole that traffic —
+		// count it so this degraded publish is observable, not just logged.
+		r.inconsistentFirstBootPublished.Add(1)
+		r.log.Warn("first snapshot not internally consistent; publishing (no last-good yet)",
+			"err", cErr,
+			"degraded_total", r.inconsistentFirstBootPublished.Load(),
+		)
 	}
 
 	nodes := r.targetNodes()
