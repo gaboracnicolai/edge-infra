@@ -1,3 +1,14 @@
+# NOTE: source-of-truth copy; the SAME rules are inlined in
+# observability/k8s/prometheus/configmap.yaml (ConfigMap `prometheus-alerts`,
+# key `osb.yaml`) — the copy Prometheus actually mounts. Keep in sync.
+#
+# REMOVED (edge-observability-truth): OSBNATSConsumerLagHigh referenced
+# nats_consumer_num_pending, which NOTHING emits — the NATS server (svc nats:8222)
+# is not scraped and no prometheus-nats-exporter is deployed; the collector has no
+# NATS job and osb/metrics.py exposes no queue-depth gauge. The rule could never fire.
+# FOLLOW-UP (worth doing): worker consumer lag is a real incident signal — add
+# either a prometheus-nats-exporter + scrape job, or an osb-emitted pending-count
+# gauge, then restore this alert alongside the emitter.
 groups:
   - name: edge-osb
     interval: 30s
@@ -32,12 +43,3 @@ groups:
           team: edge
         annotations:
           summary: "OSB webhook delivery failure rate > 10%"
-
-      - alert: OSBNATSConsumerLagHigh
-        expr: nats_consumer_num_pending{consumer="osb-workers"} > 100
-        for: 5m
-        labels:
-          severity: warning
-          team: edge
-        annotations:
-          summary: "OSB NATS consumer lag > 100 messages"

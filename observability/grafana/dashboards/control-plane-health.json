@@ -9,63 +9,54 @@
   "panels": [
     {
       "type": "stat",
-      "title": "Time since last reconcile",
+      "title": "xDS snapshots blocked (total, all reasons)",
+      "description": "Cumulative fail-static/fail-closed guard trips: reconciles where the control plane withheld a new xDS snapshot and kept last-good config. Source: xds_snapshots_blocked_total (internal/xds/metrics.go).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "time() - edge_cp_last_reconcile_timestamp_seconds", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 30}, {"color": "red", "value": 60}]}}, "overrides": []},
+      "targets": [{"expr": "sum(xds_snapshots_blocked_total)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
     },
     {
       "type": "stat",
-      "title": "DB pool idle connections",
+      "title": "Blocked in last 10m (pages)",
+      "description": "Matches the ControlPlaneSnapshotWithheld alert: increase(xds_snapshots_blocked_total[10m]).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 0},
       "id": 2,
-      "targets": [{"expr": "sum(edge_cp_db_pool_idle)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [{"expr": "sum(increase(xds_snapshots_blocked_total[10m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
     },
     {
       "type": "stat",
-      "title": "DB pool waiting queries",
+      "title": "Reasons blocked (10m)",
+      "description": "How many distinct block reasons (empty / inconsistent / auth_wanted_extauthz_off) tripped in the last 10m.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
       "id": 3,
-      "targets": [{"expr": "sum(edge_cp_db_pool_waiting)", "refId": "A"}],
+      "targets": [{"expr": "count(increase(xds_snapshots_blocked_total[10m]) > 0) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
     },
     {
       "type": "timeseries",
-      "title": "Reconcile duration P99",
+      "title": "xDS snapshots blocked by reason (10m increase)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
       "id": 4,
-      "targets": [{"expr": "histogram_quantile(0.99, rate(edge_cp_reconcile_duration_seconds_bucket[5m]))", "legendFormat": "p99", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "sum by (reason) (increase(xds_snapshots_blocked_total[10m]))", "legendFormat": "{{reason}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
     },
     {
-      "type": "timeseries",
-      "title": "Snapshot version by node",
+      "type": "text",
+      "title": "Removed panels — no backing metric",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 12},
       "id": 5,
-      "targets": [{"expr": "edge_cp_snapshot_version", "legendFormat": "{{node}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
-    },
-    {
-      "type": "timeseries",
-      "title": "Active gRPC streams",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
-      "id": 6,
-      "targets": [{"expr": "sum(edge_cp_grpc_streams_active)", "legendFormat": "streams", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+      "options": {"mode": "markdown", "content": "The former panels (time-since-reconcile, DB pool idle/waiting, reconcile-duration P99, snapshot-version-by-node, active gRPC streams) queried `edge_cp_*` metrics that **no service emits** — the control-plane `/metrics` endpoint (`internal/xds/metrics.go`) exposes **only** `xds_snapshots_blocked_total`. They were removed in PR `edge-observability-truth` because they could never render data. **Follow-up:** restore each panel in the same change that adds its emitter (`edge_cp_reconcile_duration_seconds`, `edge_cp_snapshot_version`, `edge_cp_db_pool_idle`/`_waiting`, `edge_cp_grpc_streams_active`)."}
     }
   ],
   "refresh": "30s",
@@ -78,6 +69,6 @@
   "timezone": "",
   "title": "Control Plane Health",
   "uid": "edge-control-plane-health",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

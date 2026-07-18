@@ -10,6 +10,14 @@ receivers:
     config:
       scrape_configs:
         - job_name: envoy
+          # edge-proxy exposes Prometheus stats on the STATIC :9903 listener at
+          # /stats/prometheus (deploy/helm/edge-proxy/templates/configmap.yaml stats
+          # listener, address 0.0.0.0:9903 -> route /stats/prometheus -> admin_stats;
+          # daemonset.yaml containerPort 9903). :9901 is Envoy's admin, bound
+          # 127.0.0.1-only, and serves /stats/prometheus NOT /metrics — scraping
+          # <ip>:9901/metrics gets connection-refused, so this job was collecting
+          # nothing. Match the chart's prometheus.io annotations (:9903, /stats/prometheus).
+          metrics_path: /stats/prometheus
           kubernetes_sd_configs:
             - role: pod
           relabel_configs:
@@ -18,7 +26,7 @@ receivers:
               action: keep
             - source_labels: [__meta_kubernetes_pod_ip]
               target_label: __address__
-              replacement: "$$1:9901"
+              replacement: "$$1:9903"
 
         - job_name: edge-control-plane
           kubernetes_sd_configs:
@@ -32,11 +40,20 @@ receivers:
               replacement: "$$1:2112"
 
         - job_name: edge-osb
+          # Only the api (broker) pods serve /metrics on :8080. The worker pods share
+          # app=edge-osb but run no HTTP server (osb/metrics.py: "only the broker
+          # process exposes /metrics"), so without this second keep the worker is a
+          # guaranteed scrape error. component=api is set by the osb chart
+          # (deploy/helm/edge-osb/templates/deployment.yaml label component: api;
+          # the worker gets component: worker).
           kubernetes_sd_configs:
             - role: pod
           relabel_configs:
             - source_labels: [__meta_kubernetes_pod_label_app]
               regex: edge-osb
+              action: keep
+            - source_labels: [__meta_kubernetes_pod_label_component]
+              regex: api
               action: keep
             - source_labels: [__meta_kubernetes_pod_ip]
               target_label: __address__

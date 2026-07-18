@@ -29,12 +29,13 @@
     },
     {
       "type": "stat",
-      "title": "Snapshot version lag",
+      "title": "xDS snapshots blocked (10m)",
+      "description": "Reconciles where the control plane withheld a new xDS snapshot in the last 10m (fail-static guard, xds_snapshots_blocked_total). Replaces the former 'Snapshot version lag' panel, whose edge_cp_snapshot_version metric had no emitter.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "id": 3,
-      "targets": [{"expr": "max(edge_cp_snapshot_version) - min(edge_cp_snapshot_version)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "targets": [{"expr": "sum(increase(xds_snapshots_blocked_total[10m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
     },
     {
@@ -43,7 +44,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
       "id": 4,
-      "targets": [{"expr": "edge:upstream_rps:rate5m", "legendFormat": "{{cluster_name}}", "refId": "A"}],
+      "targets": [{"expr": "edge:upstream_rps:rate5m", "legendFormat": "{{envoy_cluster_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
     },
@@ -53,7 +54,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
       "id": 5,
-      "targets": [{"expr": "edge:upstream_error_ratio:rate5m", "legendFormat": "{{cluster_name}}", "refId": "A"}],
+      "targets": [{"expr": "edge:upstream_error_ratio:rate5m", "legendFormat": "{{envoy_cluster_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
     },

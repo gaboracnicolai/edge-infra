@@ -1,20 +1,28 @@
+# NOTE: source-of-truth copy. The SAME rules are inlined in
+# observability/k8s/prometheus/configmap.yaml (ConfigMap `prometheus-config`,
+# key `recording-rules.yaml`) — that inlined copy is the one Prometheus mounts.
+# Keep both in sync.
+#
+# Envoy labels are `envoy_cluster_name` / `envoy_response_code_class` (verified
+# live). Recording rules therefore emit series keyed by `envoy_cluster_name`;
+# dashboards that legend on these must use {{envoy_cluster_name}}.
 groups:
   - name: edge-recording-rules
     interval: 30s
     rules:
       - record: edge:upstream_error_ratio:rate5m
         expr: |
-          sum by (cluster_name) (
-            rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+          sum by (envoy_cluster_name) (
+            rate(envoy_cluster_upstream_rq_xx{envoy_response_code_class="5"}[5m])
           )
           /
-          sum by (cluster_name) (
+          sum by (envoy_cluster_name) (
             rate(envoy_cluster_upstream_rq_total[5m])
           )
 
       - record: edge:upstream_rps:rate5m
         expr: |
-          sum by (cluster_name) (
+          sum by (envoy_cluster_name) (
             rate(envoy_cluster_upstream_rq_total[5m])
           )
 

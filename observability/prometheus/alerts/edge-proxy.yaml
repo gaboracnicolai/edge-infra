@@ -1,3 +1,14 @@
+# NOTE: this file is the source-of-truth copy. The SAME rules are inlined in
+# observability/k8s/prometheus/configmap.yaml (ConfigMap `prometheus-alerts`,
+# key `edge-proxy.yaml`) — that inlined copy is the one Prometheus actually
+# mounts (see observability/k8s/prometheus/deployment.yaml, volume `alerts`).
+# Keep the rule logic in both copies in sync. (A generator would need the
+# out-of-scope Makefile/deploy path; until then, edit both.)
+#
+# Envoy's Prometheus exposition labels the response class and cluster as
+# `envoy_response_code_class` and `envoy_cluster_name` (verified live against
+# edge-proxy :9903 /stats/prometheus). Bare `response_code_class` / `cluster_name`
+# match nothing.
 groups:
   - name: edge-proxy
     interval: 30s
@@ -19,11 +30,11 @@ groups:
       - alert: EnvoyHighErrorRate
         expr: |
           (
-            sum by (cluster_name) (
-              rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+            sum by (envoy_cluster_name) (
+              rate(envoy_cluster_upstream_rq_xx{envoy_response_code_class="5"}[5m])
             )
             /
-            sum by (cluster_name) (
+            sum by (envoy_cluster_name) (
               rate(envoy_cluster_upstream_rq_total[5m])
             )
           ) > 0.01
@@ -32,15 +43,15 @@ groups:
           severity: warning
           team: edge
         annotations:
-          summary: "High 5xx rate on cluster {{ $labels.cluster_name }}"
+          summary: "High 5xx rate on cluster {{ $labels.envoy_cluster_name }}"
           description: >
-            Cluster {{ $labels.cluster_name }} is returning 5xx errors
+            Cluster {{ $labels.envoy_cluster_name }} is returning 5xx errors
             at {{ $value | humanizePercentage }} over the last 5m.
 
       - alert: EnvoyHighP99Latency
         expr: |
           histogram_quantile(0.99,
-            sum by (le, cluster_name) (
+            sum by (le, envoy_cluster_name) (
               rate(envoy_cluster_upstream_rq_time_bucket[5m])
             )
           ) > 2000
@@ -49,9 +60,9 @@ groups:
           severity: warning
           team: edge
         annotations:
-          summary: "P99 latency > 2s on {{ $labels.cluster_name }}"
+          summary: "P99 latency > 2s on {{ $labels.envoy_cluster_name }}"
           description: >
-            P99 upstream latency for {{ $labels.cluster_name }} is
+            P99 upstream latency for {{ $labels.envoy_cluster_name }} is
             {{ $value | humanizeDuration }}ms over the last 10 minutes.
 
       - alert: EnvoyProxyFleetShrinking
@@ -71,7 +82,7 @@ groups:
 
       - alert: EnvoyCircuitBreakerOpen
         expr: |
-          sum by (cluster_name) (
+          sum by (envoy_cluster_name) (
             envoy_cluster_circuit_breakers_default_cx_open
           ) > 0
         for: 1m
@@ -79,4 +90,4 @@ groups:
           severity: warning
           team: edge
         annotations:
-          summary: "Circuit breaker open on {{ $labels.cluster_name }}"
+          summary: "Circuit breaker open on {{ $labels.envoy_cluster_name }}"

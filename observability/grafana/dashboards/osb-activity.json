@@ -8,16 +8,6 @@
   "liveNow": false,
   "panels": [
     {
-      "type": "stat",
-      "title": "NATS consumer pending",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
-      "id": 1,
-      "targets": [{"expr": "max(nats_consumer_num_pending{consumer=\"osb-workers\"})", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 50}, {"color": "red", "value": 100}]}}, "overrides": []},
-      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
-    },
-    {
       "type": "timeseries",
       "title": "Provision requests/s by operation",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
