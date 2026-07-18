@@ -42,8 +42,11 @@ a `default-deny-ingress` policy plus an `allow-from-gateway` policy.
 
 1. Ensure the admission policy is installed cluster-wide (Kyverno running).
 2. Deploy the backend with a **ClusterIP** Service only.
-3. Apply `backend-network-policies.yaml` with `<backend-ns>` and `<NODE_CIDR>`
-   filled in.
+3. **Run [`scripts/sec3-preflight.sh`](../scripts/sec3-preflight.sh) first** — it
+   confirms the cluster preserves the node IP as source, so the `ipBlock` allow
+   won't drop the gateway. See [`docs/sec3-preflight.md`](./sec3-preflight.md).
+   Then apply `backend-network-policies.yaml` with `<backend-ns>` and `<NODE_CIDR>`
+   filled in (and the real backend container port, not the template's `8080`).
 4. Confirm the backend has no Ingress/Gateway resource exposing it outside the
    `edge-proxy` route table.
 
