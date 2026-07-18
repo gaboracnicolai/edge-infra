@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +59,21 @@ type Reconciler struct {
 	// nothing was blocked).
 	emptyFirstBootPublished        atomic.Uint64
 	inconsistentFirstBootPublished atomic.Uint64
+
+	// Observability (additive; read by the metrics collector). NONE of these affect
+	// a guard or publish decision — they only describe what the reconciler did.
+	lastReconcileUnix  atomic.Int64 // unix seconds of the last successful reconcile
+	lastReconcileNanos atomic.Int64 // duration of the last reconcile, in nanoseconds
+	activeStreams      atomic.Int64 // currently-open xDS (ADS) gRPC streams
+
+	// nodeAcks tracks, per connected node, the last xDS (CDS) version_info the node
+	// ACKed. NodesBehind compares it to the current published version to count nodes
+	// that have NOT acknowledged it — the delivery-divergence signal that
+	// xds_snapshots_blocked_total is blind to (the control-plane publishes
+	// successfully; only DELIVERY to a node is withheld, e.g. the #47 version
+	// collision). Populated by the server callbacks; keyed by node id.
+	ackMu    sync.Mutex
+	nodeAcks map[string]string
 }
 
 type reconcileResult struct {
@@ -78,6 +94,7 @@ func NewReconciler(c cachev3.SnapshotCache, s store.Store, nodeID string, log *s
 		log:        log,
 		triggerCh:  make(chan struct{}, 1),
 		allowEmpty: allowEmptySnapshot(),
+		nodeAcks:   make(map[string]string),
 	}
 }
 
@@ -216,7 +233,18 @@ func (r *Reconciler) TriggerNow() {
 
 // Reconcile loads the latest store snapshot, builds xDS resources and pushes
 // them to the cache when the resource set has actually changed.
-func (r *Reconciler) Reconcile(ctx context.Context) error {
+func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
+	// Observability only: record when the reconcile loop last completed without error
+	// (loop-liveness, incl. the fast-path and guard-block return-nil paths) and how
+	// long it took. Never affects the outcome.
+	start := time.Now()
+	defer func() {
+		if err == nil {
+			r.lastReconcileUnix.Store(time.Now().Unix())
+			r.lastReconcileNanos.Store(time.Since(start).Nanoseconds())
+		}
+	}()
+
 	domain, err := r.store.LoadSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("load snapshot: %w", err)

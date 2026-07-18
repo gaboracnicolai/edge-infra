@@ -144,14 +144,16 @@ data:
       - name: edge-control-plane
         interval: 30s
         rules:
-          # REMOVED (edge-observability-truth): ControlPlaneReconcileStalled,
-          # ControlPlaneHighReconcileDuration, ControlPlaneSnapshotVersionLag,
-          # ControlPlaneDBConnectionsExhausted referenced edge_cp_* metrics that NO
-          # service emits (control-plane /metrics = internal/xds/metrics.go exposes
-          # xds_snapshots_blocked_total + xds_snapshots_published_degraded_total) and
-          # could never fire. See FOLLOW-UP in
-          # observability/prometheus/alerts/control-plane.yaml (source-of-truth copy;
-          # keep this key in sync with it).
+          # RESTORED here (emitters landed in the same change): ControlPlaneReconcileStalled
+          # + ControlPlaneHighReconcileDuration, plus the NEW ControlPlaneConfigDivergence.
+          # control-plane /metrics (internal/xds/metrics.go) now exposes
+          # xds_snapshots_blocked_total, xds_snapshots_published_degraded_total, and
+          # edge_cp_{last_reconcile_timestamp_seconds,reconcile_duration_seconds,grpc_streams_active,nodes_behind}.
+          # STILL REMOVED (no reachable emitter): ControlPlaneSnapshotVersionLag (numeric
+          # edge_cp_snapshot_version is meaningless now versions are content hashes, #47 —
+          # ControlPlaneConfigDivergence supersedes it) and ControlPlaneDBConnectionsExhausted
+          # (pgxpool.Stat() is hidden behind the store interfaces; out of scope). See the
+          # source-of-truth copy observability/prometheus/alerts/control-plane.yaml; keep in sync.
           - alert: ControlPlaneSnapshotWithheld
             expr: increase(xds_snapshots_blocked_total[10m]) > 0
             for: 0m
@@ -192,6 +194,60 @@ data:
                 listeners/clusters absent; inconsistent_first_boot = a dangling route/cluster
                 blackholes traffic). Confirm the edge booted on the intended config.
               runbook: https://runbooks.internal/edge/degraded-publish
+
+          # Reconcile loop liveness (RESTORED; emitter edge_cp_last_reconcile_timestamp_seconds).
+          # The loop has not completed a cycle in over a minute — wedged or crashed, so config
+          # changes are not reaching the fleet. A guard-block still counts as a completed
+          # reconcile, so this is loop-death, not config-health (the alerts above).
+          - alert: ControlPlaneReconcileStalled
+            expr: time() - edge_cp_last_reconcile_timestamp_seconds > 60
+            for: 1m
+            labels:
+              severity: critical
+              team: edge
+            annotations:
+              summary: "Control-plane reconcile loop stalled"
+              description: >
+                No successful reconcile in {{ $value | humanizeDuration }} — config changes
+                are not being pushed to the Envoy fleet.
+              runbook: https://runbooks.internal/edge/reconcile-stalled
+
+          # Reconcile latency (RESTORED; emitter edge_cp_reconcile_duration_seconds, a
+          # last-value gauge — so the original broken rate(..._bucket[5m]) expr is replaced
+          # with a direct threshold). Seconds-long reconciles point at DB slowness or an
+          # oversized snapshot.
+          - alert: ControlPlaneHighReconcileDuration
+            expr: edge_cp_reconcile_duration_seconds > 2
+            for: 10m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "Control-plane reconcile is slow"
+              description: >
+                The last reconcile took {{ $value | humanizeDuration }} (> 2s) for 10m —
+                check DB latency and snapshot size.
+              runbook: https://runbooks.internal/edge/reconcile-slow
+
+          # Delivery divergence (NEW) — the regression tripwire for the #47 version-collision
+          # class. edge_cp_nodes_behind counts connected proxies whose last-ACKed xDS version
+          # is not the current published one. xds_snapshots_blocked_total is BLIND to this:
+          # the control-plane publishes successfully; only DELIVERY to the node is withheld.
+          # `for: 2m` is the in-flight-vs-stuck threshold — a proxy briefly behind just after
+          # a config change is normal; behind for 2m (many reconcile intervals) is the bug.
+          - alert: ControlPlaneConfigDivergence
+            expr: edge_cp_nodes_behind > 0
+            for: 2m
+            labels:
+              severity: critical
+              team: edge
+            annotations:
+              summary: "Envoy proxies have not acknowledged the published config"
+              description: >
+                {{ $value }} connected proxy/proxies have not ACKed the current published
+                xDS version for 2m — the control-plane published but delivery is withheld
+                (cf. the #47 version-collision class). New/changed routes are not live there.
+              runbook: https://runbooks.internal/edge/config-divergence
 
   osb.yaml: |
     groups:

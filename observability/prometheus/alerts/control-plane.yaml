@@ -2,16 +2,21 @@
 # observability/k8s/prometheus/configmap.yaml (ConfigMap `prometheus-alerts`,
 # key `control-plane.yaml`) — the copy Prometheus actually mounts. Keep in sync.
 #
-# REMOVED (edge-observability-truth): ControlPlaneReconcileStalled,
-# ControlPlaneHighReconcileDuration, ControlPlaneSnapshotVersionLag, and
-# ControlPlaneDBConnectionsExhausted referenced edge_cp_* metrics that NO
-# service emits — the control-plane /metrics endpoint (internal/xds/metrics.go)
-# exposes ONLY xds_snapshots_blocked_total and xds_snapshots_published_degraded_total.
-# Those rules could never fire.
-# FOLLOW-UP: reconcile-latency, snapshot-version-spread, and db-pool saturation
-# are genuinely worth alerting on, but each needs the control plane to emit the
-# backing metric first (edge_cp_reconcile_duration_seconds, edge_cp_snapshot_version,
-# edge_cp_db_pool_idle/waiting). Re-add the rules in the same commit as the emitter.
+# RESTORED here (emitters landed in the same change): ControlPlaneReconcileStalled
+# (edge_cp_last_reconcile_timestamp_seconds) and ControlPlaneHighReconcileDuration
+# (edge_cp_reconcile_duration_seconds), plus the NEW ControlPlaneConfigDivergence
+# (edge_cp_nodes_behind). The control-plane /metrics endpoint (internal/xds/metrics.go)
+# now exposes xds_snapshots_blocked_total, xds_snapshots_published_degraded_total, and
+# edge_cp_{last_reconcile_timestamp_seconds,reconcile_duration_seconds,grpc_streams_active,nodes_behind}.
+#
+# STILL REMOVED (no reachable emitter — do NOT re-add without one):
+#  - ControlPlaneSnapshotVersionLag: its edge_cp_snapshot_version was a numeric per-node
+#    version; since the version is now a content HASH (#47), a max-min "spread" is
+#    meaningless. ControlPlaneConfigDivergence (edge_cp_nodes_behind) is its successor.
+#  - ControlPlaneDBConnectionsExhausted: the control-plane store's pgxpool DOES expose
+#    Stat(), but the store hides it behind the pgxDB/Store interfaces; emitting
+#    edge_cp_db_pool_idle/_waiting needs an internal/store change (out of scope here).
+#    Re-add in the same commit as that emitter.
 groups:
   - name: edge-control-plane
     interval: 30s
@@ -63,3 +68,57 @@ groups:
             listeners/clusters absent; inconsistent_first_boot = a dangling route/cluster
             blackholes traffic). Confirm the edge booted on the intended config.
           runbook: https://runbooks.internal/edge/degraded-publish
+
+      # Reconcile loop liveness (RESTORED; emitter edge_cp_last_reconcile_timestamp_seconds).
+      # The loop has not completed a cycle in over a minute — wedged or crashed, so config
+      # changes are not reaching the fleet. A guard-block still counts as a completed
+      # reconcile, so this is loop-death, not config-health (that is the alerts above).
+      - alert: ControlPlaneReconcileStalled
+        expr: time() - edge_cp_last_reconcile_timestamp_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "Control-plane reconcile loop stalled"
+          description: >
+            No successful reconcile in {{ $value | humanizeDuration }} — config changes
+            are not being pushed to the Envoy fleet.
+          runbook: https://runbooks.internal/edge/reconcile-stalled
+
+      # Reconcile latency (RESTORED; emitter edge_cp_reconcile_duration_seconds, a
+      # last-value gauge — so the original broken `rate(..._bucket[5m])` expr is replaced
+      # with a direct threshold). Seconds-long reconciles point at DB slowness or an
+      # oversized snapshot.
+      - alert: ControlPlaneHighReconcileDuration
+        expr: edge_cp_reconcile_duration_seconds > 2
+        for: 10m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "Control-plane reconcile is slow"
+          description: >
+            The last reconcile took {{ $value | humanizeDuration }} (> 2s) for 10m —
+            check DB latency and snapshot size.
+          runbook: https://runbooks.internal/edge/reconcile-slow
+
+      # Delivery divergence (NEW) — the regression tripwire for the #47 version-collision
+      # class. edge_cp_nodes_behind counts connected proxies whose last-ACKed xDS version
+      # is not the current published one. xds_snapshots_blocked_total is BLIND to this:
+      # the control-plane publishes successfully; only DELIVERY to the node is withheld.
+      # `for: 2m` is the in-flight-vs-stuck threshold — a proxy briefly behind just after
+      # a config change is normal; behind for 2m (many reconcile intervals) is the bug.
+      - alert: ControlPlaneConfigDivergence
+        expr: edge_cp_nodes_behind > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "Envoy proxies have not acknowledged the published config"
+          description: >
+            {{ $value }} connected proxy/proxies have not ACKed the current published
+            xDS version for 2m — the control-plane published but delivery is withheld
+            (cf. the #47 version-collision class). New/changed routes are not live there.
+          runbook: https://runbooks.internal/edge/config-divergence
