@@ -1,53 +1,38 @@
+# NOTE: source-of-truth copy; the SAME rules are inlined in
+# observability/k8s/prometheus/configmap.yaml (ConfigMap `prometheus-alerts`,
+# key `control-plane.yaml`) — the copy Prometheus actually mounts. Keep in sync.
+#
+# REMOVED (edge-observability-truth): ControlPlaneReconcileStalled,
+# ControlPlaneHighReconcileDuration, ControlPlaneSnapshotVersionLag, and
+# ControlPlaneDBConnectionsExhausted referenced edge_cp_* metrics that NO
+# service emits — the control-plane /metrics endpoint (internal/xds/metrics.go)
+# exposes ONLY xds_snapshots_blocked_total. Those rules could never fire.
+# FOLLOW-UP: reconcile-latency, snapshot-version-spread, and db-pool saturation
+# are genuinely worth alerting on, but each needs the control plane to emit the
+# backing metric first (edge_cp_reconcile_duration_seconds, edge_cp_snapshot_version,
+# edge_cp_db_pool_idle/waiting). Re-add the rules in the same commit as the emitter.
 groups:
   - name: edge-control-plane
     interval: 30s
     rules:
-      - alert: ControlPlaneReconcileStalled
-        expr: |
-          time() - edge_cp_last_reconcile_timestamp_seconds > 60
-        for: 1m
+      # Fail-static / fail-closed guard (landed cf5c079). The reconciler withheld
+      # a new xDS snapshot and kept last-good config — reason is one of: empty
+      # (empty-collapse guard), inconsistent (dangling route/cluster reference),
+      # auth_wanted_extauthz_off (a route wants auth but ext_authz is off). The
+      # gateway is serving STALE config while its source config is broken → page.
+      # Every `reason` series exists from t=0 by design (internal/xds/metrics.go),
+      # so this binds immediately rather than waiting for the first trip.
+      - alert: ControlPlaneSnapshotWithheld
+        expr: increase(xds_snapshots_blocked_total[10m]) > 0
+        for: 0m
         labels:
           severity: critical
           team: edge
         annotations:
-          summary: "xDS reconciler has not run in > 60s"
+          summary: "Control plane withheld an xDS snapshot (reason: {{ $labels.reason }})"
           description: >
-            The reconcile loop last completed
-            {{ $value | humanizeDuration }} ago. Config changes are
-            not being pushed to the Envoy fleet.
-          runbook: https://runbooks.internal/edge/reconcile-stall
-
-      - alert: ControlPlaneHighReconcileDuration
-        expr: |
-          histogram_quantile(0.99,
-            rate(edge_cp_reconcile_duration_seconds_bucket[5m])
-          ) > 2
-        for: 10m
-        labels:
-          severity: warning
-          team: edge
-        annotations:
-          summary: "Reconcile loop P99 > 2s"
-
-      - alert: ControlPlaneSnapshotVersionLag
-        expr: |
-          max(edge_cp_snapshot_version) - min(edge_cp_snapshot_version) > 3
-        for: 5m
-        labels:
-          severity: warning
-          team: edge
-        annotations:
-          summary: "Snapshot version spread across fleet > 3"
-          description: >
-            Some proxies are significantly behind the latest config
-            version. Check for disconnected or slow proxy nodes.
-
-      - alert: ControlPlaneDBConnectionsExhausted
-        expr: |
-          edge_cp_db_pool_idle == 0 and edge_cp_db_pool_waiting > 0
-        for: 2m
-        labels:
-          severity: critical
-          team: edge
-        annotations:
-          summary: "DB connection pool exhausted in control plane"
+            The xDS reconciler blocked {{ $value | humanize }} snapshot(s) in the
+            last 10m for reason "{{ $labels.reason }}" and is serving the last-good
+            config to the Envoy fleet. New or changed routes are NOT reaching the
+            proxies until the underlying config problem is resolved.
+          runbook: https://runbooks.internal/edge/snapshot-withheld

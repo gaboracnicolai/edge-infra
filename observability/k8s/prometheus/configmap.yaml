@@ -1,3 +1,8 @@
+# This ConfigMap is what Prometheus actually mounts and loads (see deployment.yaml
+# volumes `config`/`alerts`). Its rule/recording keys DUPLICATE the source-of-truth
+# files under observability/prometheus/ (alerts/*.yaml, recording-rules.yaml). There
+# is no generator wiring that dir into this ConfigMap, so the two WILL drift unless
+# edited together — when you change a rule here, change it there too, and vice versa.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -32,17 +37,17 @@ data:
         rules:
           - record: edge:upstream_error_ratio:rate5m
             expr: |
-              sum by (cluster_name) (
-                rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+              sum by (envoy_cluster_name) (
+                rate(envoy_cluster_upstream_rq_xx{envoy_response_code_class="5"}[5m])
               )
               /
-              sum by (cluster_name) (
+              sum by (envoy_cluster_name) (
                 rate(envoy_cluster_upstream_rq_total[5m])
               )
 
           - record: edge:upstream_rps:rate5m
             expr: |
-              sum by (cluster_name) (
+              sum by (envoy_cluster_name) (
                 rate(envoy_cluster_upstream_rq_total[5m])
               )
 
@@ -82,11 +87,11 @@ data:
           - alert: EnvoyHighErrorRate
             expr: |
               (
-                sum by (cluster_name) (
-                  rate(envoy_cluster_upstream_rq_xx{response_code_class="5"}[5m])
+                sum by (envoy_cluster_name) (
+                  rate(envoy_cluster_upstream_rq_xx{envoy_response_code_class="5"}[5m])
                 )
                 /
-                sum by (cluster_name) (
+                sum by (envoy_cluster_name) (
                   rate(envoy_cluster_upstream_rq_total[5m])
                 )
               ) > 0.01
@@ -100,7 +105,7 @@ data:
           - alert: EnvoyHighP99Latency
             expr: |
               histogram_quantile(0.99,
-                sum by (le, cluster_name) (
+                sum by (le, envoy_cluster_name) (
                   rate(envoy_cluster_upstream_rq_time_bucket[5m])
                 )
               ) > 2000
@@ -124,7 +129,7 @@ data:
 
           - alert: EnvoyCircuitBreakerOpen
             expr: |
-              sum by (cluster_name) (
+              sum by (envoy_cluster_name) (
                 envoy_cluster_circuit_breakers_default_cx_open
               ) > 0
             for: 1m
@@ -139,46 +144,27 @@ data:
       - name: edge-control-plane
         interval: 30s
         rules:
-          - alert: ControlPlaneReconcileStalled
-            expr: time() - edge_cp_last_reconcile_timestamp_seconds > 60
-            for: 1m
+          # REMOVED (edge-observability-truth): ControlPlaneReconcileStalled,
+          # ControlPlaneHighReconcileDuration, ControlPlaneSnapshotVersionLag,
+          # ControlPlaneDBConnectionsExhausted referenced edge_cp_* metrics that NO
+          # service emits (control-plane /metrics = internal/xds/metrics.go exposes
+          # ONLY xds_snapshots_blocked_total) and could never fire. See FOLLOW-UP in
+          # observability/prometheus/alerts/control-plane.yaml (source-of-truth copy;
+          # keep this key in sync with it).
+          - alert: ControlPlaneSnapshotWithheld
+            expr: increase(xds_snapshots_blocked_total[10m]) > 0
+            for: 0m
             labels:
               severity: critical
               team: edge
             annotations:
-              summary: "xDS reconciler has not run in > 60s"
-              runbook: https://runbooks.internal/edge/reconcile-stall
-
-          - alert: ControlPlaneHighReconcileDuration
-            expr: |
-              histogram_quantile(0.99,
-                rate(edge_cp_reconcile_duration_seconds_bucket[5m])
-              ) > 2
-            for: 10m
-            labels:
-              severity: warning
-              team: edge
-            annotations:
-              summary: "Reconcile P99 > 2s"
-
-          - alert: ControlPlaneSnapshotVersionLag
-            expr: |
-              max(edge_cp_snapshot_version) - min(edge_cp_snapshot_version) > 3
-            for: 5m
-            labels:
-              severity: warning
-              team: edge
-            annotations:
-              summary: "Snapshot version spread across fleet > 3"
-
-          - alert: ControlPlaneDBConnectionsExhausted
-            expr: edge_cp_db_pool_idle == 0 and edge_cp_db_pool_waiting > 0
-            for: 2m
-            labels:
-              severity: critical
-              team: edge
-            annotations:
-              summary: "DB connection pool exhausted in control plane"
+              summary: "Control plane withheld an xDS snapshot (reason: {{ $labels.reason }})"
+              description: >
+                The xDS reconciler blocked {{ $value | humanize }} snapshot(s) in the
+                last 10m for reason "{{ $labels.reason }}" and is serving last-good
+                config to the Envoy fleet. New or changed routes are NOT reaching the
+                proxies until the underlying config problem is resolved.
+              runbook: https://runbooks.internal/edge/snapshot-withheld
 
   osb.yaml: |
     groups:
@@ -213,14 +199,10 @@ data:
             annotations:
               summary: "OSB webhook delivery failure rate > 10%"
 
-          - alert: OSBNATSConsumerLagHigh
-            expr: nats_consumer_num_pending{consumer="osb-workers"} > 100
-            for: 5m
-            labels:
-              severity: warning
-              team: edge
-            annotations:
-              summary: "OSB NATS consumer lag > 100"
+          # REMOVED (edge-observability-truth): OSBNATSConsumerLagHigh referenced
+          # nats_consumer_num_pending — nothing scrapes NATS (no exporter, no collector
+          # job), so it could never fire. FOLLOW-UP in the source-of-truth copy
+          # observability/prometheus/alerts/osb.yaml; keep this key in sync.
 
   auth-service.yaml: |
     groups:

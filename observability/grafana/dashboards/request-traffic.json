@@ -33,7 +33,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
       "id": 3,
-      "targets": [{"expr": "edge:upstream_rps:rate5m", "legendFormat": "{{cluster_name}}", "refId": "A"}],
+      "targets": [{"expr": "edge:upstream_rps:rate5m", "legendFormat": "{{envoy_cluster_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
     },
@@ -57,7 +57,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
       "id": 5,
-      "targets": [{"expr": "edge:upstream_error_ratio:rate5m", "legendFormat": "{{cluster_name}}", "refId": "A"}],
+      "targets": [{"expr": "edge:upstream_error_ratio:rate5m", "legendFormat": "{{envoy_cluster_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
     },
