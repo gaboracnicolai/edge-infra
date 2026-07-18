@@ -212,6 +212,14 @@ async def healthz() -> dict[str, bool]:
 
 
 @app.get("/metrics", response_class=Response, dependencies=[Depends(require_admin)])
-async def get_metrics() -> Response:
-    """Prometheus text-format counters for this broker process (admin-gated)."""
+async def get_metrics(request: Request) -> Response:
+    """Prometheus text-format metrics for this broker process (admin-gated).
+
+    The broker is the only process that serves /metrics, so it samples the
+    worker durable's JetStream queue depth here (best-effort; an unreachable
+    NATS flags osb_nats_consumer_info_up=0 rather than a fabricated 0).
+    """
+    await metrics.sample_consumer_pending(
+        request.app.state.js, cfg.nats_stream, cfg.nats_consumer_durable
+    )
     return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")

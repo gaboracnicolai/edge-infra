@@ -38,10 +38,20 @@
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
     },
     {
+      "type": "timeseries",
+      "title": "NATS consumer pending (osb-workers)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "id": 7,
+      "targets": [{"expr": "max(osb_nats_consumer_pending{durable=\"osb-workers\"})", "legendFormat": "pending", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+    },
+    {
       "type": "logs",
       "title": "OSB non-info logs",
       "datasource": {"type": "loki", "uid": "loki"},
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 20},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 28},
       "id": 5,
       "targets": [{"expr": "{app=\"edge-osb\"} | json | level!=\"info\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": false, "showLabels": false, "showCommonLabels": false, "enableLogDetails": true, "sortOrder": "Descending"}
@@ -50,7 +60,7 @@
       "type": "table",
       "title": "Recent provision requests",
       "datasource": {"type": "loki", "uid": "loki"},
-      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 30},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 38},
       "id": 6,
       "targets": [{"expr": "{app=\"edge-osb\"} | json | event=\"provision queued\"", "refId": "A"}],
       "fieldConfig": {"defaults": {}, "overrides": []},
