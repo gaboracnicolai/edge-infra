@@ -145,10 +145,10 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Buffered for all long-lived goroutines (gRPC, reconciler, health) so each
-	// can report its exit without blocking even when the select below has
+	// Buffered for all long-lived goroutines (gRPC, reconciler, health, metrics)
+	// so each can report its exit without blocking even when the select below has
 	// already returned on another's error or on shutdown.
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() {
 		log.Info("xds gRPC listening", "addr", cfg.ListenAddr, "node_id", cfg.NodeID)
 		errCh <- grpcSrv.Serve(lis)
@@ -161,6 +161,15 @@ func run(log *slog.Logger) error {
 	healthSrv := newHealthServer(cfg.HealthAddr, cache, cfg.NodeID)
 	go func() {
 		errCh <- runHealthServer(rootCtx, healthSrv, log)
+	}()
+
+	// Metrics HTTP server (additive; read-only view of the reconciler's
+	// fail-static guard counters). Exposes xds_snapshots_blocked_total on :2112 —
+	// the port the edge-control-plane chart already declares and scrapes — so prod
+	// can alert on withheld snapshots.
+	metricsSrv := newMetricsServer(metricsAddr, xds.NewMetricsHandler(reconciler))
+	go func() {
+		errCh <- runMetricsServer(rootCtx, metricsSrv, log)
 	}()
 
 	select {
