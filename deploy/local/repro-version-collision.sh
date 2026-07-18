@@ -1,34 +1,31 @@
 #!/usr/bin/env bash
-# repro-version-collision.sh — REPRODUCTION TOOLING for the xDS "version-collision"
-# spike. INVESTIGATION ONLY: it demonstrates the bug on a live standup and does not
-# change any product behaviour. Run against an already-up cluster (deploy/local/up.sh).
+# repro-version-collision.sh — RED→GREEN check for the xDS version-collision fix.
 #
-# THE BUG (server-side, NOT an Envoy NACK): the control-plane is non-HA, so its xDS
-# snapshot version counter (internal/xds/reconciler.go resolveVersion → "v%d" from a
-# per-process atomic) RESETS to v1 on every process restart. go-control-plane's
-# SnapshotCache decides whether to push by comparing the OPAQUE version string in the
-# node's request to the snapshot's version (pkg/cache/v3/simple.go:439
-# `if !exists || request.GetVersionInfo() == version { open watch }`). If a config
-# change lands in a NEW process's first snapshot (also "v1") while a still-connected
-# Envoy already holds "v1", the strings are equal → the cache HOLDS the watch open and
-# never sends the changed CDS/LDS (wildcard) resources. Envoy logs cds/lds
-# update_failure (the stream broke on restart) but update_REJECTED stays 0 — nothing is
-# rejected; the new config is simply never delivered. Rolling edge-proxy fixes it
-# because a fresh Envoy sends version_info="" ("" != "v1") → the cache responds.
+# THE BUG (pre-fix): the control-plane stamped the xDS snapshot version from a
+# per-process counter that RESET to "v1" on restart. go-control-plane's SnapshotCache
+# only pushes when the node's request version_info STRING differs from the snapshot
+# version (pkg/cache/v3/simple.go:439), so a config change landing in a restarted
+# process's first snapshot (also "v1") collided with the "v1" a still-connected Envoy
+# already held → the changed CDS/LDS (wildcard) were WITHHELD (Envoy cds/lds
+# update_failure, update_rejected 0 — not a NACK). Rolling edge-proxy was the only fix.
 #
-# This script forces the collision deterministically (scale CP to 0, change the DB,
-# scale back to 1) instead of relying on the ext_authz flip.
+# THE FIX: the version is now a pure function of the config hash, so a changed config
+# ALWAYS carries a new version and reaches the still-connected Envoy WITHOUT rolling
+# edge-proxy. This script forces the collision scenario (change the DB while the
+# control-plane is down, then restart it) and asserts the changed cluster is delivered
+# to the SAME, still-connected edge-proxy pods. Run against an up cluster whose
+# control-plane carries the fix.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$DIR/lib.sh"
 INFRA_NS="${INFRA_NS:-infra}"
-BACKEND="${BACKEND:-10.96.81.76}"   # tenant-a echo ClusterIP:5678 — a real, valid upstream
 
 pg() { k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}'; }
 psql_e() { k exec -i -n "$INFRA_NS" "$(pg)" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 "$@"; }
+ep_names() { k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort | tr '\n' ',' ; }
 
-# cds_clusters — sorted CDS cluster names currently in the first edge-proxy's Envoy.
+# cds_clusters — sorted CDS cluster names in the first edge-proxy's Envoy.
 cds_clusters() {
   local ep lp d; ep="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].metadata.name}')"
   lp=$((19900 + RANDOM % 80))
@@ -43,17 +40,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-section "REPRO — xDS version collision across a control-plane restart"
+section "REPRO — version-hash fix: changed config reaches a STILL-CONNECTED Envoy across a CP restart"
 cleanup
+BACKEND="$(psql_e -tAc "SELECT address FROM endpoints e JOIN clusters c ON c.id=e.cluster_id WHERE c.name='tenant-a' LIMIT 1" | tr -d '[:space:]')"
+[ -n "$BACKEND" ] || die "could not resolve a tenant-a backend address to point collide-cluster at"
+log "collide-cluster will target the tenant-a backend $BACKEND:5678 (so collide.local serves 200 iff CDS delivered)"
 
-# Clean, converged baseline: fresh proxies hold the current config at v1.
+# Baseline: fresh proxies hold the current config. SELF-GUARD: collide.local must NOT
+# resolve and collide-cluster must be ABSENT before we seed — otherwise a later 200
+# would be meaningless.
 k -n edge rollout restart ds/edge-proxy >/dev/null 2>&1
 k -n edge rollout status ds/edge-proxy --timeout=90s >/dev/null 2>&1 || true
 sleep 6
 [ "$(gw_code tenant-a.local)" = 200 ] || die "baseline broken: tenant-a.local not 200"
-log "baseline CDS clusters: $(cds_clusters)"
+[ "$(gw_code collide.local)" != 200 ] || die "SELF-GUARD failed: collide.local already served before seeding"
+cds_clusters | grep -q 'collide-cluster' && die "SELF-GUARD failed: collide-cluster present before seeding" || true
+base_eps="$(ep_names)"
+log "baseline CDS clusters: $(cds_clusters) ; connected edge-proxy pods: $base_eps"
 
-section "force the collision: scale CP to 0, change config, scale CP to 1"
+section "config change COINCIDENT with a control-plane restart (the collision scenario)"
 k -n "$INFRA_NS" scale deploy/edge-control-plane --replicas=0 >/dev/null
 k -n "$INFRA_NS" wait --for=delete pod -l app.kubernetes.io/name=edge-control-plane --timeout=60s >/dev/null 2>&1 || sleep 8
 psql_e -f - >/dev/null <<SQL
@@ -63,32 +68,28 @@ INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_se
   VALUES ('collide','collide','local-gw',ARRAY['collide.local']::text[],'/','collide-cluster',30,'none',NULL)
   ON CONFLICT (name) DO UPDATE SET cluster_name=EXCLUDED.cluster_name,deleted_at=NULL,updated_at=now();
 SQL
+# SELF-GUARD: the seed must actually be present, else the test could pass vacuously.
+[ "$(psql_e -tAc "SELECT count(*) FROM clusters WHERE name='collide-cluster'" | tr -d '[:space:]')" = 1 ] \
+  || die "SELF-GUARD failed: collide-cluster was not seeded"
 k -n "$INFRA_NS" scale deploy/edge-control-plane --replicas=1 >/dev/null
 k -n "$INFRA_NS" rollout status deploy/edge-control-plane --timeout=90s >/dev/null 2>&1 || true
-sleep 12
+sleep 12   # reconnect + delivery — deliberately NO edge-proxy roll
 
-section "RED — the changed CDS never reaches the still-connected Envoy"
+section "GREEN — the STILL-CONNECTED Envoy received the changed CDS, no edge-proxy roll"
+now_eps="$(ep_names)"
+[ "$now_eps" = "$base_eps" ] || die "edge-proxy pods changed ($base_eps -> $now_eps) — a roll would invalidate the still-connected test"
 built="$(k -n "$INFRA_NS" logs deploy/edge-control-plane 2>/dev/null | grep -aE 'snapshot pushed' | tail -1)"
-log "control-plane built: $built"                    # expect version v1, clusters 5
+log "control-plane built: $built"
 after="$(cds_clusters)"
-log "Envoy CDS clusters after change+restart: $after"  # expect collide-cluster ABSENT
-if printf '%s' "$after" | grep -q 'collide-cluster'; then
-  die "NOT REPRODUCED: collide-cluster reached Envoy (version did not collide this run — check CP settled at v1)"
-fi
+log "Envoy CDS clusters after change+restart (same proxies): $after"
+printf '%s' "$after" | grep -q 'collide-cluster' \
+  || die "FAIL (bug still present): collide-cluster ABSENT from the still-connected Envoy CDS after restart"
 code="$(gw_code collide.local)"
-[ "$code" != 200 ] || die "NOT REPRODUCED: collide.local served 200 (cluster was delivered)"
-ok "RED confirmed — collide-cluster ABSENT from Envoy CDS; collide.local -> HTTP $code (changed config withheld)"
-log "NB: Envoy update_rejected stays 0 for CDS/LDS — this is withheld delivery, NOT a NACK (see /stats)."
+[ "$code" = 200 ] || die "FAIL: collide.local -> HTTP $code (expected 200 — changed config not delivered without an edge-proxy roll)"
+ok "GREEN — collide-cluster delivered to still-connected proxies [$base_eps]; collide.local -> HTTP $code; NO edge-proxy roll"
 
-section "WORKAROUND — roll edge-proxy (fresh version_info=\"\") restores delivery"
-k -n edge rollout restart ds/edge-proxy >/dev/null 2>&1
-k -n edge rollout status ds/edge-proxy --timeout=90s >/dev/null 2>&1 || true
-sleep 8
-[ "$(gw_code collide.local)" = 200 ] || die "workaround failed: collide.local not 200 after edge-proxy roll"
-ok "WORKAROUND confirmed — after rolling edge-proxy, collide.local -> HTTP 200 (fresh proxy got collide-cluster)"
-
-section "cleanup"
+section "cleanup — remove the test rows; reconverge"
 cleanup
 k -n edge rollout restart ds/edge-proxy >/dev/null 2>&1
 k -n edge rollout status ds/edge-proxy --timeout=90s >/dev/null 2>&1 || true
-ok "repro complete — cluster reconverged"
+ok "repro complete — fix verified live; cluster reconverged"
