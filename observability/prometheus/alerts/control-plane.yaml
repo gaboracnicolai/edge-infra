@@ -6,7 +6,8 @@
 # ControlPlaneHighReconcileDuration, ControlPlaneSnapshotVersionLag, and
 # ControlPlaneDBConnectionsExhausted referenced edge_cp_* metrics that NO
 # service emits — the control-plane /metrics endpoint (internal/xds/metrics.go)
-# exposes ONLY xds_snapshots_blocked_total. Those rules could never fire.
+# exposes ONLY xds_snapshots_blocked_total and xds_snapshots_published_degraded_total.
+# Those rules could never fire.
 # FOLLOW-UP: reconcile-latency, snapshot-version-spread, and db-pool saturation
 # are genuinely worth alerting on, but each needs the control plane to emit the
 # backing metric first (edge_cp_reconcile_duration_seconds, edge_cp_snapshot_version,
@@ -36,3 +37,29 @@ groups:
             config to the Envoy fleet. New or changed routes are NOT reaching the
             proxies until the underlying config problem is resolved.
           runbook: https://runbooks.internal/edge/snapshot-withheld
+
+      # First-boot degraded PUBLISH — the OTHER side of the guards. On first boot (no
+      # last-good to keep) the empty-collapse and consistency guards are EXEMPT and the
+      # bad config IS published so a fresh edge can boot: the one path where bad config
+      # actually reaches Envoy. A SEPARATE metric on purpose — nothing was blocked, so
+      # it must NOT ride xds_snapshots_blocked_total (that would mis-fire the alert
+      # above). reason is empty_first_boot (every listener/cluster absent) or
+      # inconsistent_first_boot (a dangling route/cluster that blackholes). Both series
+      # exist from t=0 (internal/xds/metrics.go). severity: warning — a fresh edge with
+      # no routes seeded yet can legitimately come up empty; investigate rather than
+      # page, and treat inconsistent_first_boot as the more serious reason.
+      - alert: ControlPlaneDegradedPublish
+        expr: increase(xds_snapshots_published_degraded_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "Control plane published a degraded first-boot snapshot (reason: {{ $labels.reason }})"
+          description: >
+            The xDS reconciler published {{ $value | humanize }} degraded snapshot(s)
+            in the last 10m for reason "{{ $labels.reason }}": on first boot the guard is
+            exempt and the bad config reached the Envoy fleet (empty_first_boot = all
+            listeners/clusters absent; inconsistent_first_boot = a dangling route/cluster
+            blackholes traffic). Confirm the edge booted on the intended config.
+          runbook: https://runbooks.internal/edge/degraded-publish
