@@ -282,10 +282,24 @@ data:
             annotations:
               summary: "OSB webhook delivery failure rate > 10%"
 
-          # REMOVED (edge-observability-truth): OSBNATSConsumerLagHigh referenced
-          # nats_consumer_num_pending — nothing scrapes NATS (no exporter, no collector
-          # job), so it could never fire. FOLLOW-UP in the source-of-truth copy
-          # observability/prometheus/alerts/osb.yaml; keep this key in sync.
+          # RESTORED (edge-osb-queue-depth): fires on osb_nats_consumer_pending, a gauge
+          # the broker emits from JetStream consumer_info for the osb-workers durable
+          # (replaces the phantom nats_consumer_num_pending). Kept IDENTICAL to the
+          # source-of-truth copy observability/prometheus/alerts/osb.yaml.
+          - alert: OSBNATSConsumerLagHigh
+            expr: osb_nats_consumer_pending{durable="osb-workers"} > 100
+            for: 5m
+            labels:
+              severity: warning
+              team: edge
+            annotations:
+              summary: "OSB NATS consumer lag > 100 messages"
+              description: >
+                The osb-workers durable consumer has had more than 100 messages
+                pending for 5m — the worker is falling behind. Check worker health
+                and Postgres connectivity. Emitted by the broker from JetStream
+                consumer_info; when depth is unknown the sample is absent and
+                osb_nats_consumer_info_up is 0.
 
   auth-service.yaml: |
     groups:
