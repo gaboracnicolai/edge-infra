@@ -57,3 +57,32 @@ groups:
             and Postgres connectivity. Emitted by the broker from JetStream
             consumer_info; when depth is unknown the sample is absent and
             osb_nats_consumer_info_up is 0.
+
+      # Queue depth UNOBSERVABLE. When the broker cannot read JetStream consumer_info it
+      # OMITS osb_nats_consumer_pending (never a fabricated healthy 0) and sets
+      # osb_nats_consumer_info_up=0 — so OSBNATSConsumerLagHigh has no data and CANNOT
+      # fire. This alert covers that blind spot: the absence of a lag alert must not be
+      # read as a healthy queue.
+      # severity: critical — consumer_info is a JetStream call, so its sustained failure
+      # most often means NATS is unreachable or the osb-workers durable is missing/renamed;
+      # the workers consume from the SAME NATS, so the backlog is both UNOBSERVABLE and
+      # likely growing un-drained. Losing the queue-depth safety net is page-worthy.
+      # for: 3m — tolerates a NATS reconnect / single-replica rolling restart (seconds to
+      # ~1-2m) but catches a real outage or a permanently-missing durable (fails every
+      # scrape) before OSBNATSConsumerLagHigh's own 5m window would even have data.
+      - alert: OSBNATSConsumerDepthUnknown
+        expr: osb_nats_consumer_info_up{durable="osb-workers"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "OSB queue depth is UNKNOWN (JetStream consumer_info failing)"
+          description: >
+            The broker could not read JetStream consumer_info for the osb-workers durable
+            for 3m, so osb_nats_consumer_pending is absent and queue depth is UNOBSERVABLE.
+            OSBNATSConsumerLagHigh cannot fire while this is active — do NOT read the
+            absence of a lag alert as a healthy queue. Likely NATS is unreachable or the
+            durable is missing/renamed; the workers consume from the same NATS, so the
+            backlog may be growing un-drained. Check NATS and the osb-workers durable.
+          runbook: https://runbooks.internal/edge/osb-consumer-unobservable
