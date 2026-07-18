@@ -1,5 +1,7 @@
 {
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -11,60 +13,484 @@
       "type": "stat",
       "title": "xDS snapshots blocked (total, all reasons)",
       "description": "Cumulative fail-static/fail-closed guard trips: reconciles where the control plane withheld a new xDS snapshot and kept last-good config. Source: xds_snapshots_blocked_total (internal/xds/metrics.go).",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
-      "targets": [{"expr": "sum(xds_snapshots_blocked_total)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
-      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+      "targets": [
+        {
+          "expr": "sum(xds_snapshots_blocked_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Blocked in last 10m (pages)",
       "description": "Matches the ControlPlaneSnapshotWithheld alert: increase(xds_snapshots_blocked_total[10m]).",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
       "id": 2,
-      "targets": [{"expr": "sum(increase(xds_snapshots_blocked_total[10m]))", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
-      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+      "targets": [
+        {
+          "expr": "sum(increase(xds_snapshots_blocked_total[10m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Reasons blocked (10m)",
       "description": "How many distinct block reasons (empty / inconsistent / auth_wanted_extauthz_off) tripped in the last 10m.",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
       "id": 3,
-      "targets": [{"expr": "count(increase(xds_snapshots_blocked_total[10m]) > 0) or vector(0)", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
-      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "textMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+      "targets": [
+        {
+          "expr": "count(increase(xds_snapshots_blocked_total[10m]) > 0) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "xDS snapshots blocked by reason (10m increase)",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
       "id": 4,
-      "targets": [{"expr": "sum by (reason) (increase(xds_snapshots_blocked_total[10m]))", "legendFormat": "{{reason}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+      "targets": [
+        {
+          "expr": "sum by (reason) (increase(xds_snapshots_blocked_total[10m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Active xDS streams",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "edge_cp_grpc_streams_active",
+          "refId": "A"
+        }
+      ],
+      "description": "Open ADS gRPC streams from the Envoy fleet (edge_cp_grpc_streams_active)."
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Proxies behind published config",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "edge_cp_nodes_behind",
+          "refId": "A"
+        }
+      ],
+      "description": "Connected proxies that have NOT ACKed the current published xDS version \u2014 delivery divergence (#47 regression tripwire). xds_snapshots_blocked_total is blind to withheld delivery."
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Time since last reconcile",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 12
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "time() - edge_cp_last_reconcile_timestamp_seconds",
+          "refId": "A"
+        }
+      ],
+      "description": "Seconds since the reconcile loop last completed (edge_cp_last_reconcile_timestamp_seconds)."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Reconcile duration",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "edge_cp_reconcile_duration_seconds",
+          "refId": "A",
+          "legendFormat": "last reconcile"
+        }
+      ],
+      "description": "Duration of the last reconcile (edge_cp_reconcile_duration_seconds)."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Proxies behind published config (over time)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "edge_cp_nodes_behind",
+          "refId": "A",
+          "legendFormat": "nodes behind"
+        }
+      ]
     },
     {
       "type": "text",
-      "title": "Removed panels — no backing metric",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 12},
+      "title": "Remaining panels without a backing metric",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
       "id": 5,
-      "options": {"mode": "markdown", "content": "The former panels (time-since-reconcile, DB pool idle/waiting, reconcile-duration P99, snapshot-version-by-node, active gRPC streams) queried `edge_cp_*` metrics that **no service emits** — the control-plane `/metrics` endpoint (`internal/xds/metrics.go`) exposes **only** `xds_snapshots_blocked_total`. They were removed in PR `edge-observability-truth` because they could never render data. **Follow-up:** restore each panel in the same change that adds its emitter (`edge_cp_reconcile_duration_seconds`, `edge_cp_snapshot_version`, `edge_cp_db_pool_idle`/`_waiting`, `edge_cp_grpc_streams_active`)."}
+      "options": {
+        "mode": "markdown",
+        "content": "The former **time-since-reconcile**, **reconcile-duration**, and **active gRPC streams** panels are **restored above** (their `edge_cp_*` emitters landed in `internal/xds/metrics.go`), and the new **Proxies behind published config** panels export the delivery-divergence signal.\n\nStill without an emitter (see FOLLOW-UP in `observability/prometheus/alerts/control-plane.yaml`):\n- **DB pool idle/waiting** (`edge_cp_db_pool_idle`/`_waiting`) \u2014 the control-plane store's pgxpool exposes `Stat()`, but the store hides it behind its interfaces; emitting it needs an `internal/store` change.\n- **Snapshot-version-by-node** (`edge_cp_snapshot_version`) \u2014 obsolete since versions became content hashes (#47); the *Proxies behind published config* panels are its successor.\n\nRestore each in the same change that adds its emitter."
+      }
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": ["edge", "control-plane"],
-  "templating": {"list": []},
-  "time": {"from": "now-6h", "to": "now"},
+  "tags": [
+    "edge",
+    "control-plane"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "Control Plane Health",
