@@ -70,7 +70,8 @@ get/describe`, and an exec-to-`curl` from an existing pod where possible) — it
 never applies, patches, or deletes anything.
 
 ```
-scripts/sec3-preflight.sh [--context KUBE_CONTEXT] [--backend-namespace NS] [--node-cidr CIDR]
+scripts/sec3-preflight.sh [--context KUBE_CONTEXT] [--backend-namespace NS] \
+                          [--node-cidr CIDR] [--accept-predicted]
 ```
 
 It reports, and decides from:
@@ -87,17 +88,44 @@ It reports, and decides from:
   reflector/HTTP-client is reachable read-only, it prints a clearly-labelled
   **MANUAL VERIFICATION** step instead of guessing.
 
-Verdict and exit code (so a cutover can gate on it):
+### Exit codes — require `0` (PROVEN), not merely "not `1`"
+
+A cutover gate must be able to tell a *live measurement* from an *unverified
+inference*. The exit code does — a PASS is split into **confirmed** vs
+**predicted**:
 
 | Exit | Verdict | Meaning |
 |------|---------|---------|
-| `0`  | PASS | node IP preserved → the `ipBlock` will match the gateway |
+| `0`  | PASS — empirically **confirmed** | the source-IP measurement actually ran and showed a node IP (or a predicted PASS accepted via `--accept-predicted`) |
+| `3`  | PASS — topology-**predicted** | the topology says it should work, but the measurement did **not** run — nothing observed the real gateway source |
 | `1`  | FAIL | encapsulated and/or multi-subnet → SEC-3 would drop the gateway |
 | `2`  | INCONCLUSIVE | could not determine read-only → do the MANUAL VERIFICATION first |
 
-A topology that is deterministically sound (e.g. Calico `CrossSubnet` + a single
-node subnet — the kind case) reports **PASS** even when the empirical probe cannot
-run read-only; it also prints the manual step so you can confirm.
+(`4` is a usage / prerequisite error — kubectl missing, no cluster, bad flag.)
+
+**A cutover gate should require exit `0`, not merely "not `1`".** Exit `3` is a
+PASS the script never measured: the topology is deterministically sound (e.g.
+Calico `CrossSubnet` + a single node subnet — the kind case), but no live probe
+confirmed the gateway's real source. On the current kind cluster the probe cannot
+run read-only (no HTTP client in any hostNetwork pod, and spawning one would mutate
+the cluster), so the honest result is `3` plus the MANUAL VERIFICATION step. Pass
+`--accept-predicted` (which maps `3 → 0`) only if you consciously accept an
+unmeasured PASS.
+
+### Operational caveat — a derived `NODE_CIDR` can under-cover future nodes
+
+Without `--node-cidr`, the script derives `<NODE_CIDR>` by grouping the
+**currently observed** node IPs into a `/24`. That covers only the nodes running
+*right now*. A node later allocated **outside** that range — cluster autoscaling, a
+node replacement landing on a new IP, a second AZ/subnet — will not match the
+`ipBlock`, so SEC-3 drops the gateway **on that node only**: an intermittent,
+node-dependent backend outage that a snapshot of the running nodes cannot predict.
+
+The correct `ipBlock` value is the node subnet's **full allocatable range** — the
+VPC/subnet CIDR in cloud, or the docker-network CIDR on kind (`up.sh` uses the
+`/16`, not a `/24`) — **not** the observed-node grouping. For a cutover decision,
+re-run with `--node-cidr <real node subnet CIDR>`; supplying it also silences the
+script's warning.
 
 ## Until it passes: SEC-3 stays out of ArgoCD
 

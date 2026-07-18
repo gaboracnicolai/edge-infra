@@ -21,27 +21,36 @@
 # patches, deletes, scales, or otherwise mutates cluster state. It is safe to run
 # against a cluster another session owns.
 #
-# Exit codes (so a cutover can gate on it):
-#   0  PASS         — node IP is preserved; SEC-3 ipBlock will match the gateway
-#   1  FAIL         — encapsulated and/or multi-subnet; SEC-3 would drop the gateway
-#   2  INCONCLUSIVE — could not determine read-only; see the MANUAL VERIFICATION step
-#   3  usage / prerequisite error (kubectl missing, no cluster, bad flag)
+# Exit codes — a cutover gate should require 0 (PROVEN), NOT merely "not 1":
+#   0  PASS, empirically CONFIRMED — the source-IP measurement actually ran and
+#          showed a node IP (or a topology PASS accepted via --accept-predicted)
+#   3  PASS, topology-PREDICTED   — the topology says it should work, but the
+#          measurement did NOT run; nothing observed the real gateway source
+#   1  FAIL          — encapsulated and/or multi-subnet; SEC-3 would drop the gateway
+#   2  INCONCLUSIVE  — could not determine read-only; see the MANUAL VERIFICATION step
+#   (4 = usage / prerequisite error: kubectl missing, no cluster, bad flag)
 #
 # Usage:
 #   scripts/sec3-preflight.sh [--context KUBE_CONTEXT] [--backend-namespace NS] \
-#                             [--node-cidr CIDR]
+#                             [--node-cidr CIDR] [--accept-predicted]
 #
 # --context            kube-context to target (default: current-context)
 # --backend-namespace  a real backend namespace, so the script reports the actual
 #                      backend container port SEC-3 must allow (the template
 #                      defaults to 8080, which is usually WRONG for your workload)
-# --node-cidr          override the auto-derived node CIDR (the value you would
-#                      put in the policy's ipBlock)
+# --node-cidr          the node subnet's full ALLOCATABLE range for the ipBlock
+#                      (VPC/subnet CIDR; on kind the docker-network CIDR — up.sh
+#                      uses the /16). Supplying it silences the under-coverage
+#                      warning. Without it the CIDR is DERIVED from the currently
+#                      observed node IPs, which can under-cover future nodes.
+# --accept-predicted   treat a topology-predicted PASS as success (exit 3 -> 0), for
+#                      operators who consciously accept an unmeasured PASS
 set -euo pipefail
 
 CONTEXT=""
 BACKEND_NS=""
 NODE_CIDR_OVERRIDE=""
+ACCEPT_PREDICTED=""
 
 # ── tiny output helpers (stderr for humans; stdout stays parseable) ────────────
 if [ -t 1 ]; then C_B=$'\033[1m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_D=$'\033[2m'; C_0=$'\033[0m'; else C_B=""; C_G=""; C_Y=""; C_R=""; C_D=""; C_0=""; fi
@@ -50,15 +59,19 @@ inf()  { printf '   %s- %s%s\n' "$C_D" "$*" "$C_0"; }
 good() { printf '   %sOK%s %s\n' "$C_G" "$C_0" "$*"; }
 warn() { printf '   %s! %s%s\n' "$C_Y" "$*" "$C_0"; }
 bad()  { printf '   %sX %s%s\n' "$C_R" "$*" "$C_0"; }
-die()  { printf '%sX %s%s\n' "$C_R" "$*" "$C_0" >&2; exit 3; }
+# exit 4 = usage / prerequisite error — a distinct, non-verdict code (0/1/2/3 are verdicts).
+die()  { printf '%sX %s%s\n' "$C_R" "$*" "$C_0" >&2; exit 4; }
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 3; }
+# usage() prints the header comment block (line 2 → the first non-comment line), so it
+# stays correct however long the header grows. --help is informational, not an error.
+usage() { awk 'NR==1{next} /^#/{s=$0; sub(/^# ?/,"",s); print s; next} {exit}' "$0"; exit 0; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --context)           CONTEXT="${2:-}"; shift 2 ;;
     --backend-namespace) BACKEND_NS="${2:-}"; shift 2 ;;
     --node-cidr)         NODE_CIDR_OVERRIDE="${2:-}"; shift 2 ;;
+    --accept-predicted)  ACCEPT_PREDICTED=1; shift ;;
     -h|--help)           usage ;;
     *) # allow a bare kube-context as the sole positional
        if [ -z "$CONTEXT" ]; then CONTEXT="$1"; shift; else die "unexpected argument: $1"; fi ;;
@@ -116,7 +129,18 @@ else
   DERIVED_NODE_CIDR="$(printf '%s\n' "$SUBNETS_24" | head -1)"
 fi
 NODE_CIDR="${NODE_CIDR_OVERRIDE:-$DERIVED_NODE_CIDR}"
-inf "candidate NODE_CIDR (ipBlock value): ${C_B}${NODE_CIDR}${C_0}${NODE_CIDR_OVERRIDE:+ (overridden)}"
+inf "candidate NODE_CIDR (ipBlock value): ${C_B}${NODE_CIDR}${C_0}${NODE_CIDR_OVERRIDE:+ (from --node-cidr)}"
+if [ -z "$NODE_CIDR_OVERRIDE" ]; then
+  warn "NODE_CIDR was DERIVED from the currently-observed node IP(s), grouped into a /24 —"
+  warn "it is NOT the subnet's allocatable range. RISK: a node later allocated OUTSIDE this"
+  warn "range (autoscaling, node replacement, a second AZ/subnet) will NOT match the ipBlock,"
+  warn "so SEC-3 will DROP THE GATEWAY on that node — an intermittent, node-dependent outage"
+  warn "that this snapshot of running nodes cannot see."
+  warn "The correct ipBlock is the node subnet's FULL allocatable CIDR (the VPC/subnet CIDR;"
+  warn "on kind the docker-network CIDR — note up.sh uses the /16, not a /24), NOT this"
+  warn "observed-node grouping. For a cutover decision, re-run with:"
+  warn "    --node-cidr <real node subnet CIDR>"
+fi
 
 # ── 2. CNI + encapsulation mode ───────────────────────────────────────────────
 sec "2. CNI and encapsulation (does the CNI preserve the node IP as source?)"
@@ -308,15 +332,23 @@ fi
 sec "VERDICT"
 case "$VERDICT" in
   PASS)
-    if [ "$measured" = "PASS" ]; then
-      good "PASS (empirically confirmed) — the gateway's source to a cross-node backend"
-      good "was a node IP ∈ $NODE_CIDR; SEC-3's ipBlock will match the gateway."
-    else
-      good "PASS (topology-predicted) — node IP is preserved; SEC-3's ipBlock ($NODE_CIDR)"
-      good "will match the gateway. Run the MANUAL VERIFICATION above to confirm empirically."
-    fi
     inf  "Set the policy ipBlock cidr=$NODE_CIDR and port to the REAL backend container port."
-    exit 0 ;;
+    if [ "$measured" = "PASS" ]; then
+      good "PASS (empirically CONFIRMED, exit 0) — the gateway's source to a cross-node"
+      good "backend was measured as a node IP ∈ $NODE_CIDR; SEC-3's ipBlock will match."
+      exit 0
+    fi
+    # Topology-predicted: the inference is sound, but nothing MEASURED the real source.
+    good "PASS (topology-PREDICTED) — node IP is preserved BY INFERENCE; the source-IP"
+    good "measurement did NOT run, so nothing observed the real gateway source."
+    inf  "Run the MANUAL VERIFICATION above to confirm empirically."
+    if [ -n "$ACCEPT_PREDICTED" ]; then
+      warn "--accept-predicted set: accepting this UNMEASURED pass as success (exit 0)."
+      exit 0
+    fi
+    warn "exit 3 = PASS but UNMEASURED. A cutover gate should require exit 0 (PROVEN), not"
+    warn "merely 'not 1'. Re-run with --accept-predicted to accept, or do the manual check."
+    exit 3 ;;
   FAIL)
     bad  "FAIL — the gateway source would NOT match the ipBlock; enabling SEC-3 would drop the gateway."
     inf  "Do NOT enable SEC-3 on this cluster until the CNI/topology preserves the node IP as source."
