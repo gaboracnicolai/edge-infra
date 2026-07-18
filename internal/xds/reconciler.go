@@ -39,7 +39,6 @@ type Reconciler struct {
 	// permitting an intentional scale-to-zero / drain. Read once at construction.
 	allowEmpty bool
 
-	localVersion                 atomic.Uint64
 	localLast                    atomic.Pointer[reconcileResult]
 	lastSnap                     atomic.Pointer[cachev3.Snapshot]
 	emptySnapshotsBlocked        atomic.Uint64
@@ -322,37 +321,45 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 
 // resolveVersion determines the version string to stamp on the current snapshot.
 //
-// In HA mode all replicas share a single version counter via Redis so that
-// Envoy always sees the same version for the same config regardless of which
-// control-plane replica it is connected to. On Redis error the local counter
-// is used as a fallback so the server keeps running.
+// The version is a PURE FUNCTION OF THE CONFIG HASH (versionFromHash). This is the
+// key invariant — same config hash → same version string, for every replica and
+// ACROSS process restarts — and it is what makes xDS delivery correct:
 //
-// Key invariant: same config hash → same version string across all replicas.
+//   - Unchanged config after a restart yields the SAME version, so
+//     go-control-plane's SnapshotCache correctly dedups (no needless re-push).
+//   - Changed config ALWAYS yields a different version, so the cache delivers it to
+//     a still-connected Envoy. A per-process counter (the previous scheme) reset to
+//     "v1" on restart, colliding with the version Envoy already held; the cache
+//     compares the equal opaque version strings (pkg/cache/v3/simple.go) and
+//     withholds the changed CDS/LDS. Envoy shows cds/lds update_failure with
+//     update_rejected=0 — withheld delivery, not a NACK. A content-derived version
+//     cannot collide, so the roll-edge-proxy workaround is no longer needed.
+//
+// Because the hash is deterministic, replicas agree without any coordination. In HA
+// mode we still RECORD the live hash with the coordinator (best-effort, non-fatal)
+// so the shared store reflects "which config is current" for failover/observability
+// and for a future published-vs-ACKed divergence signal — but the version string is
+// hash-derived either way, so the two paths never disagree.
 func (r *Reconciler) resolveVersion(ctx context.Context, hash string) (string, error) {
-	if r.ha == nil {
-		return fmt.Sprintf("v%d", r.localVersion.Add(1)), nil
+	if r.ha != nil {
+		if _, err := r.ha.StoreHash(ctx, hash); err != nil {
+			r.log.Warn("ha: store hash failed (non-fatal; version is hash-derived)", "err", err)
+		}
 	}
+	return versionFromHash(hash), nil
+}
 
-	sharedHash, sharedVer, err := r.ha.LoadHash(ctx)
-	if err != nil {
-		r.log.Warn("ha: load hash failed, using local version", "err", err)
-		return fmt.Sprintf("v%d", r.localVersion.Add(1)), nil
+// versionFromHash derives the xDS snapshot version string from the sha256 config
+// hash. Envoy and go-control-plane treat the version as opaque, so a stable
+// function of the content is ideal. A 16-hex-char (64-bit) prefix distinguishes the
+// handful of live configs with a negligible collision probability while keeping the
+// version readable in logs and config_dump.
+func versionFromHash(hash string) string {
+	const n = 16
+	if len(hash) >= n {
+		return hash[:n]
 	}
-
-	if sharedHash == hash {
-		// Another replica already recorded and pushed this config. We still
-		// populate our local in-memory cache for the nodes connected to this
-		// instance, but we reuse the existing version so Envoy sees a
-		// consistent picture across replicas on failover.
-		return fmt.Sprintf("v%d", sharedVer), nil
-	}
-
-	newVer, err := r.ha.StoreHash(ctx, hash)
-	if err != nil {
-		r.log.Warn("ha: store hash failed, using local version", "err", err)
-		return fmt.Sprintf("v%d", r.localVersion.Add(1)), nil
-	}
-	return fmt.Sprintf("v%d", newVer), nil
+	return hash
 }
 
 // Run executes an immediate Reconcile, then loops on a ticker plus the

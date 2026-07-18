@@ -341,8 +341,10 @@ func TestReconcile_HACoordinator_UsesSharedVersion(t *testing.T) {
 
 	snap, err := cache.GetSnapshot(testNodeID)
 	require.NoError(t, err)
-	// StoreHash was called (no prior hash), version incremented to 1.
-	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
+	// The version is hash-derived, so HA mode stamps the SAME version a plain local
+	// reconciler would for this config — one scheme, both paths agree.
+	assert.Equal(t, reconcileVersionFresh(t, newCache(), sampleSnapshot()),
+		snap.GetVersion(resourcev3.ClusterType))
 }
 
 func TestReconcile_HACoordinator_ReuseVersionOnSameHash(t *testing.T) {
@@ -382,8 +384,10 @@ func TestReconcile_HACoordinator_ErrorFallsBackToLocal(t *testing.T) {
 
 	snap, err := cache.GetSnapshot(testNodeID)
 	require.NoError(t, err)
-	// Falls back to local version counter, which starts at 1.
-	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
+	// A coordinator error only skips the best-effort hash record; the version is
+	// still hash-derived, identical to local mode.
+	assert.Equal(t, reconcileVersionFresh(t, newCache(), sampleSnapshot()),
+		snap.GetVersion(resourcev3.ClusterType))
 }
 
 func TestReconcile_HACoordinator_NilIsLocalMode(t *testing.T) {
@@ -394,7 +398,10 @@ func TestReconcile_HACoordinator_NilIsLocalMode(t *testing.T) {
 	require.NoError(t, r.Reconcile(context.Background()))
 	snap, err := cache.GetSnapshot(testNodeID)
 	require.NoError(t, err)
-	assert.Equal(t, "v1", snap.GetVersion(resourcev3.ClusterType))
+	// Deterministic, hash-derived version: a second fresh process on the same config
+	// produces the identical string — the across-restart invariant.
+	assert.Equal(t, reconcileVersionFresh(t, newCache(), sampleSnapshot()),
+		snap.GetVersion(resourcev3.ClusterType))
 }
 
 func TestReconcile_EmptyCollapseAfterHealthyKeepsLastSnapshot(t *testing.T) {
