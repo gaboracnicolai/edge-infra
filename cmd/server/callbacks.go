@@ -7,6 +7,7 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 
 	"github.com/edge-infra/control-plane/internal/xds"
 )
@@ -25,6 +26,13 @@ func (cb *onConnectCallbacks) OnStreamRequest(_ int64, req *discovery.DiscoveryR
 	if req.Node == nil || req.Node.Id == "" {
 		return nil
 	}
+	// Record the version this node has ACKed so the divergence metric can count nodes
+	// that have not acknowledged the current published config. CDS is the
+	// representative wildcard type (the one the #47 version collision withheld); its
+	// request version_info is the version the node currently holds.
+	if req.GetTypeUrl() == resourcev3.ClusterType {
+		cb.reconciler.RecordNodeAck(req.Node.Id, req.GetVersionInfo())
+	}
 	if _, err := cb.cache.GetSnapshot(req.Node.Id); err != nil {
 		// No snapshot yet for this node — push one immediately rather than
 		// waiting for the next reconcile tick.
@@ -34,10 +42,20 @@ func (cb *onConnectCallbacks) OnStreamRequest(_ int64, req *discovery.DiscoveryR
 	return nil
 }
 
-// The remaining methods are no-ops; only OnStreamRequest is needed.
+// OnStreamOpen/OnStreamClosed track the live xDS stream count (edge_cp_grpc_streams_active)
+// and clear a node's ACK state on disconnect so it is not counted as behind.
 
-func (cb *onConnectCallbacks) OnStreamOpen(_ context.Context, _ int64, _ string) error { return nil }
-func (cb *onConnectCallbacks) OnStreamClosed(_ int64, _ *core.Node)                    {}
+func (cb *onConnectCallbacks) OnStreamOpen(_ context.Context, _ int64, _ string) error {
+	cb.reconciler.StreamOpened()
+	return nil
+}
+
+func (cb *onConnectCallbacks) OnStreamClosed(_ int64, node *core.Node) {
+	cb.reconciler.StreamClosed()
+	if node != nil && node.Id != "" {
+		cb.reconciler.ForgetNode(node.Id)
+	}
+}
 func (cb *onConnectCallbacks) OnDeltaStreamOpen(_ context.Context, _ int64, _ string) error {
 	return nil
 }

@@ -21,6 +21,12 @@ type reconcilerCounters interface {
 	AuthWantedButExtAuthzOff() uint64
 	EmptyFirstBootPublished() uint64
 	InconsistentFirstBootPublished() uint64
+
+	// edge_cp_* control-plane gauges (backing the dashboards/alerts #46 removed).
+	LastReconcileUnix() int64
+	LastReconcileDurationSeconds() float64
+	ActiveStreams() int64
+	NodesBehind() int
 }
 
 // reason label values for xds_snapshots_blocked_total.
@@ -62,6 +68,34 @@ var snapshotsPublishedDegradedDesc = prometheus.NewDesc(
 	nil,
 )
 
+// edge_cp_* control-plane gauges. These back the dashboard panels and alert rules
+// removed in #46 for lack of an emitter (restored in this same change), plus the new
+// delivery-divergence signal.
+var (
+	lastReconcileDesc = prometheus.NewDesc(
+		"edge_cp_last_reconcile_timestamp_seconds",
+		"Unix timestamp of the control-plane's last successful reconcile (loop liveness).",
+		nil, nil,
+	)
+	reconcileDurationDesc = prometheus.NewDesc(
+		"edge_cp_reconcile_duration_seconds",
+		"Duration of the control-plane's last reconcile, in seconds.",
+		nil, nil,
+	)
+	grpcStreamsActiveDesc = prometheus.NewDesc(
+		"edge_cp_grpc_streams_active",
+		"Currently-open xDS (ADS) gRPC streams from the Envoy fleet.",
+		nil, nil,
+	)
+	nodesBehindDesc = prometheus.NewDesc(
+		"edge_cp_nodes_behind",
+		"Connected nodes whose last-ACKed xDS version is not the current published "+
+			"version (delivery divergence). Unlike xds_snapshots_blocked_total, this "+
+			"catches config that was published but whose DELIVERY was withheld.",
+		nil, nil,
+	)
+)
+
 // reconcilerCollector exports the reconciler's guard counters as Prometheus
 // counters. It is a pure READ view over the reconciler's atomic counters: Collect
 // snapshots the current values on each scrape and emits them as monotonic
@@ -83,6 +117,10 @@ func newReconcilerCollector(src reconcilerCounters) *reconcilerCollector {
 func (c *reconcilerCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- snapshotsBlockedDesc
 	ch <- snapshotsPublishedDegradedDesc
+	ch <- lastReconcileDesc
+	ch <- reconcileDurationDesc
+	ch <- grpcStreamsActiveDesc
+	ch <- nodesBehindDesc
 }
 
 func (c *reconcilerCollector) Collect(ch chan<- prometheus.Metric) {
@@ -94,6 +132,14 @@ func (c *reconcilerCollector) Collect(ch chan<- prometheus.Metric) {
 	emit(snapshotsBlockedDesc, reasonAuthOff, c.src.AuthWantedButExtAuthzOff())
 	emit(snapshotsPublishedDegradedDesc, reasonEmptyFirstBoot, c.src.EmptyFirstBootPublished())
 	emit(snapshotsPublishedDegradedDesc, reasonInconsistentFirstBoot, c.src.InconsistentFirstBootPublished())
+
+	gauge := func(desc *prometheus.Desc, v float64) {
+		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, v)
+	}
+	gauge(lastReconcileDesc, float64(c.src.LastReconcileUnix()))
+	gauge(reconcileDurationDesc, c.src.LastReconcileDurationSeconds())
+	gauge(grpcStreamsActiveDesc, float64(c.src.ActiveStreams()))
+	gauge(nodesBehindDesc, float64(c.src.NodesBehind()))
 }
 
 // NewMetricsHandler returns an http.Handler serving the reconciler's observability
