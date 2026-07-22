@@ -26,6 +26,18 @@ config:
   xdsNodeId: "edge-proxy"
   reconcileIntervalMs: 5000
 
+# Admin READ API (cmd/server's fourth listener, /admin/v1/*; consumed by the
+# talyvor-suite BFF). READ-ONLY by design — it reports topology/nodes/certs/
+# provisioning/effective-config and can change nothing. OPT-IN and fail-closed
+# twice over: the binary refuses to start the listener without a key, and this
+# chart wires neither the env nor the port unless existingSecret is set — the
+# DEFAULT ("") keeps the surface nonexistent. The key itself lives in a Secret
+# created out of band; it is never a plain value here.
+adminApi:
+  port: 18002
+  existingSecret: ""            # Secret holding the admin key; "" ⇒ admin API off
+  secretKey: "admin-api-key"    # key within that Secret
+
 # Gateway HTTP rate limiting (Envoy local_ratelimit, per listener, per Envoy
 # instance). Fail-open: a limiter problem never blocks traffic. Defaults are
 # generous (100 req/s, burst 200) so only floods are throttled.

@@ -68,4 +68,10 @@ go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
 echo "==> go edge-secrets custodian E2E (component write -> LoadSnapshot renders per-SNI)"
 go test -count=1 -tags integration ./internal/secrets/ -run TestE2E
 
+echo "==> go admin read-API store readers (key-free by construction)"
+go test -count=1 -tags integration ./internal/store/ -run TestAdminRead
+
+echo "==> go admin read-API E2E (five endpoints; no response may carry key material)"
+go test -count=1 -tags integration ./cmd/server/ -run TestAdminAPI
+
 echo "==> PASS: OSB -> data-plane translator proven against one shared DB"

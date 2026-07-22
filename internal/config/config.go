@@ -16,6 +16,14 @@ type Config struct {
 	NodeID            string
 	ReconcileInterval time.Duration
 
+	// Admin READ API (cmd/server's fourth listener; consumed by the suite BFF).
+	// OPT-IN and fail-closed: the listener starts ONLY when AdminAPIKey is set —
+	// unset means the surface does not exist. Read-only by design: it reports
+	// state (including the effective ext_authz flag) and offers no way to change
+	// anything.
+	AdminAddr   string // XDS_ADMIN_ADDR (default :18002)
+	AdminAPIKey string // XDS_ADMIN_API_KEY; empty ⇒ admin API disabled
+
 	// HA — all optional. When RedisAddr is empty the server runs in
 	// single-instance mode with local in-process state.
 	RedisAddr     string
@@ -71,6 +79,8 @@ func FromEnv() (*Config, error) {
 		TLSCertFile:       os.Getenv("XDS_TLS_CERT"),
 		TLSKeyFile:        os.Getenv("XDS_TLS_KEY"),
 		TLSCAFile:         os.Getenv("XDS_TLS_CA"),
+		AdminAddr:         getenv("XDS_ADMIN_ADDR", ":18002"),
+		AdminAPIKey:       os.Getenv("XDS_ADMIN_API_KEY"),
 	}
 	if c.PostgresDSN == "" {
 		return nil, fmt.Errorf("POSTGRES_DSN is required")

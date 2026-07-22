@@ -2,10 +2,6 @@ package secrets
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"time"
@@ -134,15 +130,12 @@ func (s *Store) GetMeta(ctx context.Context, name string) (*SecretMeta, error) {
 }
 
 // certMeta parses a cert PEM and returns its SHA-256 fingerprint + notAfter.
+// Composes ParseCertInfo (certinfo.go) so GetMeta and the control-plane Admin
+// API's /admin/v1/certificates describe a certificate identically, forever.
 func certMeta(certPEM string) (string, time.Time, error) {
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil {
-		return "", time.Time{}, errors.New("no PEM block in cert")
-	}
-	c, err := x509.ParseCertificate(block.Bytes)
+	info, err := ParseCertInfo(certPEM)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	sum := sha256.Sum256(c.Raw)
-	return hex.EncodeToString(sum[:]), c.NotAfter, nil
+	return info.Fingerprint, info.NotAfter, nil
 }
