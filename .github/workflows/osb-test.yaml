@@ -19,6 +19,7 @@ on:
       - 'internal/store/**'
       - 'internal/secrets/**'
       - 'cmd/secrets/**'
+      - 'cmd/server/**'
       - '.github/workflows/osb-test.yaml'
   pull_request:
     branches: [main]
@@ -27,6 +28,7 @@ on:
       - 'internal/store/**'
       - 'internal/secrets/**'
       - 'cmd/secrets/**'
+      - 'cmd/server/**'
       - '.github/workflows/osb-test.yaml'
 
 jobs:
@@ -111,3 +113,9 @@ jobs:
         run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
       - name: Go edge-secrets custodian E2E (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./internal/secrets/ -run TestE2E
+      # Admin READ API: key-free store readers + the five-endpoint leak-guard
+      # E2E (no response may carry key material; readers need no KEK).
+      - name: Go admin read-API store readers (-count=1, no cached pass)
+        run: go test -count=1 -tags integration ./internal/store/ -run TestAdminRead
+      - name: Go admin read-API E2E leak guard (-count=1, no cached pass)
+        run: go test -count=1 -tags integration ./cmd/server/ -run TestAdminAPI

@@ -49,6 +49,11 @@ spec:
             - name: health
               containerPort: 18001
               protocol: TCP
+            {{- if .Values.adminApi.existingSecret }}
+            - name: admin
+              containerPort: {{ .Values.adminApi.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: XDS_LISTEN_ADDR
               value: {{ .Values.config.xdsListenAddr | quote }}
@@ -58,6 +63,17 @@ spec:
               value: {{ .Values.config.xdsNodeId | quote }}
             - name: XDS_RECONCILE_INTERVAL_MS
               value: {{ .Values.config.reconcileIntervalMs | quote }}
+            {{- if .Values.adminApi.existingSecret }}
+            # Admin READ API — the key's presence is what turns the listener on
+            # (the binary fails closed without XDS_ADMIN_API_KEY).
+            - name: XDS_ADMIN_ADDR
+              value: {{ printf "0.0.0.0:%v" .Values.adminApi.port | quote }}
+            - name: XDS_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adminApi.existingSecret }}
+                  key: {{ .Values.adminApi.secretKey }}
+            {{- end }}
             - name: GW_RATELIMIT_ENABLED
               value: {{ .Values.rateLimit.enabled | quote }}
             - name: GW_RATELIMIT_MAX_TOKENS

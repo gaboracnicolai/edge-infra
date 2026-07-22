@@ -1,6 +1,9 @@
 package xds
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // This file holds the reconciler's read-only observability accessors and the
 // per-node ACK tracking behind the delivery-divergence signal. None of it changes
@@ -55,6 +58,38 @@ func (r *Reconciler) PublishedVersion() string {
 		return p.Version
 	}
 	return ""
+}
+
+// NodeStatus is one connected node's delivery state: the xDS version it last
+// ACKed and whether that trails the published version. It is the per-node view
+// behind /admin/v1/nodes; the aggregate NodesBehind() collapses it to a count.
+//
+// SCOPE: entries exist only for nodes with OPEN xDS streams (RecordNodeAck /
+// ForgetNode). There is no registry of EXPECTED nodes anywhere — absence from
+// this list means "not connected", never "healthy".
+type NodeStatus struct {
+	NodeID       string
+	AckedVersion string
+	Behind       bool
+}
+
+// NodeStatuses returns the per-node ACK view, sorted by node id. Behind is
+// computed exactly as NodesBehind counts it: a node trails only once a version
+// has been published (before the first publish nothing is "behind").
+func (r *Reconciler) NodeStatuses() []NodeStatus {
+	published := r.PublishedVersion()
+	r.ackMu.Lock()
+	out := make([]NodeStatus, 0, len(r.nodeAcks))
+	for id, acked := range r.nodeAcks {
+		out = append(out, NodeStatus{
+			NodeID:       id,
+			AckedVersion: acked,
+			Behind:       published != "" && acked != published,
+		})
+	}
+	r.ackMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
 }
 
 // NodesBehind returns how many connected nodes have NOT acknowledged the current

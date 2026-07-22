@@ -18,3 +18,9 @@ spec:
       port: {{ .Values.service.metricsPort }}
       targetPort: metrics
       protocol: TCP
+    {{- if .Values.adminApi.existingSecret }}
+    - name: admin
+      port: {{ .Values.adminApi.port }}
+      targetPort: admin
+      protocol: TCP
+    {{- end }}

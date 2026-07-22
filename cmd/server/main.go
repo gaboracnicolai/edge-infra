@@ -145,10 +145,10 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Buffered for all long-lived goroutines (gRPC, reconciler, health, metrics)
-	// so each can report its exit without blocking even when the select below has
-	// already returned on another's error or on shutdown.
-	errCh := make(chan error, 4)
+	// Buffered for all long-lived goroutines (gRPC, reconciler, health, metrics,
+	// admin) so each can report its exit without blocking even when the select
+	// below has already returned on another's error or on shutdown.
+	errCh := make(chan error, 5)
 	go func() {
 		log.Info("xds gRPC listening", "addr", cfg.ListenAddr, "node_id", cfg.NodeID)
 		errCh <- grpcSrv.Serve(lis)
@@ -171,6 +171,26 @@ func run(log *slog.Logger) error {
 	go func() {
 		errCh <- runMetricsServer(rootCtx, metricsSrv, log)
 	}()
+
+	// Admin READ API (fourth listener; consumed by the suite BFF). OPT-IN and
+	// fail-closed: without XDS_ADMIN_API_KEY the surface does not exist at all.
+	// Read-only by design — see admin.go. Uses the same pgStore (its key-free
+	// admin readers never touch key_pem) and the reconciler's read-only
+	// observability accessors.
+	if cfg.AdminAPIKey != "" {
+		adminSrv := newAdminServer(cfg.AdminAddr, adminDeps{
+			store: pgStore,
+			nodes: reconciler,
+			cfg:   newAdminConfigView(cfg),
+			key:   cfg.AdminAPIKey,
+			log:   log,
+		})
+		go func() {
+			errCh <- runAdminServer(rootCtx, adminSrv, log)
+		}()
+	} else {
+		log.Info("admin API disabled (XDS_ADMIN_API_KEY unset)")
+	}
 
 	select {
 	case <-rootCtx.Done():
