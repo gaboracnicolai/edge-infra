@@ -7,31 +7,57 @@ License text copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
 
 Parameters
 
-Licensor:             MIXTET
-                      [EXACT REGISTERED LEGAL NAME TO BE CONFIRMED BEFORE MERGE]
+Licensor:             Talyvor LTD
 
 Licensed Work:        Talyvor Edge Infrastructure
-                      The Licensed Work is (c) 2026 MIXTET
+                      The Licensed Work is (c) 2026 Talyvor LTD
 
-Additional Use Grant: You may make production use of the Licensed Work, provided
-                      that you do not offer the Licensed Work to third parties as
-                      a hosted or managed service, or as a substantial component
-                      of a product whose primary value is the functionality of
-                      the Licensed Work.
+Additional Use Grant: You may make production use of the Licensed Work, on the
+                      terms set out in paragraphs 1 and 2 below.
 
-                      For the avoidance of doubt, this grant permits an
-                      organisation to run the Licensed Work on its own
-                      infrastructure, for its own internal business purposes and
-                      for those of its Affiliates, including processing data of
-                      that organisation's own customers in the course of
-                      operating that organisation's own products and services.
+                      1. Use for yourself. You may run the Licensed Work on your
+                      own infrastructure for the business purposes of you and your
+                      Affiliates. This includes processing data of your own
+                      customers in the course of operating your own products and
+                      services.
+
+                      2. Use on behalf of one other organisation. You may run the
+                      Licensed Work on behalf of one other organisation — for
+                      example as an integrator, reseller, consultant or managed
+                      service provider. You may hold any number of such
+                      engagements, provided that each Deployment of the Licensed
+                      Work serves exactly one such organisation.
+
+                      This grant does not extend to Making the Licensed Work
+                      Available to Others where a single Deployment serves two or
+                      more organisations that are not Affiliates of one another.
+                      That use requires a commercial licence from the Licensor.
+
+                      Definitions, which apply only to this Additional Use Grant:
+
+                      "Deployment" means one running instance or cluster of
+                      instances of the Licensed Work, together with its own
+                      configuration and its own data store.
+
+                      "Making the Licensed Work Available to Others" means giving a
+                      third party access to the application programming interfaces,
+                      user interfaces, command line interfaces, or substantially
+                      equivalent functionality of the Licensed Work, whether for a
+                      fee or free of charge. It does not include offering a product
+                      or service of your own that uses the Licensed Work internally,
+                      where that third party has no access to those interfaces.
+
+                      "Affiliate" means an entity that controls, is controlled by,
+                      or is under common control with another entity, where
+                      "control" means direct or indirect ownership of more than 50%
+                      of the voting interests of that entity.
 
 Change Date:          2030-07-26
 
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed Work,
-please contact [COMMERCIAL LICENSING CONTACT TO BE CONFIRMED BEFORE MERGE].
+please contact hello@talyvor.com.
 
 -----------------------------------------------------------------------------
 
@@ -97,8 +123,8 @@ other recipients of the licensed work to be provided by Licensor:
    version. Licensor may specify additional Change Licenses without limitation.
 
 2. To either: (a) specify an additional grant of rights to use that does not
-   impose any additional restriction on the right granted in this License, as the
-   Additional Use Grant; or (b) insert the text "None".
+   impose any additional restriction on the right granted in this License; or (b)
+   insert the text "None".
 
 3. To specify a Change Date.
 
