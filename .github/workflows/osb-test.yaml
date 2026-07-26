@@ -20,6 +20,8 @@ on:
       - 'internal/secrets/**'
       - 'cmd/secrets/**'
       - 'cmd/server/**'
+      - 'internal/migrate/**'
+      - 'migrations/**'
       - '.github/workflows/osb-test.yaml'
   pull_request:
     branches: [main]
@@ -29,6 +31,8 @@ on:
       - 'internal/secrets/**'
       - 'cmd/secrets/**'
       - 'cmd/server/**'
+      - 'internal/migrate/**'
+      - 'migrations/**'
       - '.github/workflows/osb-test.yaml'
 
 jobs:
@@ -119,3 +123,42 @@ jobs:
         run: go test -count=1 -tags integration ./internal/store/ -run TestAdminRead
       - name: Go admin read-API E2E leak guard (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./cmd/server/ -run TestAdminAPI
+      # Schema-safety + co-location suites. BOTH reset `public` on the database
+      # they are given (DROP SCHEMA public CASCADE), so each gets its OWN
+      # throwaway database — never `edge`, which the steps above depend on.
+      #
+      # Until now neither ran anywhere: no workflow named ./internal/migrate/,
+      # and internal/store was only ever entered with -run TestLoadSnapshot_OSB
+      # / TestAdminRead, neither of which matches TestVerifyColocation. That
+      # invariant is what cmd/server/admin.go cites as the reason the Admin API
+      # may share this process — a justification resting on a test that had
+      # never executed. internal/ciguard now fails the build if this recurs.
+      - name: Create throwaway databases for the schema suites
+        run: |
+          python - <<'PY'
+          import asyncio, os, asyncpg
+          async def main():
+              conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
+              try:
+                  for db in ("migrate_test", "colocation_test"):
+                      await conn.execute(f'DROP DATABASE IF EXISTS {db}')
+                      await conn.execute(f'CREATE DATABASE {db}')
+              finally:
+                  await conn.close()
+          asyncio.run(main())
+          PY
+      # `go test` exits 0 on a SKIP, and both suites skip themselves when their
+      # DSN is unset — so "wired into CI" and "actually executed" are different
+      # claims. Assert the stronger one: any SKIP here fails the step.
+      - name: Go migration-safety suite (-count=1, no cached pass)
+        env:
+          MIGRATE_TEST_DSN: postgres://osb:osb@localhost:5432/migrate_test?sslmode=disable
+        run: |
+          go test -count=1 -v -tags integration ./internal/migrate/ -run 'TestApply|TestBaseline' 2>&1 | tee /tmp/migrate-suite.log
+          ! grep -q -- '--- SKIP' /tmp/migrate-suite.log
+      - name: Go co-location invariant (-count=1, no cached pass)
+        env:
+          COLOCATION_TEST_DSN: postgres://osb:osb@localhost:5432/colocation_test?sslmode=disable
+        run: |
+          go test -count=1 -v -tags integration ./internal/store/ -run TestVerifyColocation 2>&1 | tee /tmp/colocation.log
+          ! grep -q -- '--- SKIP' /tmp/colocation.log

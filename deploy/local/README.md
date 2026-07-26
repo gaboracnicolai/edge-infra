@@ -96,12 +96,21 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
   tunnel's pod-CIDR IP as source — which would NOT match a node-CIDR ipBlock allow,
   so the gateway would be dropped. kind nodes share one subnet, so `CrossSubnet`
   uses native routing and preserves the node IP as source.
-- **edge-proxy roll after an ext_authz flip** (CFG-1): the control-plane's xDS
-  snapshot version counter is per-process (non-HA), so it RESETS to `v1` when the
-  control-plane rolls on a flip. A still-connected edge-proxy holding a higher
-  version then rejects the new push as stale (`cds/lds update_failure`; the config
-  silently never applies). `helm_set_extauthz` rolls edge-proxy after every flip
-  so it reconnects fresh and applies the new config cleanly.
+- **edge-proxy roll after an ext_authz flip** (CFG-1): `helm_set_extauthz` rolls
+  edge-proxy after every flip so it reconnects fresh.
+  **⚠ STALE RATIONALE — the original reason no longer applies on `main`.** It was:
+  the xDS snapshot version counter was per-process, so it RESET to `v1` when the
+  control-plane rolled on a flip, and a still-connected edge-proxy holding a higher
+  version rejected the new push as stale (`cds/lds update_failure`; the config
+  silently never applied). **#47 made the version a pure function of the config
+  hash** (`internal/xds/reconciler.go:399-440`), and `reconciler.go:413` states
+  outright that the roll workaround is no longer needed. The roll is now harmless
+  belt-and-braces, not a requirement.
+  **But note:** the committed control-plane image pin (`values.yaml:5`,
+  `447ceb18`, 2026-05-20) PREDATES #47, so against that image the old rationale
+  still holds. Two staleness bugs cancelling out is not a safety property — see
+  the root [README](../../README.md) and
+  [docs/ext-authz-cutover-and-rollback.md](../../docs/ext-authz-cutover-and-rollback.md).
 - **In-cluster JWT minter** (Phase 12): the macOS system `curl` is LibreSSL and
   cannot TLS-handshake the issuer's Go server, so the token is minted from an
   in-cluster OpenSSL `curl` pod (`POST /login`) rather than a host port-forward.
@@ -169,10 +178,19 @@ pass.
 `none`-policy routes (tenant-a/b) are per-route ext_authz **Disabled**, so they keep
 serving without a token — the identity-header injection is only for the `jwt` route.
 
-**Rollback (safe):** a FULL revert — `--set extAuthz.enabled=false` **AND** remove
-the jwt route. Flipping `enabled=false` alone while the jwt route is present
-re-triggers the CFG-1 guard ⇒ deny-all. The end state is ext_authz **ON** with
-secure.local(jwt) + tenant-a/b(none) all serving.
+**Rollback (safe, LOCAL ONLY):** a FULL revert — `--set extAuthz.enabled=false`
+**AND** remove the jwt route. Flipping `enabled=false` alone while the jwt route is
+present re-triggers the CFG-1 guard ⇒ deny-all. The end state is ext_authz **ON**
+with secure.local(jwt) + tenant-a/b(none) all serving.
+
+> **⚠ DO NOT CARRY THIS PROCEDURE TO PRODUCTION.** It is written in `helm --set`
+> terms for a 3-route demo where "remove the jwt route" is one seeded row. In
+> production every route defaults to `auth_policy='jwt'`, so the equivalent is
+> mutating every tenant's route while the gateway denies traffic — not something
+> anyone can execute under pressure. The production rollback is a single SQL
+> statement and is written up, with its verification steps and its one big caveat
+> (OSB re-provisioning silently restores `auth_policy`), in
+> [docs/ext-authz-cutover-and-rollback.md](../../docs/ext-authz-cutover-and-rollback.md).
 
 ### Honesty — the SEC-3 precision ceiling still applies
 
