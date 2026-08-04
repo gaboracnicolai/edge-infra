@@ -29,16 +29,30 @@ worker:
 
 config:
   # All process config (DATABASE_URL, NATS_URL, …) is pulled from this secret
-  # via envFrom. Two independent access-control keys (ISO 27001 A.9) can be added
-  # to this secret; both default to unset (open) for local dev:
-  #   - API_KEY        gates the provisioning API (POST/DELETE /v1/services,
-  #                    GET /v1/requests). Callers must send
-  #                    `Authorization: Bearer <key>` → 401 if missing, 403 if wrong.
-  #                    NOTE: shared-key scheme is provisional, pending Nicolai's
-  #                    sign-off on the real caller credential (key vs. mTLS).
+  # via envFrom.
+  #
+  # THE PROVISIONING API IS NOT GATED BY ANY VALUE IN THIS SECRET. It is gated
+  # per tenant: callers send `Authorization: Bearer <key>`, the broker SHA-256s
+  # it and looks it up in the `tenant_api_keys` table (keys are never stored in
+  # the clear). The row's team is the caller's ONLY tenant — a request body can
+  # never name another one. 401 with no bearer, 403 when unrecognized. There is
+  # nothing to set here to turn that on: it is on, and OSB REFUSES TO START when
+  # `tenant_api_keys` is empty (see startup_tenancy_check).
+  #
+  # ⚠ This block previously documented an `API_KEY` here as the provisioning
+  # gate. No such setting has ever existed — Settings is `extra="ignore"`, so an
+  # operator who set it got no error and no gate, only the belief they had
+  # configured one. The per-tenant scheme above replaced that never-built
+  # shared-key design. tests/test_chart_config_contract.py now fails if any key
+  # documented in this block is not a field the process actually reads.
+  #
+  # Access-control settings that DO live in this secret (ISO 27001 A.9):
   #   - ADMIN_API_KEY  gates /metrics. Callers (incl. Prometheus) must send a
   #                    matching X-Admin-Key header. Enabling it requires the
   #                    scrape job to inject the header (see podAnnotations below).
+  #                    ⚠ UNSET = OPEN: /metrics is unauthenticated by default,
+  #                    and this chart supplies no value for it. Set it here if
+  #                    the metrics surface must be closed.
   existingSecret: edge-osb-secrets
 
 # Transport security (ISO 27001 A.13). When `tls` is set, the OSB mounts its
