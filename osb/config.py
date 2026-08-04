@@ -32,7 +32,13 @@ class Settings(BaseSettings):
     admin_api_key: str | None = None  # gates /metrics; unset = open (local dev)
     # Tenant isolation (R4 Stage 2): the provisioning API resolves the caller's
     # tenant from a per-tenant key in tenant_api_keys (hashed at rest); that team
-    # is the ONLY tenant — the request body can never set it. OSB_ALLOW_UNTENANTED
+    # is the ONLY tenant — the request body can never set it. ALLOW_UNTENANTED
+    # (⚠ NOT "OSB_ALLOW_UNTENANTED" — Settings sets no env_prefix, so the name is
+    # the field's own, unprefixed. Every message in this service named the
+    # prefixed form, which pydantic-settings silently ignored: the hatch could
+    # not be opened by the name we told people to use, and an operator auditing
+    # for the prefixed string would never find the switch that really opens it.
+    # tests/test_env_var_names_are_real.py fails if that drifts back.)
     # is an explicit dev/open escape hatch that DEFAULTS FALSE; with no keys
     # configured and the flag false, OSB refuses to start (fail-closed, A.9).
     allow_untenanted: bool = False

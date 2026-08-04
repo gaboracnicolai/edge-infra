@@ -231,7 +231,7 @@ async def test_delete_derives_name_from_caller_team_not_stored_row(pool):
 async def test_startup_refuses_without_keys_when_untenanted_false(pool):
     from main import startup_tenancy_check
 
-    cfg = Settings()  # OSB_ALLOW_UNTENANTED defaults false; tenant_api_keys empty
+    cfg = Settings()  # ALLOW_UNTENANTED defaults false; tenant_api_keys empty
     with pytest.raises(RuntimeError):
         await startup_tenancy_check(pool, cfg)
 

@@ -78,7 +78,7 @@ async def require_tenant(
 
     The returned team is the ONLY tenant for the request — the body can never set
     or cross it. 401 when no bearer is presented, 403 when the bearer is
-    unrecognized. In explicit open mode (OSB_ALLOW_UNTENANTED=true, dev only) an
+    unrecognized. In explicit open mode (ALLOW_UNTENANTED=true, dev only) an
     unresolved caller falls back to the X-Tenant header or "default".
     """
     token = bearer_token(authorization)
@@ -98,21 +98,21 @@ async def require_tenant(
 async def startup_tenancy_check(pool, settings: Settings) -> None:
     """Fail closed: refuse to start when tenant isolation is unconfigured.
 
-    With OSB_ALLOW_UNTENANTED false (default) and no rows in tenant_api_keys,
+    With ALLOW_UNTENANTED false (default) and no rows in tenant_api_keys,
     every provisioning call would be unauthenticated — so refuse to start rather
     than silently run open (like R1 ext_authz's fail-closed posture). Set the
     flag true (dev) to bypass.
     """
     if settings.allow_untenanted:
         log.warning(
-            "OSB_ALLOW_UNTENANTED=true — provisioning runs WITHOUT tenant isolation (dev only)"
+            "ALLOW_UNTENANTED=true — provisioning runs WITHOUT tenant isolation (dev only)"
         )
         return
     count = await pool.fetchval("SELECT count(*) FROM tenant_api_keys")
     if not count:
         raise RuntimeError(
-            "no tenant_api_keys configured and OSB_ALLOW_UNTENANTED is false — "
-            "refusing to start (populate tenant_api_keys or set OSB_ALLOW_UNTENANTED=true for dev)"
+            "no tenant_api_keys configured and ALLOW_UNTENANTED is false — "
+            "refusing to start (populate tenant_api_keys or set ALLOW_UNTENANTED=true for dev)"
         )
 
 
