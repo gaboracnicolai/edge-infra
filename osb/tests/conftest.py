@@ -66,7 +66,7 @@ async def app_client(mock_pool: AsyncMock, mock_js: AsyncMock) -> AsyncIterator[
 
     ASGITransport does not run lifespan events, so we wire the pool and js
     handles directly onto app.state for each test. These surface/validation
-    tests run in open mode (OSB_ALLOW_UNTENANTED); enforced tenant isolation is
+    tests run in open mode (ALLOW_UNTENANTED); enforced tenant isolation is
     covered in test_tenancy.py against a real DB.
     """
     import main
