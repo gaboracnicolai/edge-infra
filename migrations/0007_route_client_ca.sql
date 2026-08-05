@@ -5,7 +5,18 @@
 --
 -- REFERENCE ONLY (SDS resolves the trusted_ca from the secrets table); OSB never
 -- writes CA material. NULLABLE, deliberately NO foreign key — same decoupling as
--- tls_secret_name (3b-i): a missing CA renders an unresolved SDS ref, so that
--- SNI's mTLS handshake fails closed (never a bypass, never affects other SNIs).
+-- tls_secret_name (3b-i): a NAME THAT DOES NOT RESOLVE renders an unresolved SDS
+-- ref, so that SNI's mTLS handshake fails closed (never a bypass, never affects
+-- other SNIs).
+--
+-- ⚠ CORRECTED. The sentence above originally read "a missing CA … never a
+-- bypass", which was false for the case NULLABLE actually creates. It holds when
+-- the NAME IS PRESENT and does not resolve. It does NOT hold when the name is
+-- ABSENT: lds.go emits the validation_context and require_client_certificate only
+-- when the CA name is non-empty, so there is no SDS reference at all to be
+-- unresolved — and rds.go has already disabled ext_authz for an mtls route. The
+-- result is a route that authenticates nobody. Closed by migration 0008 (a CHECK
+-- constraint) and by builders.AnyMTLSRouteMissingClientCA, which makes the
+-- reconciler refuse to publish such a snapshot.
 
 ALTER TABLE routes ADD COLUMN client_ca_secret_name TEXT;

@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -175,6 +176,42 @@ func anyRouteNeedsLocalRateLimit(routes []store.Route) bool {
 func AnyRouteWantsAuth(routes []store.Route) bool {
 	for _, r := range routes {
 		if r.AuthPolicy != "none" {
+			return true
+		}
+	}
+	return false
+}
+
+// AnyMTLSRouteMissingClientCA reports whether any route declares auth_policy
+// 'mtls' without naming a client-CA secret. That combination renders an OPEN
+// route and must never reach a proxy.
+//
+// WHY IT IS OPEN. 'mtls' means "the client cert IS the auth", so rds.go sets
+// ExtAuthzPerRoute{Disabled} — no JWT check, no auth-service call. The matching
+// cert requirement is emitted by downstreamTLS ONLY when clientCAName != "": no
+// name, no validation_context, no require_client_certificate. The result is a
+// listener that authenticates nobody by either mechanism.
+//
+// ⚠ THIS IS NOT THE CASE MIGRATION 0007 DESCRIBES. Its comment says a missing CA
+// "renders an unresolved SDS ref, so that SNI's mTLS handshake fails closed
+// (never a bypass)" — true when the NAME IS PRESENT and does not resolve, false
+// when the name is absent, because then there is no SDS reference at all to be
+// unresolved. The NULLABLE column is precisely what creates the second case.
+// Migration 0008 makes it unrepresentable at rest; this predicate is the LAST
+// LINE, and it holds however a row got there — a pre-constraint row, a restored
+// dump, or a writer nobody has written yet.
+//
+// jwt_or_mtls is deliberately NOT included. rds.go keeps ext_authz ENABLED for
+// it, so a cert-less caller falls through to the JWT path; refusing it would
+// break a working configuration rather than close a hole.
+//
+// Whitespace counts as missing: it would satisfy a naive != "" check and then
+// render an SDS reference that can never resolve, which is a different failure
+// from the one the operator asked for. The renderer does not rely on a validator
+// in another language for that.
+func AnyMTLSRouteMissingClientCA(routes []store.Route) bool {
+	for _, r := range routes {
+		if r.AuthPolicy == "mtls" && strings.TrimSpace(r.ClientCASecret) == "" {
 			return true
 		}
 	}

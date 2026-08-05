@@ -34,7 +34,11 @@ type Reconciler struct {
 	ha        ha.Coordinator // nil = single-instance mode
 	rateLimit builders.RateLimitOptions
 	extAuthz  builders.ExtAuthzOptions
-	rls       builders.RateLimitServiceOptions
+	// mtlsRoutesMissingClientCA counts refusals from the mtls-without-client-CA
+	// guard, mirroring authWantedButExtAuthzOff so the refusal is observable and
+	// not merely logged.
+	mtlsRoutesMissingClientCA atomic.Int64
+	rls                       builders.RateLimitServiceOptions
 
 	// allowEmpty disables the empty-collapse guard (EDGE_ALLOW_EMPTY_SNAPSHOT),
 	// permitting an intentional scale-to-zero / drain. Read once at construction.
@@ -264,6 +268,29 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 			"(auth_policy != none) but ext_authz is globally disabled — an identity-bearing " +
 			"listener without ext_authz would serve unauthenticated; enable ext_authz " +
 			"(EXT_AUTHZ_ENABLED) and configure the auth-service, or set auth_policy=none")
+	}
+
+	// ⚠ SECOND FAIL-CLOSED GUARD, and it is NOT covered by the one above.
+	//
+	// auth_policy='mtls' means "the client cert IS the auth", so rds.go sets
+	// ExtAuthzPerRoute{Disabled} — no JWT check, no auth-service call. The matching
+	// cert requirement is emitted by lds.go ONLY when a client-CA name is present.
+	// A route with 'mtls' and no client CA therefore renders a listener that
+	// authenticates nobody by EITHER mechanism: an open route.
+	//
+	// The guard above cannot catch it — it fires only when ext_authz is globally
+	// OFF, and this defect is at its worst when ext_authz is ON and everything else
+	// looks correctly configured.
+	//
+	// Migration 0008 makes the row unrepresentable at rest. This is the LAST LINE
+	// and holds however a row arrived: a pre-constraint row, a restored dump, or a
+	// writer nobody has written yet.
+	if builders.AnyMTLSRouteMissingClientCA(domain.Routes) {
+		r.mtlsRoutesMissingClientCA.Add(1)
+		return fmt.Errorf("refusing to build snapshot: a route sets auth_policy='mtls' but names no " +
+			"client_ca_secret_name — mtls disables ext_authz for that route, and without a client CA " +
+			"no client certificate is requested or verified either, so the route would serve " +
+			"unauthenticated; set client_ca_secret_name, or change auth_policy")
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{
