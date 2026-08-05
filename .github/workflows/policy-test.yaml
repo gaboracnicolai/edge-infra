@@ -19,14 +19,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Kyverno CLI
+      # ⚠ PINNED. This step used to resolve `releases/latest` at run time, while
+      # every GitHub Action in this repo is pinned to a full SHA. A policy test
+      # whose TOOL floats can change verdict with no commit to this repository —
+      # and these two policies are the only thing standing between a backend and a
+      # LoadBalancer Service that bypasses the gateway. The checksum is what makes
+      # the pin mean something: a tag can be moved, a release asset re-uploaded.
+      #
+      # To bump: change VERSION, then take the new digest from
+      # https://github.com/kyverno/kyverno/releases/download/<VERSION>/checksums.txt
+      - name: Install Kyverno CLI (pinned + checksum-verified)
+        env:
+          VERSION: v1.18.2
+          SHA256: cb2feb8356149fd2fe774c894ccf0969f4a60a83867dd913af724f74ffbbc18b
         run: |
           set -euo pipefail
-          VERSION=$(curl -fsSL https://api.github.com/repos/kyverno/kyverno/releases/latest \
-            | grep -oP '"tag_name":\s*"\K[^"]+')
-          echo "Installing Kyverno CLI ${VERSION}"
           curl -fsSL -o kyverno.tar.gz \
             "https://github.com/kyverno/kyverno/releases/download/${VERSION}/kyverno-cli_${VERSION}_linux_x86_64.tar.gz"
+          echo "${SHA256}  kyverno.tar.gz" | sha256sum -c -
           tar -xzf kyverno.tar.gz kyverno
           sudo install -m 0755 kyverno /usr/local/bin/kyverno
           kyverno version
