@@ -1,3 +1,16 @@
+{{- /*
+⚠ REFUSE A CONFIGURATION THAT SILENTLY STOPS METRICS.
+
+Annotation-based scraping cannot attach a header, so closing /metrics with
+metricsAuth while podAnnotations still asks Prometheus to scrape would leave every
+scrape 401ing. Nothing would alert: the endpoint answers, the pod is healthy, and
+the series simply stop arriving. That is the same silent-degradation shape this
+repo keeps closing, so the chart refuses to render it rather than letting an
+operator discover it from a gap in a dashboard weeks later.
+*/ -}}
+{{- if and .Values.metricsAuth.existingSecret (index (default (dict) .Values.podAnnotations) "prometheus.io/scrape") }}
+{{- fail "edge-osb: metricsAuth is set (so /metrics requires an X-Admin-Key header) while podAnnotations still contains prometheus.io/scrape. Annotation scraping cannot send a header, so every scrape would 401 and metrics would silently stop. Remove the prometheus.io/* podAnnotations and scrape with a ServiceMonitor whose endpoint carries headers: {X-Admin-Key: <key>}." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +65,16 @@ spec:
             - name: http
               containerPort: {{ .Values.api.port }}
               protocol: TCP
+          {{- if .Values.metricsAuth.existingSecret }}
+          # /metrics gate. Wired explicitly rather than left to a hand-edited config
+          # secret so "is the metrics surface closed" is answerable from the values file.
+          env:
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.metricsAuth.existingSecret }}
+                  key: {{ .Values.metricsAuth.secretKey }}
+          {{- end }}
           envFrom:
             - secretRef:
                 name: {{ .Values.config.existingSecret }}

@@ -71,10 +71,27 @@ serviceAccount:
   create: true
   name: ""
 
-# Annotation-based scraping cannot attach the X-Admin-Key header. If you set
-# ADMIN_API_KEY in the config secret, switch to a Prometheus ServiceMonitor
-# whose endpoint carries `headers: {X-Admin-Key: <key from secret>}`, otherwise
-# the scrape will get 401. /healthz stays open for kubelet probes either way.
+# Closing /metrics (ISO 27001 A.9). UNSET = OPEN: with no key the broker serves
+# /metrics to anyone who can reach the pod, which is the default this chart ships.
+#
+# Set existingSecret + secretKey to wire ADMIN_API_KEY via secretKeyRef (the same
+# shape edge-control-plane uses for XDS_ADMIN_API_KEY) instead of hand-editing the
+# config secret. The process then requires a matching X-Admin-Key header: 401
+# without one, 403 with a wrong one.
+#
+# ⚠ WHAT YOU MUST ALSO CHANGE, AND WHY THE CHART ENFORCES IT. Annotation-based
+# scraping CANNOT attach a header, so turning this on while `podAnnotations` still
+# carries prometheus.io/scrape would leave Prometheus 401ing on every scrape —
+# metrics silently stop, and a metrics surface that quietly stops being scraped is
+# its own defect. The chart REFUSES that combination (see the fail() in
+# templates/deployment.yaml) rather than rendering it. Switch to a ServiceMonitor
+# whose endpoint carries `headers: {X-Admin-Key: <key>}` and drop the annotations.
+#
+# /healthz and /readyz stay open for kubelet probes either way.
+metricsAuth:
+  existingSecret: ""      # e.g. edge-osb-secrets
+  secretKey: ADMIN_API_KEY
+
 podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: "8080"
