@@ -154,11 +154,21 @@ jobs:
         env:
           MIGRATE_TEST_DSN: postgres://osb:osb@localhost:5432/migrate_test?sslmode=disable
         run: |
+          set -euo pipefail
           go test -count=1 -v -tags integration ./internal/migrate/ -run 'TestApply|TestBaseline' 2>&1 | tee /tmp/migrate-suite.log
-          ! grep -q -- '--- SKIP' /tmp/migrate-suite.log
+          if grep -q -- '--- SKIP' /tmp/migrate-suite.log; then
+            echo "::error::suite SKIPPED — it did not actually execute"
+            grep -- '--- SKIP' /tmp/migrate-suite.log
+            exit 1
+          fi
       - name: Go co-location invariant (-count=1, no cached pass)
         env:
           COLOCATION_TEST_DSN: postgres://osb:osb@localhost:5432/colocation_test?sslmode=disable
         run: |
+          set -euo pipefail
           go test -count=1 -v -tags integration ./internal/store/ -run TestVerifyColocation 2>&1 | tee /tmp/colocation.log
-          ! grep -q -- '--- SKIP' /tmp/colocation.log
+          if grep -q -- '--- SKIP' /tmp/colocation.log; then
+            echo "::error::suite SKIPPED — it did not actually execute"
+            grep -- '--- SKIP' /tmp/colocation.log
+            exit 1
+          fi
