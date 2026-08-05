@@ -51,7 +51,30 @@ jobs:
           cache: true
       - name: go test
         run: go test ./... -count=1
-      # R1 live xDS mutual-TLS handshake validation. No DB/Docker — pure Go +
-      # in-memory certs — so it runs here rather than in the integration harness.
-      - name: xDS mTLS handshake (integration-tagged)
-        run: go test -tags integration -v ./cmd/server/ -run TestXDS -count=1
+      # Two tests match -run TestXDS and they prove DIFFERENT things:
+      #   TestXDSMutualTLSHandshake   — Go client vs Go server, pure in-memory certs.
+      #   TestXDSRealEnvoyTLSVersion  — a REAL envoyproxy/envoy container against the
+      #                                 real buildTLSCreds server. This is the only
+      #                                 thing in the repo that proves Envoy and the
+      #                                 control plane can actually complete a
+      #                                 handshake, and it is F10's regression test.
+      #
+      # ⚠ THE REAL-ENVOY ONE SKIPS ITSELF WHEN DOCKER IS ABSENT, and `go test` prints
+      # `ok` and EXITS 0 on a SKIP. So the Go-only sibling's PASS carried this step
+      # either way: with docker unavailable the command still exited 0 while
+      # `--- SKIP: TestXDSRealEnvoyTLSVersion` sat in the output. "Wired into CI" and
+      # "actually executed" are different claims, and the gap between them is exactly
+      # the shape F10 survived in for a whole work arc. Assert the stronger claim.
+      #
+      # ⚠ `set -o pipefail` is load-bearing. Without it `go test | tee` reports TEE's
+      # status, so a genuine FAILURE exits 0 and only the SKIP check would speak. The
+      # default GitHub shell is `bash -e {0}` — no pipefail — so it must be explicit.
+      - name: xDS mTLS handshake + real-Envoy TLS pairing (integration-tagged)
+        run: |
+          set -euo pipefail
+          go test -tags integration -v ./cmd/server/ -run TestXDS -count=1 2>&1 | tee /tmp/xds.log
+          if grep -q -- '--- SKIP' /tmp/xds.log; then
+            echo "::error::a TestXDS case SKIPPED — the real-Envoy handshake proof did not run"
+            grep -- '--- SKIP' /tmp/xds.log
+            exit 1
+          fi
