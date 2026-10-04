@@ -1,0 +1,37 @@
+# Stub upstream for the OSB broker proof (Phase 15). The broker provisions a
+# service whose host is this Service's ClusterIP; the request through the
+# gateway's shared :80 listener must come back with this fingerprint, which no
+# other backend in the standup returns.
+#
+# NB: image hashicorp/http-echo:0.2.3 is kept in sync with ECHO_IMAGE in lib.sh.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: osb-stub
+  labels: { part-of: edge-local }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: echo, namespace: osb-stub, labels: { app: echo, part-of: edge-local } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: echo } }
+  template:
+    metadata: { labels: { app: echo, part-of: edge-local } }
+    spec:
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:0.2.3
+          args: ["-text=OSB-PROVISIONED-BACKEND", "-listen=:5678"]
+          ports: [{ name: http, containerPort: 5678 }]
+          readinessProbe: { httpGet: { path: /, port: http }, initialDelaySeconds: 2, periodSeconds: 3 }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 100m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: echo, namespace: osb-stub, labels: { app: echo, part-of: edge-local } }
+spec:
+  selector: { app: echo }
+  ports: [{ name: http, port: 5678, targetPort: 5678 }]

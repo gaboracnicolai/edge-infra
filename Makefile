@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local kind-e2e
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -61,6 +61,14 @@ verify-xds-mtls:
 # a snapshot the Go reconciler serves. Requires docker + go + python3.
 test-integration:
 	bash test/integration/run.sh
+
+# The self-host stack end to end on a throwaway kind cluster: create it, install
+# every chart, send requests through Envoy, ext_authz and stub upstreams, check
+# the OSB broker answers and provisions a served route, then delete the cluster.
+# Needs docker, kind, kubectl, helm, jq, openssl, curl and free host ports 80/443.
+# What each step proves: docs/self-host-claims.md.
+kind-e2e:
+	bash deploy/local/e2e.sh
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:
