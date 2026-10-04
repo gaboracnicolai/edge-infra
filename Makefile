@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local kind-e2e
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local kind-e2e kind-cutover
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -69,6 +69,14 @@ test-integration:
 # What each step proves: docs/self-host-claims.md.
 kind-e2e:
 	bash deploy/local/e2e.sh
+
+# The CFG-1 launch-day cutover rehearsed in order on a throwaway kind cluster:
+# main as committed (the image pin serves nothing) -> image bump -> auth-service
+# with JWKS and mTLS -> client certificate -> enable, with a check after each
+# step, then the cluster deleted. Same tools and host ports as kind-e2e.
+# Real-cluster steps: docs/ext-authz-launch-runbook.md.
+kind-cutover:
+	bash deploy/local/cutover.sh
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:

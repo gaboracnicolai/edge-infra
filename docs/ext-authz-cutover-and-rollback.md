@@ -11,6 +11,12 @@ future reader can re-check rather than trust.
 
 ## 1. Read this before you flip anything
 
+**The launch-day order, one checked step at a time, is now
+[ext-authz-launch-runbook.md](ext-authz-launch-runbook.md), rehearsed by `make kind-cutover`.**
+Note what it measured about the advice below: deploying the bumped image with ext_authz still off
+is safe only while no route has `auth_policy != 'none'`. A single such route freezes the whole
+fleet on last-good, so provisioning stays frozen from the bump until the enable.
+
 ### ⚠ The committed image pin cannot honour the flip
 
 `deploy/helm/edge-control-plane/values.yaml:5` pins the control-plane image to

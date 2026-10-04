@@ -1,3 +1,5 @@
 # Generated admin-plane PKI + issuer signing key + KEK (secret material).
 # bootstrap-pki.sh writes here; never commit it.
 .pki-bootstrap/
+.cutover-state
+.cutover-probe
