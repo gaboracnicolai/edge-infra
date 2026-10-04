@@ -45,7 +45,7 @@ type Reconciler struct {
 	allowEmpty bool
 
 	localLast                    atomic.Pointer[reconcileResult]
-	lastSnap                     atomic.Pointer[cachev3.Snapshot]
+	lastPub                      atomic.Pointer[publication]
 	emptySnapshotsBlocked        atomic.Uint64
 	inconsistentSnapshotsBlocked atomic.Uint64
 
@@ -301,7 +301,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 		resourcev3.SecretType:   builders.BuildSecrets(domain.Secrets),
 	}
 
-	hash := hashResources(resources)
+	hash := hashWithPins(hashResources(resources), nodePins(domain.Gateways))
 
 	// Fast path: local state confirms nothing has changed on this replica.
 	prev := r.localLast.Load()
@@ -402,14 +402,26 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 		)
 	}
 
+	for name, keys := range unservableSelectorKeys(domain.Gateways) {
+		r.log.Warn("gateway node_selector names a label no edge node carries; no node serves it",
+			"gateway", name, "labels", keys, "node_label", NodeHostnameLabel)
+	}
+
+	// Each node gets its OWN snapshot: only the gateways whose node_selector
+	// selects it, and only the TLS secrets those reference (XDS-1).
+	pub := &publication{version: version, snap: snap, resources: resources, domain: domain}
 	nodes := r.targetNodes()
 	for _, n := range nodes {
-		if err := r.cache.SetSnapshot(ctx, n, snap); err != nil {
+		nodeSnap, err := r.snapshotForNode(pub, n)
+		if err != nil {
+			return fmt.Errorf("node snapshot node=%s: %w", n, err)
+		}
+		if err := r.cache.SetSnapshot(ctx, n, nodeSnap); err != nil {
 			return fmt.Errorf("set snapshot node=%s: %w", n, err)
 		}
 	}
 
-	r.lastSnap.Store(snap)
+	r.lastPub.Store(pub)
 	r.localLast.Store(&reconcileResult{Version: version, Hash: hash})
 	r.log.Info("snapshot pushed",
 		"version", version,
@@ -510,24 +522,26 @@ func (r *Reconciler) targetNodes() []string {
 	return out
 }
 
-// catchUpConnectedNodes pushes the last-published snapshot to any connected node
+// catchUpConnectedNodes pushes the last publication to any connected node
 // (present in GetStatusKeys) that does not yet hold the current version. Called on
 // the unchanged-config fast path so a proxy that connects while config is stable
 // receives it on connect — without this, SetSnapshot only runs on a config change,
 // leaving a restarted/scaled/new edge-proxy with no config until the next change.
-//
-// NOTE: this shares the connected-node fan-out that XDS-1 (per-node SDS scoping)
-// would extend to per-node snapshots; keep them in mind together, but XDS-1 is out
-// of scope here.
+// Like the publish fan-out, each node receives its own scoped snapshot (XDS-1).
 func (r *Reconciler) catchUpConnectedNodes(ctx context.Context, version string) {
-	snap := r.lastSnap.Load()
-	if snap == nil {
+	pub := r.lastPub.Load()
+	if pub == nil {
 		return
 	}
 	for _, n := range r.cache.GetStatusKeys() {
 		if cur, err := r.cache.GetSnapshot(n); err == nil && cur != nil &&
 			cur.GetVersion(resourcev3.ClusterType) == version {
 			continue // already has the current snapshot
+		}
+		snap, err := r.snapshotForNode(pub, n)
+		if err != nil {
+			r.log.Warn("late-join catch-up failed", "node", n, "err", err)
+			continue
 		}
 		if err := r.cache.SetSnapshot(ctx, n, snap); err != nil {
 			r.log.Warn("late-join catch-up failed", "node", n, "err", err)

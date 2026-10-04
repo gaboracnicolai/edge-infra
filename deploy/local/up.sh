@@ -27,6 +27,7 @@
 #  13  R8 fail-static inconsistent-snapshot guard (live, red-first)
 #  14  fail-static guard counters exported as metrics (live, red-first)
 #  15  OSB broker answers; a service it provisions is served through Envoy
+#  16  two nodes serve two tenants; each node's SDS holds only its own key (XDS-1)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -426,7 +427,8 @@ verify_phase7() {
   [ -n "$ep" ] || ep="$(k -n edge get pod -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   if [ -n "$ep" ]; then
     section "edge-proxy admin ($ep) — xDS link + received config"
-    k -n edge port-forward "pod/$ep" 19001:9901 >/dev/null 2>&1 &
+    # kubectl directly (see envoy_config_dump): a backgrounded k() leaks the forward.
+    kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$ep" 19001:9901 >/dev/null 2>&1 &
     local pf=$!; sleep 3
     echo "  control_plane connection (1 = connected):"
     curl -s --max-time 5 http://127.0.0.1:19001/stats 2>/dev/null \
@@ -1189,6 +1191,125 @@ phase15_osb_broker() {
   ok "Phase 15 (OSB broker) verified — provisioned, served, deprovisioned"
 }
 
+# ---- Phase 16 — each node gets only its own tenant's TLS keys (XDS-1) ---------
+# ep_pod_on <node> — the edge-proxy pod scheduled on that node.
+ep_pod_on() { k -n edge get pod -l app.kubernetes.io/name=edge-proxy --field-selector "spec.nodeName=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
+
+# node_secrets <node> — the SDS secret names that node's Envoy holds, one per line.
+node_secrets() {
+  envoy_config_dump "$(ep_pod_on "$1")" | jq -r '.configs[]?.dynamic_active_secrets[]?.name' 2>/dev/null | sort -u
+}
+
+# tls_get <node-ip> <host> — HTTPS to that node's :8443 with SNI and Host <host>,
+# from inside the kind network (macOS cannot reach a node IP); curl -v output.
+tls_get() {
+  docker exec "${CLUSTER_NAME}-control-plane" curl -skv --max-time 6 \
+    --resolve "$2:8443:$1" -H "Host: $2" "https://$2:8443/" 2>&1 || true
+}
+
+phase16_sds_scope() {
+  section "PHASE 16 — two nodes serve two tenants; each node's SDS holds only its own tenant's key"
+  local nodes nodeA nodeB ipA ipB pgpod tmp
+  nodes="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u)"
+  [ "$(printf '%s\n' "$nodes" | grep -c .)" = 2 ] || die "need edge-proxy on exactly two nodes, found: $(echo $nodes)"
+  nodeA="$(printf '%s\n' "$nodes" | sed -n 1p)"; nodeB="$(printf '%s\n' "$nodes" | sed -n 2p)"
+  ipA="$(k get node "$nodeA" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  ipB="$(k get node "$nodeB" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  log "tenant-a pinned to $nodeA ($ipA), tenant-b pinned to $nodeB ($ipB)"
+
+  section "seed a cert per tenant and an HTTPS :8443 gateway per tenant presenting it, pinned by node_selector"
+  # The keys go in as plaintext PEM, which the control plane reads as-is beside
+  # sealed ones (the custodian seals at rest); what this phase measures is which
+  # node the decrypted key is shipped to.
+  tmp="$(mktemp -d)"
+  local t sql=""
+  for t in a b; do
+    openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=tenant-$t.local" \
+      -keyout "$tmp/$t.key" -out "$tmp/$t.crt" >/dev/null 2>&1 || die "openssl could not mint tenant-$t's cert"
+  done
+  local node c64 k64
+  for t in a b; do
+    if [ "$t" = a ]; then node="$nodeA"; else node="$nodeB"; fi
+    c64="$(base64 < "$tmp/$t.crt" | tr -d '\n')"; k64="$(base64 < "$tmp/$t.key" | tr -d '\n')"
+    sql+="
+INSERT INTO secrets (id,name,cert_pem,key_pem,kind)
+VALUES ('tenant-$t-cert','tenant-$t-cert',convert_from(decode('$c64','base64'),'UTF8'),convert_from(decode('$k64','base64'),'UTF8'),'tls_certificate')
+ON CONFLICT (name) DO UPDATE SET cert_pem=EXCLUDED.cert_pem,key_pem=EXCLUDED.key_pem,updated_at=now();
+INSERT INTO gateways (id,name,port,protocol,tls_secret,node_selector,deleted_at)
+VALUES ('tenant-$t-https','tenant-$t-https',8443,'HTTPS','tenant-$t-cert',jsonb_build_object('kubernetes.io/hostname','$node'),NULL)
+ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,protocol=EXCLUDED.protocol,tls_secret=EXCLUDED.tls_secret,node_selector=EXCLUDED.node_selector,deleted_at=NULL,updated_at=now();
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('tenant-$t-tls','tenant-$t-tls','tenant-$t-https',ARRAY['tenant-$t.local']::text[],'/','tenant-$t',30,'none',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
+  cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;"
+  done
+  rm -rf "$tmp"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  printf 'BEGIN;%s\nCOMMIT;\n' "$sql" | k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q -f - >/dev/null
+  ok "tenant-a-https -> $nodeA, tenant-b-https -> $nodeB (each with its own cert)"
+
+  # assert_scope <node> <own> <other> — the node's Envoy holds its own tenant's
+  # secret and not the other's, waiting out the reconcile poll and delivery.
+  assert_scope() {
+    local s i=0
+    while :; do
+      s="$(node_secrets "$1")"
+      if printf '%s\n' "$s" | grep -qx "$2"; then break; fi
+      i=$((i + 1)); [ "$i" -lt 15 ] || die "$1 never received $2 (holds: $(echo $s))"
+      sleep 2
+    done
+    echo "  $1 SDS secrets: $(echo $s)"
+    ! printf '%s\n' "$s" | grep -qx "$3" || die "$1 holds $3 — another tenant's key reached it"
+    ok "$1 holds $2 and not $3"
+  }
+  # assert_serves <ip> <host> <backend> / assert_refuses <ip> <host>
+  assert_serves() {
+    local out; out="$(tls_get "$1" "$2")"
+    has "$out" "CN=$2" && has "$out" "$3" || { printf '%s\n' "$out" | tail -15; die "$1 did not serve $2 with its own cert"; }
+    ok "$1 serves $2 with CN=$2 -> $3"
+  }
+  assert_refuses() {
+    local out; out="$(tls_get "$1" "$2")"
+    ! has "$out" "CN=$2" && ! has "$out" "TENANT-" || { printf '%s\n' "$out" | tail -15; die "$1 presented $2's cert or served its backend — it holds that tenant's key"; }
+    ok "$1 cannot serve $2 (presents no $2 cert: it holds no such key)"
+  }
+
+  section "each node's live Envoy SDS"
+  assert_scope "$nodeA" tenant-a-cert tenant-b-cert
+  assert_scope "$nodeB" tenant-b-cert tenant-a-cert
+
+  section "each node serves its own tenant over TLS with that tenant's cert, and cannot present the other's"
+  assert_serves "$ipA" tenant-a.local TENANT-A-BACKEND
+  assert_serves "$ipB" tenant-b.local TENANT-B-BACKEND
+  assert_refuses "$ipA" tenant-b.local
+  assert_refuses "$ipB" tenant-a.local
+
+  section "a node that reconnects is caught up with its own scope (config unchanged)"
+  # Restart the control plane: a new replica turns Ready (/readyz) only after its
+  # first publish, before any edge node can reach it, so with config unchanged
+  # every node it serves afterwards is served by the late-join catch-up. Then
+  # restart $nodeB's edge-proxy: the fresh Envoy holds nothing, so whatever it
+  # ends up holding came from that catch-up.
+  k -n "$INFRA_NS" rollout restart deploy/edge-control-plane >/dev/null
+  wait_rollout deploy/edge-control-plane "$INFRA_NS" 240s
+  local old new i=0
+  old="$(ep_pod_on "$nodeB")"
+  k -n edge delete pod "$old" --wait=true >/dev/null
+  while :; do
+    new="$(ep_pod_on "$nodeB")"
+    [ -n "$new" ] && [ "$new" != "$old" ] && k -n edge wait --for=condition=Ready "pod/$new" --timeout=10s >/dev/null 2>&1 && break
+    i=$((i + 1)); [ "$i" -lt 30 ] || die "no new edge-proxy became Ready on $nodeB"
+    sleep 3
+  done
+  log "edge-proxy on $nodeB restarted: $old -> $new"
+  assert_scope "$nodeB" tenant-b-cert tenant-a-cert
+  assert_serves "$ipB" tenant-b.local TENANT-B-BACKEND
+  assert_refuses "$ipB" tenant-a.local
+  assert_scope "$nodeA" tenant-a-cert tenant-b-cert
+  assert_serves "$ipA" tenant-a.local TENANT-A-BACKEND
+  ok "PHASE 16 — per-node SDS scoping proven on two nodes, through a reconnect"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1213,7 +1334,8 @@ main() {
   phase13_inconsistent_guard
   phase14_failstatic_metrics
   phase15_osb_broker
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker."
+  phase16_sds_scope
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
