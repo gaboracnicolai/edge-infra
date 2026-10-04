@@ -83,6 +83,13 @@ gw_body() { local host="$1"; shift; curl -s --max-time 6 -H "Host: $host" "$@" h
 # failure DESPITE a match when the input exceeds the pipe buffer (~64 KiB).
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 
+# b64url_d <base64url> — decode unpadded base64url (a JWS segment) to stdout.
+b64url_d() {
+  local s; s="$(printf '%s' "$1" | tr '_-' '/+')"
+  while [ $(( ${#s} % 4 )) -ne 0 ]; do s="$s="; done
+  printf '%s' "$s" | openssl base64 -d -A
+}
+
 # in_cidr16 <first-two-octets> <ip> — true if IP is in that /16. kind's node
 # network is always a /16 (e.g. 172.19.0.0/16); the trailing "." in the glob
 # stops 172.190.x from matching 172.19. No external tools.

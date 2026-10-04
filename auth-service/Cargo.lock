@@ -118,6 +118,7 @@ dependencies = [
  "prost",
  "rand 0.8.6",
  "reqwest",
+ "ring",
  "rsa",
  "rustls",
  "serde",

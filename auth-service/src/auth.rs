@@ -14,6 +14,7 @@ use tonic::{Request, Response, Status};
 
 use crate::jwks::JwksCache;
 use crate::metrics::Metrics;
+use crate::transit::{self, TransitSigner, Vouch};
 
 /// JWT claims the service inspects. `aud` is validated by jsonwebtoken.
 #[derive(Debug, Clone, Deserialize)]
@@ -44,9 +45,9 @@ pub struct AuthService {
     pub validation: Validation,
     /// Metrics handle shared with the metrics HTTP server.
     pub metrics: Arc<Metrics>,
-    /// Shared transit-proof secret injected as `x-gateway-auth` so backends
-    /// can verify a request actually passed through this gateway.
-    pub gateway_secret: String,
+    /// Mints the signed transit assertion injected as `x-gateway-auth`, so a
+    /// backend can verify a request actually passed through this gateway.
+    pub transit: Arc<TransitSigner>,
 }
 
 #[tonic::async_trait]
@@ -61,12 +62,24 @@ impl Authorization for AuthService {
         // client cert (source.certificate, populated by include_peer_certificate),
         // authorize on the cert alone — injecting a TRANSPORT marker, never a user
         // identity. A cert-less caller falls through to the JWT path below.
+        let (method, host, path) = request_line(&req);
         if let Some(subject) = mtls_cert_subject(&req) {
+            let vouch = Vouch {
+                sub: &subject,
+                amr: "mtls",
+                method,
+                host,
+                path,
+                ..Default::default()
+            };
+            let Ok(assertion) = self.transit.sign(&vouch) else {
+                return Ok(Response::new(self.denied("transit assertion unavailable")));
+            };
             self.metrics
                 .auth_requests
                 .with_label_values(&["ok_mtls"])
                 .inc();
-            return Ok(Response::new(self.allow_mtls(&subject)));
+            return Ok(Response::new(self.allow_mtls(&subject, assertion)));
         }
 
         let headers = match req.get_client_headers() {
@@ -126,6 +139,18 @@ impl Authorization for AuthService {
 
         let teams = claims.teams.clone().unwrap_or_default().join(",");
         let email = claims.email.clone().unwrap_or_default();
+        let vouch = Vouch {
+            sub: &claims.sub,
+            amr: "jwt",
+            email: claims.email.as_deref(),
+            teams: claims.teams.as_deref(),
+            method,
+            host,
+            path,
+        };
+        let Ok(assertion) = self.transit.sign(&vouch) else {
+            return Ok(Response::new(self.denied("transit assertion unavailable")));
+        };
 
         let mut builder = OkHttpResponseBuilder::new();
         builder
@@ -158,12 +183,13 @@ impl Authorization for AuthService {
                 Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
                 true,
             )
-            // Transit-proof: stamp the shared secret so a backend can verify
-            // this request actually came through the gateway. Overwrite (not
-            // append) strips any value a client tried to smuggle in.
+            // Transit-proof: a signed, single-use assertion for THIS request
+            // and identity, so a backend can verify it came through the
+            // gateway. Overwrite (not append) strips any value a client tried
+            // to smuggle in.
             .add_header(
-                "x-gateway-auth",
-                self.gateway_secret.clone(),
+                transit::HEADER,
+                assertion,
                 Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
                 false,
             );
@@ -200,9 +226,9 @@ impl AuthService {
     /// `x-user-id`/`x-user-teams`/`x-user-email`, so a client cert never
     /// masquerades as a user identity. The subject is informational for the
     /// backend; identity semantics differ from the JWT path by design.
-    fn allow_mtls(&self, cert_subject: &str) -> CheckResponse {
+    fn allow_mtls(&self, cert_subject: &str, assertion: String) -> CheckResponse {
         let mut builder = OkHttpResponseBuilder::new();
-        for (name, value) in mtls_headers(cert_subject, &self.gateway_secret) {
+        for (name, value) in mtls_headers(cert_subject, assertion) {
             // keep_empty_value=true so a missing/unparseable subject still strips
             // any value a client tried to smuggle in under these header names.
             builder.add_header(
@@ -222,12 +248,26 @@ impl AuthService {
 /// marker, the cert subject, and the gateway transit-proof. Deliberately excludes
 /// every x-user-* header — a client cert authorizes transit, it does NOT
 /// masquerade as a user identity (that is only the JWT path's job).
-fn mtls_headers(cert_subject: &str, gateway_secret: &str) -> Vec<(&'static str, String)> {
+fn mtls_headers(cert_subject: &str, assertion: String) -> Vec<(&'static str, String)> {
     vec![
         ("x-auth-method", "mtls".to_string()),
         ("x-client-cert-subject", cert_subject.to_string()),
-        ("x-gateway-auth", gateway_secret.to_string()),
+        (transit::HEADER, assertion),
     ]
+}
+
+/// The method, host and path Envoy is authorizing — what the transit
+/// assertion is bound to. Empty strings when Envoy sent no HTTP attributes.
+fn request_line(req: &CheckRequest) -> (&str, &str, &str) {
+    match req
+        .attributes
+        .as_ref()
+        .and_then(|a| a.request.as_ref())
+        .and_then(|r| r.http.as_ref())
+    {
+        Some(http) => (&http.method, &http.host, &http.path),
+        None => ("", "", ""),
+    }
 }
 
 /// Decide whether to authorize on a client cert: Some(subject) when this route is
@@ -358,7 +398,7 @@ aMVnTHM8GoM=\n\
     // masquerade as a user (no x-user-id/teams/email).
     #[test]
     fn mtls_headers_are_transport_only_never_user_identity() {
-        let hdrs = mtls_headers("CN=test-client", "gw-secret");
+        let hdrs = mtls_headers("CN=test-client", "assertion".to_string());
         let names: Vec<&str> = hdrs.iter().map(|(n, _)| *n).collect();
         assert!(
             names.contains(&"x-auth-method"),

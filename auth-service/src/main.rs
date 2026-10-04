@@ -8,6 +8,7 @@ use auth_service::config::Config;
 use auth_service::error::AppError;
 use auth_service::jwks::JwksCache;
 use auth_service::metrics::Metrics;
+use auth_service::transit::TransitSigner;
 
 use axum::{
     Json, Router,
@@ -49,7 +50,14 @@ async fn main() -> Result<(), AppError> {
         Arc::clone(&metrics),
     );
 
-    spawn_metrics_server(&cfg.metrics_addr, Arc::clone(&metrics)).await?;
+    let transit = Arc::new(TransitSigner::from_pem(
+        &cfg.transit_signing_key,
+        &cfg.transit_issuer,
+        cfg.transit_ttl_s,
+    )?);
+    info!(kid = %transit.kid(), ttl_s = cfg.transit_ttl_s, "transit assertion signer loaded");
+
+    spawn_metrics_server(&cfg.metrics_addr, Arc::clone(&metrics), transit.jwks()).await?;
 
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(std::slice::from_ref(&cfg.jwt_audience));
@@ -59,7 +67,7 @@ async fn main() -> Result<(), AppError> {
         jwks: Arc::clone(&jwks),
         validation,
         metrics: Arc::clone(&metrics),
-        gateway_secret: cfg.gateway_auth_secret.clone(),
+        transit,
     };
 
     let tls_cfg = build_tls_config(&cfg)?;
@@ -121,13 +129,22 @@ fn init_tracing() {
         .init();
 }
 
-async fn spawn_metrics_server(addr: &str, metrics: Arc<Metrics>) -> Result<(), AppError> {
+async fn spawn_metrics_server(
+    addr: &str,
+    metrics: Arc<Metrics>,
+    transit_jwks: serde_json::Value,
+) -> Result<(), AppError> {
     let socket_addr: SocketAddr = addr.parse()?;
     let listener = tokio::net::TcpListener::bind(socket_addr).await?;
     let router = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
-        .with_state(metrics);
+        .with_state(metrics)
+        // The public key backends verify `x-gateway-auth` assertions with.
+        .route(
+            "/.well-known/transit-jwks.json",
+            get(move || async move { Json(transit_jwks) }),
+        );
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, router).await {
             error!(error = %err, "metrics server exited with error");

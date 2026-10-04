@@ -129,7 +129,7 @@ rehearsal's CONTROL 1 shows it happening.
 - `JWKS_URL=https://edge-issuer.infra.svc.cluster.local:8081/.well-known/jwks.json` (it must be https)
 - `JWT_ISSUER`, which must equal the issuer's `ISSUER_URL`
 - `JWT_AUDIENCE`, which must equal the issuer's `ISSUER_AUDIENCE`
-- `GATEWAY_AUTH_SECRET`, at least 16 characters
+- `TRANSIT_SIGNING_KEY`, a PEM Ed25519 private key (`openssl genpkey -algorithm ed25519`)
 
 **Do:** open a PR to `values-auth-service.yaml` setting `image: {tag: "<SHA>"}`. Merge it and wait for the sync.
 

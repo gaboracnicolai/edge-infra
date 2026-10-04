@@ -119,11 +119,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: JWT_ISSUER
-            - name: GATEWAY_AUTH_SECRET
+            - name: TRANSIT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
-                  key: GATEWAY_AUTH_SECRET
+                  key: TRANSIT_SIGNING_KEY
             {{- with .Values.tls }}
             - name: AUTH_TLS_CERT
               value: {{ .mountPath }}/tls.crt
