@@ -12,9 +12,19 @@ on:
       - 'deploy/helm/**'
       - 'deploy/envs/dev/**'
       - 'deploy/local/**'
-      - 'cmd/attest/**'
-      - 'internal/attest/**'
       - 'k8s/**'
+      # Everything deploy/local/up.sh builds an image from — internal/ciguard
+      # fails if a build input stops triggering this workflow (B28.198).
+      - 'cmd/**'
+      - 'internal/**'
+      - 'migrations/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile.control-plane'
+      - 'osb/**'
+      - 'auth-service/src/**'
+      - 'auth-service/Cargo.*'
+      - 'auth-service/Dockerfile'
       - 'Makefile'
       - '.github/workflows/kind-e2e.yaml'
   pull_request:
@@ -23,9 +33,19 @@ on:
       - 'deploy/helm/**'
       - 'deploy/envs/dev/**'
       - 'deploy/local/**'
-      - 'cmd/attest/**'
-      - 'internal/attest/**'
       - 'k8s/**'
+      # Everything deploy/local/up.sh builds an image from — internal/ciguard
+      # fails if a build input stops triggering this workflow (B28.198).
+      - 'cmd/**'
+      - 'internal/**'
+      - 'migrations/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile.control-plane'
+      - 'osb/**'
+      - 'auth-service/src/**'
+      - 'auth-service/Cargo.*'
+      - 'auth-service/Dockerfile'
       - 'Makefile'
       - '.github/workflows/kind-e2e.yaml'
   workflow_dispatch:

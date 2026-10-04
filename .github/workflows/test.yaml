@@ -11,7 +11,11 @@ on:
       - 'internal/**'
       - 'go.mod'
       - 'go.sum'
-      - '.github/workflows/test.yaml'
+      # internal/ciguard reads these, so a change to them alone must run it.
+      - '.github/workflows/**'
+      - 'deploy/local/**'
+      - 'Dockerfile.control-plane'
+      - 'osb/Dockerfile'
   pull_request:
     branches: [main]
     paths:
@@ -20,7 +24,11 @@ on:
       - 'internal/**'
       - 'go.mod'
       - 'go.sum'
-      - '.github/workflows/test.yaml'
+      # internal/ciguard reads these, so a change to them alone must run it.
+      - '.github/workflows/**'
+      - 'deploy/local/**'
+      - 'Dockerfile.control-plane'
+      - 'osb/Dockerfile'
 
 jobs:
   auth-service:
