@@ -1217,7 +1217,7 @@ phase16_sds_scope() {
   ipB="$(k get node "$nodeB" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
   log "tenant-a pinned to $nodeA ($ipA), tenant-b pinned to $nodeB ($ipB)"
 
-  section "seed a cert per tenant and an HTTPS :8443 gateway per tenant, pinned by node_selector"
+  section "seed a cert per tenant and an HTTPS :8443 gateway per tenant presenting it, pinned by node_selector"
   # The keys go in as plaintext PEM, which the control plane reads as-is beside
   # sealed ones (the custodian seals at rest); what this phase measures is which
   # node the decrypted key is shipped to.
@@ -1235,13 +1235,13 @@ phase16_sds_scope() {
 INSERT INTO secrets (id,name,cert_pem,key_pem,kind)
 VALUES ('tenant-$t-cert','tenant-$t-cert',convert_from(decode('$c64','base64'),'UTF8'),convert_from(decode('$k64','base64'),'UTF8'),'tls_certificate')
 ON CONFLICT (name) DO UPDATE SET cert_pem=EXCLUDED.cert_pem,key_pem=EXCLUDED.key_pem,updated_at=now();
-INSERT INTO gateways (id,name,port,protocol,node_selector,deleted_at)
-VALUES ('tenant-$t-https','tenant-$t-https',8443,'HTTPS',jsonb_build_object('kubernetes.io/hostname','$node'),NULL)
-ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,protocol=EXCLUDED.protocol,node_selector=EXCLUDED.node_selector,deleted_at=NULL,updated_at=now();
-INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,tls_secret_name,deleted_at)
-VALUES ('tenant-$t-tls','tenant-$t-tls','tenant-$t-https',ARRAY['tenant-$t.local']::text[],'/','tenant-$t',30,'none','tenant-$t-cert',NULL)
+INSERT INTO gateways (id,name,port,protocol,tls_secret,node_selector,deleted_at)
+VALUES ('tenant-$t-https','tenant-$t-https',8443,'HTTPS','tenant-$t-cert',jsonb_build_object('kubernetes.io/hostname','$node'),NULL)
+ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,protocol=EXCLUDED.protocol,tls_secret=EXCLUDED.tls_secret,node_selector=EXCLUDED.node_selector,deleted_at=NULL,updated_at=now();
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('tenant-$t-tls','tenant-$t-tls','tenant-$t-https',ARRAY['tenant-$t.local']::text[],'/','tenant-$t',30,'none',NULL)
 ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
-  cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,tls_secret_name=EXCLUDED.tls_secret_name,updated_at=now(),deleted_at=NULL;"
+  cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;"
   done
   rm -rf "$tmp"
   pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
@@ -1270,15 +1270,15 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   }
   assert_refuses() {
     local out; out="$(tls_get "$1" "$2")"
-    ! has "$out" "CN=$2" && ! has "$out" "TENANT-" || { printf '%s\n' "$out" | tail -15; die "$1 completed a TLS handshake for $2 — it holds that tenant's key"; }
-    ok "$1 cannot serve $2 (no handshake: it has no such cert)"
+    ! has "$out" "CN=$2" && ! has "$out" "TENANT-" || { printf '%s\n' "$out" | tail -15; die "$1 presented $2's cert or served its backend — it holds that tenant's key"; }
+    ok "$1 cannot serve $2 (presents no $2 cert: it holds no such key)"
   }
 
   section "each node's live Envoy SDS"
   assert_scope "$nodeA" tenant-a-cert tenant-b-cert
   assert_scope "$nodeB" tenant-b-cert tenant-a-cert
 
-  section "each node serves its own tenant over TLS, and cannot serve the other"
+  section "each node serves its own tenant over TLS with that tenant's cert, and cannot present the other's"
   assert_serves "$ipA" tenant-a.local TENANT-A-BACKEND
   assert_serves "$ipB" tenant-b.local TENANT-B-BACKEND
   assert_refuses "$ipA" tenant-b.local
