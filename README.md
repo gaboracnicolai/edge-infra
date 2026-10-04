@@ -1,27 +1,50 @@
-# edge-infra
+# Talyvor Edge
 
-Envoy xDS control plane, Rust `ext_authz` auth-service, OSB broker, and token issuer for a
-multi-tenant edge.
+**The agent firewall and wallet-enforcement point, running in your own cluster.**
+
+Talyvor gives every AI agent a wallet: a budget, spending rules, approvals, a card and a live
+statement. Lens enforces those rules before the agent's model call or payment. Talyvor Edge makes
+the rules unbypassable inside a customer's own cluster. Every request an agent sends goes out through
+a gateway the customer runs, and that gateway refuses any request the agent's identity is not
+allowed to make.
+
+This repository is Talyvor Edge: the Envoy xDS control plane, the Rust `ext_authz` auth-service,
+the Open Service Broker (OSB), and the token issuer for a multi-tenant edge.
 
 ---
 
-# ⚠ THIS REPOSITORY IS PARKED
+## Status: kind-only today
 
-**It is not deployed anywhere, and nothing in the running product depends on it.**
+**Talyvor Edge runs end to end on a kind cluster and nowhere else yet.** `make kind-e2e` creates a
+cluster on your machine, installs all seven charts and sends requests through Envoy and `ext_authz`
+to stub upstreams. It then has the OSB broker provision a route that Envoy serves, and deletes the
+cluster at the end. CI runs it whenever a chart changes, and `make kind-cutover` and
+`make kind-rollback` rehearse the launch-day steps the same way.
 
-The live stack is docker-compose: `lens`, `postgres`, `redis`, `nats`, `pgbouncer`, `caddy`,
-`autoheal`. There is no Kubernetes in it. edge-infra is not in that topology, in any environment.
+It is not deployed to any real cluster or cloud account, and nothing in the hosted product depends on
+it. The live stack is docker-compose: `lens`, `postgres`, `redis`, `nats`, `pgbouncer`, `caddy`,
+`autoheal`.
 
-Parked means: **the code is kept, CI keeps running, and no one is expected to deploy it.** It was
-parked deliberately, after an audit, rather than drifting into disuse. If you are here to turn it on,
-read [§ Reviving it](#reviving-it) first — several things that look ready are not.
+**Which self-host claims are proven, and which are not:
+[docs/self-host-claims.md](docs/self-host-claims.md).** It maps every self-hosting claim on the
+landing page to the `make kind-e2e` phase that runs it. The gateway, identity, isolation and
+provisioning claims run. The Lens-side claims are marked **not run**, because no chart here installs
+Lens yet: provider keys, spend records, budgets that block at the limit, the ledger, and the audit
+export. **Wallet enforcement at the edge is therefore not yet exercised in a running cluster.** The
+self-host extras have their own pages: per-node TLS keys, NetworkPolicies, SCIM and OIDC sign-in are
+in [docs/self-host-network-and-identity.md](docs/self-host-network-and-identity.md), and the
+confidential-node option is in
+[docs/self-host-confidential-compute.md](docs/self-host-confidential-compute.md).
 
-### What is parked, specifically
+If you are here to run it on a real cluster, read [§ Taking it past kind](#taking-it-past-kind)
+first. Several things that look ready are not.
+
+### What is on, and where
 
 | | |
 |---|---|
-| Deployed | **Nothing.** No cluster, no ArgoCD instance in the serving path. |
-| `ext_authz` (gateway authentication) | Built. **Off** in base and all four overlays. |
+| Deployed | **Only on kind**, in a cluster `make kind-e2e` creates and deletes. No real cluster, no ArgoCD instance in the serving path. |
+| `ext_authz` (gateway authentication) | Built. **On** in the kind run (Phase 12 switches it on live). **Off** in base and all four overlays. |
 | Identity-keyed rate limiting (RLS) | Built. **Off** everywhere — though the `edge-ratelimit` chart *would* deploy (2 replicas + Redis in prod overlays), the control plane never routes to it. |
 | Admin READ API | Built. **Off everywhere** — `adminApi.existingSecret` is unset in dev, staging, and both prod regions, so the listener never starts and the Service exposes no port. |
 | Local rate limiting | Built and **on** by default. |
@@ -71,8 +94,8 @@ workaround exists only in the local scripts** — nothing in the OSB provisionin
 the prod overlays applies it.
 
 Nothing here has been changed to "fix" this, because every available fix moves a default that governs
-a security control, and this repo is parked. It is flagged, not fixed. Whoever revives this must
-decide deliberately:
+a security control, and nothing outside kind runs it yet. It is flagged, not fixed. Whoever takes it
+past kind must decide deliberately:
 
 - keep `'jwt'` as the default and arm `ext_authz` **first**, so the guard never fires; **or**
 - add an explicit "serve open" kill-switch the reconciler honours ahead of the fail-close, so the
@@ -83,7 +106,7 @@ The same contradiction is what makes rollback a fleet-wide database mutation —
 
 ---
 
-## Reviving it
+## Taking it past kind
 
 Ordered, because the order matters:
 
@@ -125,7 +148,7 @@ self-host lane where the customer runs the data plane.
 
 ## CI
 
-CI is deliberately kept running while parked — it is the only thing preventing decay (pinned upstream
+CI runs whether or not anything is deployed — it is the only thing preventing decay (pinned upstream
 manifests, Kubernetes API deprecations, dependency CVEs).
 
 | Workflow | Gate |

@@ -1,7 +1,7 @@
 # ext_authz cutover and rollback (CFG-1)
 
-**Status: this repo is PARKED and not deployed — see the root [README](../README.md). Nothing here is
-scheduled. This document exists so that whoever revives the cutover finds a rollback that works,
+**Status: Talyvor Edge is kind-only and not deployed — see the root [README](../README.md). Nothing
+here is scheduled. This document exists so that whoever runs the cutover finds a rollback that works,
 rather than one that reads as if it would.**
 
 Everything below was verified against the code at `7e721f4`. File:line references are given so a

@@ -29,7 +29,7 @@ the window between step 1 and step 4, in which provisioning must stay frozen.
 
 ## Before you start
 
-**These preconditions assume a first install.** The repository is parked and nothing is deployed
+**These preconditions assume a first install.** Talyvor Edge runs only on kind and nothing is deployed
 (see the root README). If you find an existing fleet, this runbook was not rehearsed against it. Stop.
 
 1. **Use the prod overlay that ArgoCD reads.** The Applications in `deploy/argocd/applications/` read
