@@ -28,11 +28,11 @@ func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route, rls RateL
 	for _, g := range gateways {
 		// An SNI gateway's chains each read their own host's route config, and only
 		// those: Consistent() refuses a route config no listener references.
-		if hosts, _ := sniHosts(g, byGateway[g.ID]); len(hosts) > 0 {
+		if hosts, picks := sniHosts(g, byGateway[g.ID]); len(hosts) > 0 {
 			for _, h := range hosts {
 				out = append(out, &routev3.RouteConfiguration{
 					Name:         SNIRouteConfigName(g.Name, h),
-					VirtualHosts: virtualHostsFor(g, routesForHost(byGateway[g.ID], h), rls),
+					VirtualHosts: virtualHostsFor(g, routesForSNIHost(byGateway[g.ID], h, picks[h]), rls),
 				})
 			}
 			continue
@@ -45,13 +45,25 @@ func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route, rls RateL
 	return out
 }
 
-// routesForHost returns the routes that list host among their hosts.
-func routesForHost(routes []store.Route, host string) []store.Route {
+// routesForSNIHost returns the routes host's SNI chain serves, each narrowed to
+// that one host. A route naming a client CA is left out (404, fail closed) unless
+// the chain verifies exactly that CA — and, for mtls, requires the cert — since
+// its auth rests on a cert check only the chain makes: same-host routes share one
+// chain, whose TLS settings come from one pick.
+func routesForSNIHost(routes []store.Route, host string, chain sniPick) []store.Route {
 	var out []store.Route
 	for _, r := range routes {
-		if slices.Contains(r.Hosts, host) {
-			out = append(out, r)
+		if !slices.Contains(r.Hosts, host) {
+			continue
 		}
+		if r.AuthPolicy == "mtls" && chain.authPolicy != "mtls" {
+			continue
+		}
+		if r.ClientCASecret != "" && r.ClientCASecret != chain.clientCA {
+			continue
+		}
+		r.Hosts = []string{host}
+		out = append(out, r)
 	}
 	return out
 }

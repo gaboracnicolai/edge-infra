@@ -264,6 +264,31 @@ func TestBuildListeners_PerSNI_HostBoundToSNI(t *testing.T) {
 	}
 }
 
+// FAIL CLOSED ON A SHARED HOST: two routes on one host share one chain, whose
+// TLS comes from the smallest route name. A same-host mtls route (ext_authz
+// disabled — the cert IS its auth) must not be served on a chain that only
+// requests the cert, nor on one that verifies a different CA.
+func TestBuildRouteConfigs_PerSNI_SharedHostMTLSFailsClosed(t *testing.T) {
+	gw := store.Gateway{ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}
+	admin := store.Route{Name: "z-admin", GatewayID: "https", ClusterName: "admin", Hosts: []string{"a.example"}, PathPrefix: "/admin", TLSSecret: "sec-a", ClientCASecret: "ca-a", AuthPolicy: "mtls"}
+	for name, pick := range map[string]store.Route{
+		"chain only requests the cert": {Name: "a-app", GatewayID: "https", ClusterName: "app", Hosts: []string{"a.example"}, PathPrefix: "/", TLSSecret: "sec-a", ClientCASecret: "ca-a", AuthPolicy: "jwt_or_mtls"},
+		"chain verifies another CA":    {Name: "a-app", GatewayID: "https", ClusterName: "app", Hosts: []string{"a.example"}, PathPrefix: "/", TLSSecret: "sec-a", ClientCASecret: "ca-x", AuthPolicy: "mtls"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, res := range BuildRouteConfigs([]store.Gateway{gw}, []store.Route{pick, admin}, RateLimitServiceOptions{}) {
+				for _, vh := range res.(*routev3.RouteConfiguration).GetVirtualHosts() {
+					for _, rt := range vh.GetRoutes() {
+						if rt.GetName() == "z-admin" {
+							t.Fatal("mtls route z-admin is served on a chain that does not enforce its client cert")
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // BACKWARD-COMPAT: a single-cert HTTPS gateway (g.TLSSecret set, no per-route
 // secrets) renders exactly one filter chain with that cert and no SNI match.
 func TestBuildListeners_SingleCertHTTPS_BackwardCompat(t *testing.T) {
