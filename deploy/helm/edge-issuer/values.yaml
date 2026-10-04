@@ -17,6 +17,19 @@ config:
   activeKid: ""
   tokenTTL: 1h
 
+# Sign-in through the customer's OIDC identity provider, and SCIM user
+# provisioning from it. Both are switched on by keys in config.existingSecret:
+#   ISSUER_SCIM_TOKEN (32+ chars)  -> /scim/v2/Users, for the IdP's SCIM client
+#   ISSUER_OIDC_ISSUER, ISSUER_OIDC_CLIENT_ID, ISSUER_OIDC_CLIENT_SECRET,
+#   ISSUER_OIDC_REDIRECT_URL (this issuer's https://.../sso/callback)
+#                                  -> /sso/login, for users
+# A user signs in only once SCIM (or an operator) has created them, and loses
+# sign-in the moment SCIM deactivates or deletes them.
+sso:
+  # PEM CA the IdP's TLS certificate chains to, as mounted in the pod
+  # (e.g. /etc/issuer-tls/ca.crt for an IdP on the internal CA); "" = system roots.
+  caFile: ""
+
 signingKeys:
   # Secret whose data keys are "<kid>.pem" PEM-encoded RSA private keys.
   # Publish current + next here to rotate without downtime.
@@ -49,3 +62,23 @@ podAnnotations: {}
 
 nameOverride: ""
 fullnameOverride: ""
+
+# NetworkPolicy (B27.33): default-deny ingress to this chart's pods, allowing
+# only the flows in templates/networkpolicy.yaml. Enforced by Calico (or any
+# CNI that enforces NetworkPolicy). OFF in the base values, like extAuthz:
+# ArgoCD syncs base values, and switching it on without the right gatewayCIDRs
+# cuts the gateway off. Switch it on in an env overlay, with that cluster's CIDRs.
+networkPolicy:
+  enabled: false
+  # CIDR(s) of the nodes running edge-proxy. Envoy runs hostNetwork, so its
+  # traffic carries the NODE IP, which no pod or namespace selector matches.
+  # Required when enabled — the chart refuses to render without it.
+  gatewayCIDRs: []
+  # Pods in this namespace count as the gateway too.
+  gatewayNamespace: edge
+  # Namespace of the auth-service, which fetches the JWKS; "" = this release's.
+  authServiceNamespace: ""
+  # More ingress rules, appended as written, e.g. Prometheus on the metrics port:
+  #   - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]
+  #     ports: [{port: metrics}]
+  extraIngress: []

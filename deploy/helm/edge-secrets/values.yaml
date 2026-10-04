@@ -47,3 +47,10 @@ podAnnotations: {}
 
 nameOverride: ""
 fullnameOverride: ""
+
+# NetworkPolicy (B27.33): when enabled, no ingress reaches the custodian except
+# what extraIngress names (kubectl port-forward is not network traffic and
+# still works). Enforced by Calico (or any CNI that enforces NetworkPolicy).
+networkPolicy:
+  enabled: false
+  extraIngress: []

@@ -3,6 +3,7 @@ package issuer
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,8 @@ type Config struct {
 	TLSCertFile string        // ISSUER_TLS_CERT (optional)
 	TLSKeyFile  string        // ISSUER_TLS_KEY (optional)
 	LogLevel    string        // ISSUER_LOG_LEVEL (default info)
+	SCIMToken   string        // ISSUER_SCIM_TOKEN — enables /scim/v2 (optional)
+	SSO         *SSOConfig    // ISSUER_OIDC_* — enables /sso (optional; nil when unset)
 }
 
 // ConfigFromEnv loads and validates the serving configuration. It fails closed
@@ -68,6 +71,28 @@ func ConfigFromEnv() (*Config, error) {
 	cfg.TLSKeyFile = os.Getenv("ISSUER_TLS_KEY")
 	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
 		return nil, fmt.Errorf("ISSUER_TLS_CERT and ISSUER_TLS_KEY must be set together")
+	}
+
+	cfg.SCIMToken = os.Getenv("ISSUER_SCIM_TOKEN")
+	if cfg.SCIMToken != "" && len(cfg.SCIMToken) < 32 {
+		return nil, fmt.Errorf("ISSUER_SCIM_TOKEN must be at least 32 characters (got %d)", len(cfg.SCIMToken))
+	}
+
+	sso := SSOConfig{
+		Issuer:       os.Getenv("ISSUER_OIDC_ISSUER"),
+		ClientID:     os.Getenv("ISSUER_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("ISSUER_OIDC_CLIENT_SECRET"),
+		RedirectURL:  os.Getenv("ISSUER_OIDC_REDIRECT_URL"),
+		CAFile:       os.Getenv("ISSUER_OIDC_CA_FILE"),
+	}
+	if sso.Issuer != "" || sso.ClientID != "" || sso.ClientSecret != "" || sso.RedirectURL != "" {
+		if sso.Issuer == "" || sso.ClientID == "" || sso.ClientSecret == "" || sso.RedirectURL == "" {
+			return nil, fmt.Errorf("ISSUER_OIDC_ISSUER, ISSUER_OIDC_CLIENT_ID, ISSUER_OIDC_CLIENT_SECRET and ISSUER_OIDC_REDIRECT_URL must be set together")
+		}
+		if !strings.HasPrefix(sso.Issuer, "https://") || !strings.HasPrefix(sso.RedirectURL, "https://") {
+			return nil, fmt.Errorf("ISSUER_OIDC_ISSUER and ISSUER_OIDC_REDIRECT_URL must use https://")
+		}
+		cfg.SSO = &sso
 	}
 
 	return cfg, nil

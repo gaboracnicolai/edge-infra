@@ -1,0 +1,25 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny ingress (B27.33): when networkPolicy.enabled, the pods below
+# accept only the flows listed; everything else is dropped by Calico (or any
+# CNI that enforces NetworkPolicy). Kubelet probes still pass — traffic from a
+# pod's own node is never blocked.
+# Operator access only: nothing in the cluster calls the custodian, so no ingress
+# is allowed unless networkPolicy.extraIngress names the operator's source
+# (kubectl port-forward is not network traffic and still works).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "edge-secrets.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-secrets.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "edge-secrets.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  {{- with .Values.networkPolicy.extraIngress }}
+  ingress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

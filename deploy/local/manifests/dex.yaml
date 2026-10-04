@@ -1,0 +1,110 @@
+# Dex — the stand-in for a customer's own identity provider (Okta, Entra ID,
+# Google, ...) in Phase 18 (B27.33). The edge issuer is its OIDC client: Dex
+# vouches for an email, and the issuer mints a gateway token for the user that
+# email names — but only once SCIM has provisioned that user.
+#
+# Local fixture only: an in-memory store, one static user, one static client.
+# The password hash is bcrypt("password"), the Dex project's own example.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dex-cert
+  namespace: infra
+  labels: { part-of: edge-local }
+spec:
+  secretName: dex-tls
+  commonName: dex
+  dnsNames:
+    - dex
+    - dex.infra.svc.cluster.local
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex
+  namespace: infra
+  labels: { part-of: edge-local }
+data:
+  config.yaml: |
+    issuer: https://dex.infra.svc.cluster.local:5556/dex
+    storage:
+      type: memory
+    web:
+      https: 0.0.0.0:5556
+      tlsCert: /etc/dex/tls/tls.crt
+      tlsKey: /etc/dex/tls/tls.key
+    oauth2:
+      skipApprovalScreen: true
+    staticClients:
+      - id: edge-issuer
+        secret: local-dev-dex-client-secret
+        name: Talyvor edge issuer
+        redirectURIs:
+          - https://edge-issuer.infra.svc.cluster.local:8081/sso/callback
+    enablePasswordDB: true
+    staticPasswords:
+      - email: sso-user@corp.local
+        hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+        username: sso-user
+        userID: 08a8684b-db88-4b73-90a9-3cd1661f5466
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: infra
+  labels: { app: dex, part-of: edge-local }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: dex }
+  template:
+    metadata:
+      labels: { app: dex, part-of: edge-local }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.41.1
+          args: ["dex", "serve", "/etc/dex/cfg/config.yaml"]
+          ports:
+            - { name: https, containerPort: 5556 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          readinessProbe:
+            httpGet: { path: /dex/.well-known/openid-configuration, port: https, scheme: HTTPS }
+            periodSeconds: 3
+          volumeMounts:
+            - { name: cfg, mountPath: /etc/dex/cfg, readOnly: true }
+            - { name: tls, mountPath: /etc/dex/tls, readOnly: true }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: cfg
+          configMap: { name: dex }
+        - name: tls
+          secret: { secretName: dex-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: infra
+  labels: { part-of: edge-local }
+spec:
+  type: ClusterIP
+  selector: { app: dex }
+  ports:
+    - { name: https, port: 5556, targetPort: https }
