@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from nats.js.api import RetentionPolicy, StorageType, StreamConfig
 
 import broker
+import freeze
 import metrics
 import specvalidation
 from config import Settings
@@ -134,11 +135,26 @@ async def require_admin(
         raise HTTPException(status_code=403, detail="invalid admin credentials")
 
 
+async def refuse_if_frozen(request: Request) -> None:
+    """503 while provisioning is frozen (osb_freeze.frozen) — nothing is queued.
+
+    Declared after ``require_tenant`` so the caller is authenticated first, and
+    as a dependency so it answers before body validation: every write is refused.
+    """
+    if await freeze.is_frozen(request.app.state.pool):
+        raise HTTPException(
+            status_code=503,
+            detail="provisioning is frozen by an operator; retry later",
+            headers={"Retry-After": "60"},
+        )
+
+
 @app.post("/v1/services", status_code=202, response_model=ProvisionResponse)
 async def create_service(
     spec: ServiceSpec,
     request: Request,
     tenant: Annotated[str, Depends(require_tenant)],
+    _unfrozen: Annotated[None, Depends(refuse_if_frozen)],
 ) -> ProvisionResponse:
     """Enqueue a CREATE request. The caller's authenticated tenant is
     authoritative — the body's ``team`` is overwritten, so a caller can never
@@ -158,6 +174,7 @@ async def delete_service(
     name: str,
     request: Request,
     tenant: Annotated[str, Depends(require_tenant)],
+    _unfrozen: Annotated[None, Depends(refuse_if_frozen)],
 ) -> ProvisionResponse:
     """Enqueue a DELETE for the caller's OWN service. Deleting a name the tenant
     does not own returns 404 — cross-tenant existence is never revealed."""

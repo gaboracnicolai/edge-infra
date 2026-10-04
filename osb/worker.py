@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -14,6 +15,7 @@ import structlog
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.api import ConsumerConfig
 
+import freeze
 import metrics
 import translator
 import webhook
@@ -28,6 +30,17 @@ log = structlog.get_logger(__name__)
 # dead-letter threshold so a message that fails its FINAL delivery is captured in
 # the dead_letter table rather than nak'd into a silent drop.
 MAX_DELIVER = 6
+ACK_WAIT_S = 30.0
+# While provisioning is frozen the worker HOLDS what it has been delivered rather
+# than nak'ing it: a nak or a lapsed ack_wait spends one of MAX_DELIVER
+# deliveries, so a freeze of a few minutes would dead-letter the very specs it
+# holds. in_progress() resets ack_wait without spending one; held messages are
+# touched at least every 2 * HOLD_BEAT_S, well inside ACK_WAIT_S.
+HOLD_BEAT_S = ACK_WAIT_S / 6
+
+
+class _Frozen(Exception):
+    """Raised inside an apply transaction that found osb_freeze set."""
 
 
 def _num_delivered(msg: Any) -> int:
@@ -116,8 +129,12 @@ async def _complete_request(conn, request_id: UUID | None, service_name: str | N
     return None
 
 
-async def process_message(msg: Any, pool, cfg: Settings) -> None:
-    """Apply a single NATS message: write services row, ack on success, nak on failure."""
+async def process_message(msg: Any, pool, cfg: Settings) -> bool:
+    """Apply a single NATS message: write services row, ack on success, nak on failure.
+
+    Returns False, with nothing written and the message neither acked nor nak'd,
+    when provisioning is frozen — the caller holds it and retries after unfreeze.
+    """
     headers = msg.headers or {}
     request_id = _parse_request_id(headers.get("Nats-Msg-Id"))
     operation = _operation_for(msg.subject, cfg)
@@ -132,6 +149,8 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
             # the request-status update commit together. A partial fan-out
             # failure rolls the whole provision back — no half-built Envoy config.
             async with pool.acquire() as conn, conn.transaction():
+                if await freeze.is_frozen(conn, lock=True):
+                    raise _Frozen
                 await conn.execute(
                     """
                     INSERT INTO services
@@ -170,6 +189,8 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
             team = payload["team"]
             service_name = payload["name"]
             async with pool.acquire() as conn, conn.transaction():
+                if await freeze.is_frozen(conn, lock=True):
+                    raise _Frozen
                 await translator.apply_delete(conn, team, service_name)
                 await conn.execute(
                     """
@@ -183,11 +204,13 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
         else:
             log.warning("unknown subject; acking to drop", subject=msg.subject)
             await msg.ack()
-            return
+            return True
 
         await msg.ack()
         metrics.nats_messages_total[(operation, "ack")] += 1
 
+    except _Frozen:
+        return False
     except Exception as exc:  # noqa: BLE001 — any failure becomes a nak + status update
         log.exception("worker processing failed", request_id=request_id, subject=msg.subject)
         if request_id is not None:
@@ -232,11 +255,11 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
                 request_id=request_id,
                 subject=msg.subject,
             )
-            return
+            return True
 
         await msg.nak(delay=30)
         metrics.nats_messages_total[(operation, "nak")] += 1
-        return
+        return True
 
     # Reached only on the success path (the except above returns). The message
     # is already acked, so this detached delivery can never hold it past
@@ -244,6 +267,16 @@ async def process_message(msg: Any, pool, cfg: Settings) -> None:
     if pending_webhook is not None:
         url, payload = pending_webhook
         _spawn_webhook(url, payload, cfg)
+    return True
+
+
+async def _frozen(pool) -> bool:
+    """The freeze flag, failing closed: an unreadable flag holds, never applies."""
+    try:
+        return await freeze.is_frozen(pool)
+    except Exception:  # noqa: BLE001 — a DB blip must not crash the loop or apply
+        log.exception("cannot read osb_freeze; holding queued specs")
+        return True
 
 
 async def run_worker(cfg: Settings, pool, js) -> None:
@@ -252,19 +285,41 @@ async def run_worker(cfg: Settings, pool, js) -> None:
         "edge.provision.*",
         durable=cfg.nats_consumer_durable,
         manual_ack=True,
-        config=ConsumerConfig(ack_wait=30, max_deliver=MAX_DELIVER),
+        config=ConsumerConfig(ack_wait=ACK_WAIT_S, max_deliver=MAX_DELIVER),
     )
     log.info("worker subscribed", durable=cfg.nats_consumer_durable)
 
+    held: list[Any] = []  # delivered, unapplied while frozen; FIFO
+    last_beat = 0.0
     while True:
         try:
-            msg = await sub.next_msg(timeout=5.0)
+            held.append(await sub.next_msg(timeout=HOLD_BEAT_S))
         except NatsTimeoutError:
-            continue
+            pass
         except asyncio.CancelledError:
             await sub.unsubscribe()
             raise
-        await process_message(msg, pool, cfg)
+        if not held:
+            continue
+        if not await _frozen(pool):
+            still_held = []
+            for msg in held:
+                if not await process_message(msg, pool, cfg):
+                    still_held.append(msg)
+            held = still_held
+        if held and time.monotonic() - last_beat >= HOLD_BEAT_S:
+            log.warning("provisioning frozen; holding queued specs", held=len(held))
+            touched = []
+            for msg in held:
+                try:
+                    await msg.in_progress()
+                    touched.append(msg)
+                except Exception:  # noqa: BLE001 — a lapsed touch costs one delivery, not the loop
+                    # Drop it: JetStream redelivers it, and holding both copies
+                    # would apply the spec twice on unfreeze.
+                    log.exception("could not touch a held spec; it will be redelivered")
+            held = touched
+            last_beat = time.monotonic()
 
 
 async def _sweep_once(cfg: Settings, pool) -> str | None:

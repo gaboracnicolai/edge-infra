@@ -115,11 +115,17 @@ default to `jwt`. That is not executable under pressure, and PR #39 carried no r
 `mtls`). So you do **not** need to touch the flag, Helm, ArgoCD, or the image — and because ext_authz
 stays globally enabled, the CFG-1 guard above never fires.
 
-**THE ROLLBACK — run this against the control-plane database:**
+**THE ROLLBACK — run this against the control-plane database** (the one shared database, so the
+OSB freeze flag lives there too):
 
 ```sql
--- Restores service on every route. Takes effect on the next reconcile (default 5s,
--- config.go:75 / values.yaml:27). ext_authz stays globally ON; each route opts out.
+-- 1. Freeze OSB FIRST (see the next section for why it must come first and why it is
+--    a row, not a replica count). From this commit on, the API answers 503 and the
+--    worker applies no queued spec.
+UPDATE osb_freeze SET frozen = true, reason = '<incident id>', updated_at = now();
+
+-- 2. Restores service on every route. Takes effect on the next reconcile (default 5s,
+--    config.go:75 / values.yaml:27). ext_authz stays globally ON; each route opts out.
 UPDATE routes SET auth_policy = 'none', updated_at = now() WHERE deleted_at IS NULL;
 ```
 
@@ -143,17 +149,47 @@ curl -sS -H "X-Admin-Key: $ADMIN_KEY" http://<cp>:18002/admin/v1/nodes \
 ### ⚠ The rollback un-does itself unless you freeze OSB
 
 OSB re-provisioning **restores `auth_policy` from the service spec** — `osb/translator.py:150` and
-`osb/worker.py:147` both carry `auth_policy = EXCLUDED.auth_policy`, and the spec default is `jwt`
+`osb/worker.py` both carry `auth_policy = EXCLUDED.auth_policy`, and the spec default is `jwt`
 (`osb/models.py:46`). So any tenant service that is created or updated after your `UPDATE` comes back
-**authenticated**, silently, one service at a time.
+**authenticated**, silently, one service at a time — including specs that were already queued in
+JetStream before the incident started.
 
-**Freeze provisioning for the duration of the incident:**
+**Do not freeze by scaling the worker to 0.** `kubectl scale deploy/edge-osb-worker --replicas=0`
+is reverted within minutes: the `edge-osb` Application has `selfHeal: true`
+(`deploy/argocd/applications/edge-osb.yaml`), so ArgoCD puts the replicas back and the worker drains
+the queue mid-incident. The freeze is a database row instead, `osb_freeze`
+(`osb/migrations/0004_freeze.sql`), which nothing in git reconciles:
+
+- **The API refuses.** While `frozen` is true, `POST /v1/services` and `DELETE /v1/services/{name}`
+  return **503** (`Retry-After: 60`) and queue nothing.
+- **The worker holds.** A spec already in JetStream is delivered but **not applied**: the worker
+  keeps it un-acked and touches it with `in_progress` so it spends none of its six deliveries (a
+  freeze of any length dead-letters nothing). It logs `provisioning frozen; holding queued specs`
+  with the count every few seconds.
+- **It holds at the commit.** Each apply reads the row `FOR SHARE` inside its transaction, so once
+  your `UPDATE osb_freeze` returns, no spec can land after it. Freeze **before** step 2 above, or a
+  spec applied between the two statements puts `jwt` back on its route.
+
+**Verify the freeze held:**
 
 ```bash
-kubectl -n infra scale deploy/edge-osb-worker --replicas=0
-# …roll back, stabilise, fix the cause…
-kubectl -n infra scale deploy/edge-osb-worker --replicas=<original>
+psql "$DSN" -c "SELECT frozen, reason, updated_at FROM osb_freeze;"            # frozen = t
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "Authorization: Bearer $TENANT_KEY" \
+  -H 'Content-Type: application/json' -d '{}' http://<osb-api>/v1/services       # 503
+psql "$DSN" -c "SELECT count(*) FROM provision_requests WHERE status = 'PENDING';"  # held specs
 ```
+
+**Unfreeze** only when a route coming back as `jwt` is what you want — the auth-service is healthy
+and ext_authz is on. Every held spec applies within seconds, in order, with its spec's `auth_policy`;
+while ext_authz is globally **off**, one held `jwt` spec freezes the fleet on last-good (§1).
+
+```sql
+UPDATE osb_freeze SET frozen = false, reason = NULL, updated_at = now();
+```
+
+Proven end to end against a real Postgres and a real JetStream by `osb/tests/test_freeze.py`
+(CI: `osb-test.yaml`, integration job): while frozen a POST is refused and a queued spec stays
+unapplied for longer than its whole redelivery budget; unfreezing applies it.
 
 ### Then, once stable (not during the incident)
 

@@ -36,10 +36,12 @@ def mock_pool() -> AsyncMock:
     pool = AsyncMock()
     pool.execute = AsyncMock(return_value=None)
     pool.fetchrow = AsyncMock(return_value=None)
+    pool.fetchval = AsyncMock(return_value=None)  # osb_freeze.frozen: not frozen
 
     conn = AsyncMock()
     conn.execute = pool.execute
     conn.fetchrow = pool.fetchrow
+    conn.fetchval = pool.fetchval
 
     def _acm(enter_value: object) -> AsyncMock:
         cm = AsyncMock()
