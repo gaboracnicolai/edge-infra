@@ -20,6 +20,25 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "auth-service.serviceAccountName" . }}
+      {{- with .Values.confidential }}
+      {{- if .enabled }}
+      {{- if not .nodeSelector }}
+      {{- fail "confidential.enabled needs confidential.nodeSelector: the labels only your confidential nodes carry" }}
+      {{- end }}
+      {{- if not .attestation.measurements }}
+      {{- fail "confidential.enabled needs confidential.attestation.measurements: the launch measurements allowed to start" }}
+      {{- end }}
+      {{- if .runtimeClassName }}
+      runtimeClassName: {{ .runtimeClassName }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .nodeSelector | nindent 8 }}
+      {{- with .tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         # Numeric UID/GID is REQUIRED: the distroless image's user is the NAME
@@ -30,6 +49,41 @@ spec:
         runAsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      {{- with .Values.confidential }}
+      {{- if .enabled }}
+      initContainers:
+        # Refuses to let auth-service start unless a fresh attestation report
+        # verifies; the reason lands in this container's termination message.
+        - name: attest
+          image: "{{ .attestation.image.repository }}:{{ .attestation.image.tag }}"
+          imagePullPolicy: {{ .attestation.image.pullPolicy }}
+          args: ["gate"]
+          env:
+            - name: ATTEST_EVIDENCE_URL
+              value: {{ required "confidential.attestation.evidenceURL is required" .attestation.evidenceURL | quote }}
+            - name: ATTEST_TRUSTED_KEY
+              value: {{ required "confidential.attestation.trustedKey is required: the attester's base64 ed25519 public key" .attestation.trustedKey | quote }}
+            - name: ATTEST_MEASUREMENTS
+              value: {{ join "," .attestation.measurements | quote }}
+            - name: ATTEST_MAX_AGE
+              value: {{ .attestation.maxAge | quote }}
+            - name: ATTEST_TIMEOUT
+              value: {{ .attestation.timeout | quote }}
+          terminationMessagePolicy: FallbackToLogsOnError
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      {{- end }}
+      {{- end }}
       containers:
         - name: auth-service
           securityContext:
