@@ -310,7 +310,10 @@ async def run_worker(cfg: Settings, pool, js) -> None:
         if held and time.monotonic() - last_beat >= HOLD_BEAT_S:
             log.warning("provisioning frozen; holding queued specs", held=len(held))
             for msg in held:
-                await msg.in_progress()
+                try:
+                    await msg.in_progress()
+                except Exception:  # noqa: BLE001 — a lapsed touch costs one delivery, not the loop
+                    log.exception("could not touch a held spec; it will be redelivered")
             last_beat = time.monotonic()
 
 
