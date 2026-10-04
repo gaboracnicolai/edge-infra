@@ -34,3 +34,8 @@ Not a claim on the page, but run too: Phase 19 runs the auth-service chart's
 confidential-node option — a workload refused without a verified attestation and
 started with one, against a mock TEE (real attestation needs confidential VMs).
 See [self-host-confidential-compute.md](self-host-confidential-compute.md).
+
+Phase 20 runs one HTTPS port for several hosts, each with its own cert: two routes
+on one shared `:9443` gateway each carry a cert, and each host is served its own
+cert and backend by SNI, a Host from another SNI finds no route, and an SNI no
+route names fails the handshake.

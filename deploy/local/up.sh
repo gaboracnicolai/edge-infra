@@ -30,6 +30,8 @@
 #  16  two nodes serve two tenants; each node's SDS holds only its own key (XDS-1)
 #  17  the charts' NetworkPolicies refuse a pod outside the allowed flows (red-first)
 #  18  a user created through SCIM signs in through OIDC (Dex as the IdP)
+#  19  confidential compute: the workload starts only with a verified attestation
+#  20  one HTTPS port serves two hosts, each with its own per-route cert (SNI)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -1609,6 +1611,89 @@ phase19_confidential() {
   ok "PHASE 19 — refused with no report and with an untrusted one; started with a valid one (real SEV-SNP/TDX attestation needs confidential VMs)"
 }
 
+# ---- Phase 20 — one HTTPS port, a cert per host (SNI via tls_inspector) -------
+SNI_PORT="${SNI_PORT:-9443}"
+
+# sni_get <node-ip> <host> [host-header] — HTTPS to that node's shared SNI port
+# with SNI <host> (and Host <host> unless overridden), from inside the kind
+# network; curl -v output, then "curl-exit=N".
+sni_get() {
+  local out rc=0
+  out="$(docker exec "${CLUSTER_NAME}-control-plane" curl -skv --max-time 6 \
+    --resolve "$2:$SNI_PORT:$1" -H "Host: ${3:-$2}" "https://$2:$SNI_PORT/" 2>&1)" || rc=$?
+  printf '%s\ncurl-exit=%s\n' "$out" "$rc"
+}
+
+phase20_sni_certs() {
+  section "PHASE 20 — one HTTPS port (:$SNI_PORT) serves two hosts, each with its own per-route cert"
+  local node ip tmp pgpod t c64 k64 sql="
+INSERT INTO gateways (id,name,port,protocol,tls_secret,node_selector,deleted_at)
+VALUES ('sni-shared-https','sni-shared-https',$SNI_PORT,'HTTPS',NULL,'{}'::jsonb,NULL)
+ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,protocol=EXCLUDED.protocol,tls_secret=NULL,node_selector=EXCLUDED.node_selector,deleted_at=NULL,updated_at=now();"
+  node="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].spec.nodeName}')"
+  ip="$(k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  [ -n "$ip" ] || die "PHASE20: no edge-proxy node IP"
+
+  section "seed a cert per host and ONE shared HTTPS gateway whose two routes each carry their own cert"
+  # The gateway has no tls_secret of its own: the certs live on the routes, so the
+  # listener renders one SNI filter chain per host on the single shared port.
+  tmp="$(mktemp -d)"
+  for t in a b; do
+    openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=sni-$t.local" \
+      -keyout "$tmp/$t.key" -out "$tmp/$t.crt" >/dev/null 2>&1 || die "openssl could not mint sni-$t's cert"
+    c64="$(base64 < "$tmp/$t.crt" | tr -d '\n')"; k64="$(base64 < "$tmp/$t.key" | tr -d '\n')"
+    sql+="
+INSERT INTO secrets (id,name,cert_pem,key_pem,kind)
+VALUES ('sni-$t-cert','sni-$t-cert',convert_from(decode('$c64','base64'),'UTF8'),convert_from(decode('$k64','base64'),'UTF8'),'tls_certificate')
+ON CONFLICT (name) DO UPDATE SET cert_pem=EXCLUDED.cert_pem,key_pem=EXCLUDED.key_pem,updated_at=now();
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,tls_secret_name,deleted_at)
+VALUES ('sni-$t','sni-$t','sni-shared-https',ARRAY['sni-$t.local']::text[],'/','tenant-$t',30,'none','sni-$t-cert',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
+  cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,tls_secret_name=EXCLUDED.tls_secret_name,updated_at=now(),deleted_at=NULL;"
+  done
+  rm -rf "$tmp"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  printf 'BEGIN;%s\nCOMMIT;\n' "$sql" | k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q -f - >/dev/null
+  ok "sni-shared-https :$SNI_PORT — routes sni-a.local (cert sni-a-cert -> tenant-a), sni-b.local (cert sni-b-cert -> tenant-b)"
+
+  section "each host on the shared port gets its own cert and its own backend ($node, $ip:$SNI_PORT)"
+  local i=0 outA outB
+  while :; do
+    outA="$(sni_get "$ip" sni-a.local)"; outB="$(sni_get "$ip" sni-b.local)"
+    has "$outA" "TENANT-A-BACKEND" && has "$outB" "TENANT-B-BACKEND" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$outA" | tail -15; printf '%s\n' "$outB" | tail -15; die "PHASE20 FAIL: the shared port never served both hosts"; }
+    sleep 2
+  done
+  local h own other out
+  for h in a b; do
+    if [ "$h" = a ]; then out="$outA"; own=TENANT-A-BACKEND; other=b; else out="$outB"; own=TENANT-B-BACKEND; other=a; fi
+    echo "  sni-$h.local:$SNI_PORT -> $(printf '%s\n' "$out" | grep -m1 -i 'subject:' | sed 's/^[* ]*//')"
+    has "$out" "CN=sni-$h.local" || { printf '%s\n' "$out" | tail -15; die "PHASE20 FAIL: sni-$h.local was not served its own cert"; }
+    ! has "$out" "CN=sni-$other.local" || die "PHASE20 FAIL: sni-$h.local was served sni-$other.local's cert"
+    has "$out" "$own" || die "PHASE20 FAIL: sni-$h.local did not reach $own"
+  done
+  ok "sni-a.local -> CN=sni-a.local + TENANT-A-BACKEND; sni-b.local -> CN=sni-b.local + TENANT-B-BACKEND, one port"
+
+  section "the Host is bound to the SNI: handshake as sni-b.local, ask for Host sni-a.local -> not tenant-a"
+  # No route matches, so Envoy answers itself: 404, or 401 from the global
+  # ext_authz (on since Phase 12) — anything but a 200 from tenant-a's backend.
+  local status
+  out="$(sni_get "$ip" sni-b.local sni-a.local)"
+  status="$(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' || true)"
+  echo "  SNI sni-b.local, Host sni-a.local -> ${status:-<no HTTP answer>}"
+  has "$out" "curl-exit=0" && [ -n "$status" ] && ! has "$status" " 200" && ! has "$out" "TENANT-A-BACKEND" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE20 FAIL: a request on sni-b.local's chain reached sni-a.local's route (or got no HTTP answer)"; }
+  ok "a Host from another SNI finds no route — one host's chain cannot reach another host's route"
+
+  section "an SNI no route names fails the TLS handshake (no cert, no body)"
+  out="$(sni_get "$ip" unknown.local)"
+  echo "  unknown.local:$SNI_PORT -> $(printf '%s\n' "$out" | tail -1)"
+  has "$out" "curl-exit=35" || { printf '%s\n' "$out" | tail -15; die "PHASE20 FAIL: an unknown SNI did not fail the handshake (want curl exit 35)"; }
+  ! has "$out" "CN=" && ! has "$out" "TENANT-" || die "PHASE20 FAIL: an unknown SNI was presented a cert or a body"
+  ok "PHASE 20 — two per-route certs served by SNI on one HTTPS port; an unknown SNI is refused at the handshake"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1637,7 +1722,8 @@ main() {
   phase17_network_policy
   phase18_scim_oidc
   phase19_confidential
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload."
+  phase20_sni_certs
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

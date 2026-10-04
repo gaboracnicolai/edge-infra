@@ -11,6 +11,7 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
@@ -50,36 +51,51 @@ func BuildListeners(gateways []store.Gateway, routes []store.Route, rl RateLimit
 }
 
 func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) *listenerv3.Listener {
-	hcm := &hcmv3.HttpConnectionManager{
-		CodecType:  hcmv3.HttpConnectionManager_AUTO,
-		StatPrefix: g.Name,
-		RouteSpecifier: &hcmv3.HttpConnectionManager_Rds{
-			Rds: &hcmv3.Rds{
-				ConfigSource:    AdsConfigSource(),
-				RouteConfigName: RouteConfigName(g.Name),
+	hcmFilter := func(routeConfigName string) *listenerv3.Filter {
+		hcm := &hcmv3.HttpConnectionManager{
+			CodecType:  hcmv3.HttpConnectionManager_AUTO,
+			StatPrefix: g.Name,
+			RouteSpecifier: &hcmv3.HttpConnectionManager_Rds{
+				Rds: &hcmv3.Rds{
+					ConfigSource:    AdsConfigSource(),
+					RouteConfigName: routeConfigName,
+				},
 			},
-		},
-		// Presence guard: a per-route local_ratelimit override is inert unless the
-		// base filter is in the chain, so emit it when the global throttle is on OR
-		// any route on this gateway carries a per-service limit.
-		HttpFilters: httpFilters(rl, ea, rls, anyRouteNeedsLocalRateLimit(routes)),
-	}
-	hcmFilter := &listenerv3.Filter{
-		Name: wellknown.HTTPConnectionManager,
-		ConfigType: &listenerv3.Filter_TypedConfig{
-			TypedConfig: mustAny(hcm),
-		},
+			// Presence guard: a per-route local_ratelimit override is inert unless the
+			// base filter is in the chain, so emit it when the global throttle is on OR
+			// any route on this gateway carries a per-service limit.
+			HttpFilters: httpFilters(rl, ea, rls, anyRouteNeedsLocalRateLimit(routes)),
+		}
+		return &listenerv3.Filter{
+			Name: wellknown.HTTPConnectionManager,
+			ConfigType: &listenerv3.Filter_TypedConfig{
+				TypedConfig: mustAny(hcm),
+			},
+		}
 	}
 
 	var chains []*listenerv3.FilterChain
-	if sni := sniFilterChains(routes, hcmFilter); g.Protocol == "HTTPS" && len(sni) > 0 {
+	var listenerFilters []*listenerv3.ListenerFilter
+	if hosts, picks := sniHosts(g, routes); len(hosts) > 0 {
 		// Per-SNI: one filter chain per distinct host, each presenting that host's
-		// cert (the shared HTTPS gateway; certs live on the routes, not g.TLSSecret).
-		chains = sni
+		// cert (the shared HTTPS gateway; certs live on the routes, not g.TLSSecret)
+		// and reading only that host's routes. Envoy only learns the SNI if
+		// tls_inspector peeks at the ClientHello — without it no server_names match
+		// ever fires and every handshake is reset.
+		for _, h := range hosts {
+			chains = append(chains, &listenerv3.FilterChain{
+				FilterChainMatch: &listenerv3.FilterChainMatch{ServerNames: []string{h}},
+				Filters:          []*listenerv3.Filter{hcmFilter(SNIRouteConfigName(g.Name, h))},
+				// mtls REQUIRES the client cert; jwt_or_mtls only REQUESTS it (still
+				// verified if presented) so a cert-less caller reaches ext_authz.
+				TransportSocket: downstreamTLS(picks[h].secret, picks[h].clientCA, picks[h].authPolicy == "mtls"),
+			})
+		}
+		listenerFilters = []*listenerv3.ListenerFilter{tlsInspectorFilter()}
 	} else {
 		// One chain: plaintext (HTTP) or a single cert (backward-compat single-cert
 		// HTTPS gateway — e.g. a controller-provisioned gateway with g.TLSSecret).
-		fc := &listenerv3.FilterChain{Filters: []*listenerv3.Filter{hcmFilter}}
+		fc := &listenerv3.FilterChain{Filters: []*listenerv3.Filter{hcmFilter(RouteConfigName(g.Name))}}
 		if g.Protocol == "HTTPS" && g.TLSSecret != "" {
 			fc.TransportSocket = downstreamTLS(g.TLSSecret, "", false) // controller single-cert gateway: no mTLS
 		}
@@ -87,23 +103,40 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 	}
 
 	return &listenerv3.Listener{
-		Name:         g.Name,
-		Address:      socketAddress("0.0.0.0", g.Port),
-		FilterChains: chains,
+		Name:            g.Name,
+		Address:         socketAddress("0.0.0.0", g.Port),
+		ListenerFilters: listenerFilters,
+		FilterChains:    chains,
 	}
 }
 
-// sniFilterChains builds one filter chain per DISTINCT SNI host among the routes
-// that carry a TLS secret: filter_chain_match{server_names:[host]} + that host's
-// downstream cert (referenced by SDS name — no cert material here) + the shared
-// HCM. For a same-host/different-cert conflict the route with the smallest NAME
+// tlsInspectorFilter reads the SNI from the TLS ClientHello so the listener can
+// pick the filter chain whose server_names match it. An SNI no chain names
+// matches nothing, and Envoy closes the connection before any cert is sent.
+func tlsInspectorFilter() *listenerv3.ListenerFilter {
+	return &listenerv3.ListenerFilter{
+		Name: wellknown.TLSInspector,
+		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+			TypedConfig: mustAny(&tlsinspectorv3.TlsInspector{}),
+		},
+	}
+}
+
+// sniPick is the cert and client-cert policy one SNI host's filter chain serves.
+type sniPick struct{ secret, clientCA, authPolicy, routeName string }
+
+// sniHosts returns the DISTINCT SNI hosts of an HTTPS gateway among the routes
+// that carry a TLS secret, sorted for stable chain order, with each host's cert
+// pick. For a same-host/different-cert conflict the route with the smallest NAME
 // wins, so the choice is DETERMINISTIC regardless of input order (never arbitrary
-// iteration or chain order); hosts are then sorted for stable chain order.
-// Returns empty when no route carries a secret (the caller falls back to the
-// single-chain path).
-func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*listenerv3.FilterChain {
-	type pick struct{ secret, clientCA, authPolicy, routeName string }
-	byHost := map[string]pick{}
+// iteration or chain order). Returns no hosts for a non-HTTPS gateway or when no
+// route carries a secret (the caller falls back to the single-chain path). LDS
+// and RDS both call it, so every SNI chain's route config is always emitted.
+func sniHosts(g store.Gateway, routes []store.Route) ([]string, map[string]sniPick) {
+	if g.Protocol != "HTTPS" {
+		return nil, nil
+	}
+	byHost := map[string]sniPick{}
 	for _, r := range routes {
 		if r.TLSSecret == "" || len(r.Hosts) == 0 {
 			continue
@@ -113,7 +146,7 @@ func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*list
 			continue // SNI needs a concrete host
 		}
 		if cur, ok := byHost[host]; !ok || r.Name < cur.routeName {
-			byHost[host] = pick{secret: r.TLSSecret, clientCA: r.ClientCASecret, authPolicy: r.AuthPolicy, routeName: r.Name}
+			byHost[host] = sniPick{secret: r.TLSSecret, clientCA: r.ClientCASecret, authPolicy: r.AuthPolicy, routeName: r.Name}
 		}
 	}
 	hosts := make([]string, 0, len(byHost))
@@ -121,18 +154,7 @@ func sniFilterChains(routes []store.Route, hcmFilter *listenerv3.Filter) []*list
 		hosts = append(hosts, h)
 	}
 	sort.Strings(hosts)
-
-	chains := make([]*listenerv3.FilterChain, 0, len(hosts))
-	for _, h := range hosts {
-		chains = append(chains, &listenerv3.FilterChain{
-			FilterChainMatch: &listenerv3.FilterChainMatch{ServerNames: []string{h}},
-			Filters:          []*listenerv3.Filter{hcmFilter},
-			// mtls REQUIRES the client cert; jwt_or_mtls only REQUESTS it (still
-			// verified if presented) so a cert-less caller reaches ext_authz.
-			TransportSocket: downstreamTLS(byHost[h].secret, byHost[h].clientCA, byHost[h].authPolicy == "mtls"),
-		})
-	}
-	return chains
+	return hosts, byHost
 }
 
 // httpFilters returns the HCM filter chain in order: local_ratelimit (a coarse
