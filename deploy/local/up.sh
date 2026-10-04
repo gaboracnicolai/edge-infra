@@ -1331,6 +1331,8 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
 # workload opens (whatever the protocol says after); otherwise "dropped (curl
 # exit N)": 28 = timed out (dropped on the way to a pod), 7 = refused or, from
 # a node, denied in its own OUTPUT chain (connect() fails at once with EPERM).
+# Exit 35 (TLS handshake failed — a plain-HTTP port such as edge-osb:8080) only
+# happens after TCP connected, and some curl builds leave time_connect at 0 then.
 reach() {
   local out
   out="$(k -n "$1" exec "deploy/$2" -- sh -c \
@@ -1347,7 +1349,7 @@ reach_from_node() {
 }
 reach_verdict() {  # "<time_connect> <curl exit>"
   if [ -z "$1" ]; then echo "error (the probe did not run)"
-  elif awk -v t="${1% *}" 'BEGIN { exit !(t + 0 > 0) }'; then echo connected
+  elif [ "${1##* }" = 35 ] || awk -v t="${1% *}" 'BEGIN { exit !(t + 0 > 0) }'; then echo connected
   else echo "dropped (curl exit ${1##* })"; fi
 }
 reach_is() { local want="$1"; shift; case "$(reach "$@")" in "$want"*) return 0 ;; *) return 1 ;; esac; }
