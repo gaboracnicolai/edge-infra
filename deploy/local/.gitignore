@@ -3,3 +3,4 @@
 .pki-bootstrap/
 .cutover-state
 .cutover-probe
+.rollback-before

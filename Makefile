@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local kind-e2e kind-cutover
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local kind-e2e kind-cutover kind-rollback
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -77,6 +77,15 @@ kind-e2e:
 # Real-cluster steps: docs/ext-authz-launch-runbook.md.
 kind-cutover:
 	bash deploy/local/cutover.sh
+
+# The ext_authz rollback rehearsed on a throwaway kind cluster: from the cutover
+# state, with the auth-service down, flipping extAuthz.enabled back alone is shown
+# to leave every gated request denied, and the full revert (jwt routes out, then
+# the control-plane release back to its pre-enable revision) to restore exactly
+# the pre-enable traffic. Same tools and host ports as kind-e2e.
+# Real-cluster rollback: docs/ext-authz-cutover-and-rollback.md §2.
+kind-rollback:
+	bash deploy/local/rollback.sh
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:

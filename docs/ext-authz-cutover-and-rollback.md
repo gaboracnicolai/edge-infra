@@ -67,6 +67,22 @@ per-process counter; that text is stale against `main` — but accidentally stil
 
 ## 2. ⚠ The rollback
 
+**Rehearsed: `make kind-rollback`** (`deploy/local/rollback.sh`, CI: Kind Rollback). From the
+cutover state, with the auth-service taken down, it measures both halves of this section on kind:
+
+- **Flipping `extAuthz.enabled` back alone**, with a jwt route present: the flipped control-plane
+  pod refuses every snapshot and never turns Ready (its `/readyz` needs a published snapshot), so
+  the rolling update never progresses and the old pods keep serving ext_authz **on**. Every gated
+  request stays denied: no token, a garbage token and a **valid** JWT all get 403.
+- **The full revert**: first remove the jwt routes while ext_authz is still on, then roll the
+  control-plane release back to its pre-enable revision (image + `extAuthz.enabled=false`). The
+  gateway then serves exactly what it served before the enable: the same release values and image,
+  the same xDS version acked by every edge-proxy, and the same answer for every request class. No
+  tenant request is refused along the way. Reversing the two steps is the flip-alone case.
+
+It does not rehearse the SQL rollback below. That one ends with the routes served open, which is not
+the same as before.
+
 ### What does NOT work, and why
 
 **Flipping `extAuthz.enabled` back to `false` does not roll anything back.** It makes things worse.
