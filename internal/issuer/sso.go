@@ -35,9 +35,11 @@ type SSOConfig struct {
 	CAFile       string // ISSUER_OIDC_CA_FILE — optional PEM CA the IdP's TLS certificate chains to
 }
 
-// SSOStore looks a user up for OIDC sign-in. Only a user that already exists
-// (provisioned over SCIM, or added by an operator) and is not disabled may
-// sign in: the IdP proves who someone is, the user store says they may enter.
+// SSOStore looks a user up for OIDC sign-in. Only a user the IdP provisioned
+// over SCIM, and has not deactivated, may sign in: the IdP proves who someone
+// is, and its own SCIM record says they may enter. An email_verified claim of
+// false is refused; an absent one is accepted (Entra ID never sends it, and the
+// IdP that vouches for the email is the one that provisioned the user).
 type SSOStore interface {
 	GetLoginByEmail(ctx context.Context, email string) (*Login, error)
 }

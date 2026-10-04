@@ -58,10 +58,12 @@ and scopes `openid email profile`, then add to the issuer's
 
 If the IdP's certificate is from a private CA, mount it and set `sso.caFile`.
 
-The IdP proves who someone is; the issuer's user store decides whether they may
-enter. Only a user that already exists and is active signs in — the IdP's email
-claim (if it says `email_verified: false`, refused) is matched to a user,
-case-insensitively. There is no sign-up on first login: provision with SCIM.
+The IdP proves who someone is; its SCIM record says whether they may enter. Only
+a user the IdP provisioned over SCIM, and has not deactivated, signs in — the
+IdP's email claim is matched to that user, case-insensitively (an
+`email_verified: false` claim is refused). There is no sign-up on first login,
+and an operator's password account (`issuer adduser`) never signs in through
+SSO — it keeps `/login`.
 
 ## SCIM — your IdP creates and removes the users
 
@@ -75,7 +77,9 @@ Supported: `Users` create, read, list (filter `userName eq "..."` or
 `externalId eq "..."`), replace (PUT), patch (PATCH — `active`, `userName`,
 `displayName`, `externalId`; other attributes are accepted and ignored) and
 delete; `ServiceProviderConfig`. A SCIM user's `userName` is their email and they
-have no password, so they sign in through SSO only. Deactivating a user
+have no password, so they sign in through SSO only. SCIM sees only the users it
+created: an email an operator's password account already holds is refused
+(409), and SCIM can neither change nor delete that account. Deactivating a user
 (`active: false`) or deleting them stops their next sign-in at once; a token
 already issued lives out its TTL (`config.tokenTTL`, default 1h).
 

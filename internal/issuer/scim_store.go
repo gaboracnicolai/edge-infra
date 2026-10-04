@@ -15,7 +15,9 @@ import (
 var ErrUserExists = errors.New("user already exists")
 
 // SCIMUser is a user as SCIM sees it: the users row without its credentials.
-// UserName is the user's email — the key OIDC sign-in matches on.
+// UserName is the user's email — the key OIDC sign-in matches on. SCIM sees
+// only the users it created (scim_managed); an email held by an operator's
+// password account is ErrUserExists to it.
 type SCIMUser struct {
 	ID          string
 	UserName    string
@@ -49,13 +51,13 @@ func isUniqueViolation(err error) bool {
 // filter), "userName" (case-insensitive) or "externalId" — the two equality
 // filters IdPs send before they create a user.
 func (s *Store) ListSCIMUsers(ctx context.Context, attr, value string, offset, limit int) ([]SCIMUser, int, error) {
-	where, args := "TRUE", []any{}
+	where, args := "scim_managed", []any{}
 	switch attr {
 	case "":
 	case "userName":
-		where, args = "lower(email) = lower($1)", []any{value}
+		where, args = "scim_managed AND lower(email) = lower($1)", []any{value}
 	case "externalId":
-		where, args = "external_id = $1", []any{value}
+		where, args = "scim_managed AND external_id = $1", []any{value}
 	default:
 		return nil, 0, fmt.Errorf("unsupported filter attribute %q", attr)
 	}
@@ -85,15 +87,15 @@ func (s *Store) ListSCIMUsers(ctx context.Context, attr, value string, offset, l
 
 // GetSCIMUser fetches one user by id, or ErrUserNotFound.
 func (s *Store) GetSCIMUser(ctx context.Context, id string) (*SCIMUser, error) {
-	return scanSCIMUser(s.pool.QueryRow(ctx, `SELECT `+scimColumns+` FROM users WHERE id = $1`, id))
+	return scanSCIMUser(s.pool.QueryRow(ctx, `SELECT `+scimColumns+` FROM users WHERE id = $1 AND scim_managed`, id))
 }
 
 // CreateSCIMUser inserts a password-less user (OIDC sign-in only). An email
 // already held by any user, in any letter case, is ErrUserExists.
 func (s *Store) CreateSCIMUser(ctx context.Context, u SCIMUser) (*SCIMUser, error) {
 	created, err := scanSCIMUser(s.pool.QueryRow(ctx, `
-		INSERT INTO users (email, password_hash, display_name, external_id, disabled_at)
-		SELECT lower($1), '', $2, NULLIF($3, ''), CASE WHEN $4::bool THEN NULL ELSE now() END
+		INSERT INTO users (email, password_hash, display_name, external_id, disabled_at, scim_managed)
+		SELECT lower($1), '', $2, NULLIF($3, ''), CASE WHEN $4::bool THEN NULL ELSE now() END, true
 		WHERE NOT EXISTS (SELECT 1 FROM users WHERE lower(email) = lower($1))
 		RETURNING `+scimColumns, u.UserName, u.DisplayName, u.ExternalID, u.Active))
 	if errors.Is(err, ErrUserNotFound) || isUniqueViolation(err) {
@@ -112,7 +114,7 @@ func (s *Store) ReplaceSCIMUser(ctx context.Context, id string, u SCIMUser) (*SC
 			external_id  = NULLIF($4, ''),
 			disabled_at  = CASE WHEN $5::bool THEN NULL ELSE COALESCE(disabled_at, now()) END,
 			updated_at   = now()
-		WHERE id = $1
+		WHERE id = $1 AND scim_managed
 		  AND NOT EXISTS (SELECT 1 FROM users WHERE lower(email) = lower($2) AND id <> $1)
 		RETURNING `+scimColumns, id, u.UserName, u.DisplayName, u.ExternalID, u.Active))
 	if isUniqueViolation(err) {
@@ -129,7 +131,7 @@ func (s *Store) ReplaceSCIMUser(ctx context.Context, id string, u SCIMUser) (*SC
 
 // DeleteSCIMUser removes a user and its team memberships.
 func (s *Store) DeleteSCIMUser(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1 AND scim_managed`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
@@ -139,14 +141,15 @@ func (s *Store) DeleteSCIMUser(ctx context.Context, id string) error {
 	return nil
 }
 
-// GetLoginByEmail is GetLogin matched case-insensitively, for OIDC sign-in
-// (an IdP may send the email in a different case than SCIM provisioned it).
-// Two users whose emails differ only in case are ambiguous: ErrUserNotFound.
+// GetLoginByEmail finds the SCIM-provisioned user an OIDC sign-in names,
+// matched case-insensitively (an IdP may send the email in a different case
+// than SCIM provisioned it). A password account is never returned: it signs
+// in through /login only. Two matches are ambiguous: ErrUserNotFound.
 func (s *Store) GetLoginByEmail(ctx context.Context, email string) (*Login, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, email, password_hash, disabled_at
 		FROM users
-		WHERE lower(email) = lower($1)
+		WHERE lower(email) = lower($1) AND scim_managed
 		LIMIT 2
 	`, email)
 	if err != nil {

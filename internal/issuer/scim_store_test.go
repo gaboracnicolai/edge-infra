@@ -41,6 +41,24 @@ func TestSCIMStoreProvisionsPasswordlessUser(t *testing.T) {
 		t.Fatalf("after deactivate: %+v, want disabled", l)
 	}
 
+	// An operator's password account is out of SCIM's and SSO's reach.
+	opsID, err := s.CreateUser(ctx, "ops@corp.example", "stored-hash", "Ops", nil)
+	if err != nil {
+		t.Fatalf("create password user: %v", err)
+	}
+	if _, err := s.GetLoginByEmail(ctx, "ops@corp.example"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("SSO lookup of a password account err = %v, want ErrUserNotFound", err)
+	}
+	if _, total, _ := s.ListSCIMUsers(ctx, "", "", 0, 10); total != 1 {
+		t.Fatalf("SCIM lists %d users, want 1 (the password account hidden)", total)
+	}
+	if err := s.DeleteSCIMUser(ctx, opsID); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("SCIM delete of a password account err = %v, want ErrUserNotFound", err)
+	}
+	if _, err := s.CreateSCIMUser(ctx, SCIMUser{UserName: "OPS@corp.example", Active: true}); !errors.Is(err, ErrUserExists) {
+		t.Fatalf("SCIM create over a password account err = %v, want ErrUserExists", err)
+	}
+
 	if err := s.DeleteSCIMUser(ctx, u.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
