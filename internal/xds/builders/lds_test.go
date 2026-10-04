@@ -200,6 +200,22 @@ func TestBuildListeners_PerSNI_CertPerHost(t *testing.T) {
 	}
 }
 
+// The per-SNI chains only match if Envoy can read the SNI: the listener must
+// carry tls_inspector, or every handshake on the shared port is reset.
+func TestBuildListeners_PerSNI_HasTLSInspector(t *testing.T) {
+	gw := store.Gateway{ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}
+	routes := []store.Route{
+		{Name: "osb-t-a", GatewayID: "https", ClusterName: "osb-t-a", Hosts: []string{"a.example.com"}, PathPrefix: "/", TLSSecret: "sec-a"},
+	}
+	l := listenerFrom(t, BuildListeners([]store.Gateway{gw}, routes, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})[0])
+	if len(l.ListenerFilters) != 1 || l.ListenerFilters[0].GetName() != wellknown.TLSInspector {
+		t.Fatalf("per-SNI listener filters = %v; want exactly [%s]", l.ListenerFilters, wellknown.TLSInspector)
+	}
+	if l.ListenerFilters[0].GetTypedConfig() == nil {
+		t.Error("tls_inspector must carry a typed_config (Envoy rejects an untyped listener filter)")
+	}
+}
+
 // BACKWARD-COMPAT: a single-cert HTTPS gateway (g.TLSSecret set, no per-route
 // secrets) renders exactly one filter chain with that cert and no SNI match.
 func TestBuildListeners_SingleCertHTTPS_BackwardCompat(t *testing.T) {

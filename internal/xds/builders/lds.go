@@ -11,6 +11,7 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
@@ -72,10 +73,14 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 	}
 
 	var chains []*listenerv3.FilterChain
+	var listenerFilters []*listenerv3.ListenerFilter
 	if sni := sniFilterChains(routes, hcmFilter); g.Protocol == "HTTPS" && len(sni) > 0 {
 		// Per-SNI: one filter chain per distinct host, each presenting that host's
 		// cert (the shared HTTPS gateway; certs live on the routes, not g.TLSSecret).
+		// Envoy only learns the SNI if tls_inspector peeks at the ClientHello —
+		// without it no server_names match ever fires and every handshake is reset.
 		chains = sni
+		listenerFilters = []*listenerv3.ListenerFilter{tlsInspectorFilter()}
 	} else {
 		// One chain: plaintext (HTTP) or a single cert (backward-compat single-cert
 		// HTTPS gateway — e.g. a controller-provisioned gateway with g.TLSSecret).
@@ -87,9 +92,22 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 	}
 
 	return &listenerv3.Listener{
-		Name:         g.Name,
-		Address:      socketAddress("0.0.0.0", g.Port),
-		FilterChains: chains,
+		Name:            g.Name,
+		Address:         socketAddress("0.0.0.0", g.Port),
+		ListenerFilters: listenerFilters,
+		FilterChains:    chains,
+	}
+}
+
+// tlsInspectorFilter reads the SNI from the TLS ClientHello so the listener can
+// pick the filter chain whose server_names match it. An SNI no chain names
+// matches nothing, and Envoy closes the connection before any cert is sent.
+func tlsInspectorFilter() *listenerv3.ListenerFilter {
+	return &listenerv3.ListenerFilter{
+		Name: wellknown.TLSInspector,
+		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
+			TypedConfig: mustAny(&tlsinspectorv3.TlsInspector{}),
+		},
 	}
 }
 
