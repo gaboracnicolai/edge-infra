@@ -569,9 +569,10 @@ func TestReconcile_LateJoinNodeReceivesSnapshotWithoutConfigChange(t *testing.T)
 	// connection does, and it makes the node appear in GetStatusKeys().
 	const late = "late-joiner"
 	respCh := make(chan cachev3.Response, 1)
-	cancel := cache.CreateWatch(
+	cancel, err := cache.CreateWatch(
 		&cachev3.Request{Node: &corev3.Node{Id: late}, TypeUrl: resourcev3.ClusterType},
-		streamv3.NewStreamState(true, nil), respCh)
+		streamv3.NewSotwSubscription(nil, true), respCh)
+	require.NoError(t, err)
 	defer cancel()
 
 	// Precondition: the late joiner has no snapshot yet.

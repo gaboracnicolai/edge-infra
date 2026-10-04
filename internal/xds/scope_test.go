@@ -48,9 +48,10 @@ func twoTenantSnapshot() *store.Snapshot {
 
 func connect(t *testing.T, cache cachev3.SnapshotCache, node string) {
 	t.Helper()
-	cancel := cache.CreateWatch(
+	cancel, err := cache.CreateWatch(
 		&cachev3.Request{Node: &corev3.Node{Id: node}, TypeUrl: resourcev3.ClusterType},
-		streamv3.NewStreamState(true, nil), make(chan cachev3.Response, 1))
+		streamv3.NewSotwSubscription(nil, true), make(chan cachev3.Response, 1))
+	require.NoError(t, err)
 	t.Cleanup(cancel)
 }
 
