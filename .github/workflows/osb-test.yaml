@@ -99,6 +99,7 @@ jobs:
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
               "osb/migrations/0003_dead_letter.sql",
+              "osb/migrations/0004_freeze.sql",
           ]
           async def main():
               conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
@@ -113,6 +114,26 @@ jobs:
       - name: Python translator + tenancy suites (shared DB)
         run: pytest tests/test_translator.py tests/test_tenancy.py -q
         working-directory: osb
+      # The provisioning freeze (B28.197) is a worker + JetStream behaviour, so its
+      # E2E needs a real JetStream next to the real Postgres. Services cannot pass
+      # `-js`, hence a plain container. The test skips without TEST_NATS_URL, and a
+      # skip is not a pass: any SKIPPED line fails the step.
+      - name: Start NATS JetStream
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2.10-alpine -js
+          for _ in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null && exit 0; sleep 1; done
+          docker logs nats; exit 1
+      - name: OSB freeze E2E — real Postgres + JetStream (no SKIP allowed)
+        env:
+          TEST_NATS_URL: nats://127.0.0.1:4222
+        working-directory: osb
+        run: |
+          set -euo pipefail
+          pytest tests/test_freeze.py -q -rs 2>&1 | tee /tmp/freeze.log
+          if grep -q SKIPPED /tmp/freeze.log; then
+            echo "::error::freeze E2E SKIPPED — it did not actually execute"
+            exit 1
+          fi
       - name: Go cross-language E2E (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./internal/store/ -run TestLoadSnapshot_OSB
       - name: Go edge-secrets custodian E2E (-count=1, no cached pass)
