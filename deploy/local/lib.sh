@@ -118,7 +118,10 @@ ep_pod() { k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{
 # port-forward. Echoes the JSON (empty string on failure).
 envoy_config_dump() {
   local pod="$1" out
-  k -n edge port-forward "pod/$pod" 19001:9901 >/dev/null 2>&1 &
+  # kubectl directly, not the k() wrapper: backgrounding a function makes $! a
+  # subshell, and killing that leaves the port-forward holding 19001, so every
+  # later call would read the FIRST pod's config.
+  kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$pod" 19001:9901 >/dev/null 2>&1 &
   local pf=$!
   sleep 5
   out="$(curl -s --max-time 8 http://127.0.0.1:19001/config_dump 2>/dev/null || true)"

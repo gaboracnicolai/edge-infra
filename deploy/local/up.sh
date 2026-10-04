@@ -427,7 +427,8 @@ verify_phase7() {
   [ -n "$ep" ] || ep="$(k -n edge get pod -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   if [ -n "$ep" ]; then
     section "edge-proxy admin ($ep) — xDS link + received config"
-    k -n edge port-forward "pod/$ep" 19001:9901 >/dev/null 2>&1 &
+    # kubectl directly (see envoy_config_dump): a backgrounded k() leaks the forward.
+    kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$ep" 19001:9901 >/dev/null 2>&1 &
     local pf=$!; sleep 3
     echo "  control_plane connection (1 = connected):"
     curl -s --max-time 5 http://127.0.0.1:19001/stats 2>/dev/null \
@@ -1284,6 +1285,13 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   assert_refuses "$ipB" tenant-a.local
 
   section "a node that reconnects is caught up with its own scope (config unchanged)"
+  # Restart the control plane: a new replica turns Ready (/readyz) only after its
+  # first publish, before any edge node can reach it, so with config unchanged
+  # every node it serves afterwards is served by the late-join catch-up. Then
+  # restart $nodeB's edge-proxy: the fresh Envoy holds nothing, so whatever it
+  # ends up holding came from that catch-up.
+  k -n "$INFRA_NS" rollout restart deploy/edge-control-plane >/dev/null
+  wait_rollout deploy/edge-control-plane "$INFRA_NS" 240s
   local old new i=0
   old="$(ep_pod_on "$nodeB")"
   k -n edge delete pod "$old" --wait=true >/dev/null
@@ -1297,6 +1305,8 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   assert_scope "$nodeB" tenant-b-cert tenant-a-cert
   assert_serves "$ipB" tenant-b.local TENANT-B-BACKEND
   assert_refuses "$ipB" tenant-a.local
+  assert_scope "$nodeA" tenant-a-cert tenant-b-cert
+  assert_serves "$ipA" tenant-a.local TENANT-A-BACKEND
   ok "PHASE 16 — per-node SDS scoping proven on two nodes, through a reconnect"
 }
 

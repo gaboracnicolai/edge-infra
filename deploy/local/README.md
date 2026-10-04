@@ -88,7 +88,7 @@ release is cleared before re-install.
 | 12 | **CFG-1 flip + ext_authz LIVE** | Four properties, red-first: (P4) the CFG-1 guard refuses a jwt route while ext_authz is OFF; then the live flip; (P1) a real minted JWT → 200 + trusted identity-header injection (forged headers overwritten); (P2) no/invalid JWT → 401; (P3) auth-service down → fail-closed 403. |
 | 13–14 | **R8 fail-static guard + metrics** | A dangling route is refused, the last good config keeps serving, and the blocked counter rises on the live `/metrics`. |
 | 15 | **OSB broker** | `edge-osb` answers `/healthz`; a tenant-keyed `POST /v1/services` is completed by the worker and the new host is served through Envoy :80 by a stub (`OSB-PROVISIONED-BACKEND`); `DELETE` removes it again. |
-| 16 | **Per-node SDS** (XDS-1) | Pins tenant-a's and tenant-b's HTTPS `:8443` gateways to the two workers via `node_selector` (`kubernetes.io/hostname`). Each node's live Envoy SDS holds **only its own** tenant's key; each serves its tenant with that tenant's cert and **cannot** complete a handshake for the other; after its edge-proxy pod is deleted, the new one is caught up with the same scope. |
+| 16 | **Per-node SDS** (XDS-1) | Pins tenant-a's and tenant-b's HTTPS `:8443` gateways to the two workers via `node_selector` (`kubernetes.io/hostname`). Each node's live Envoy SDS holds **only its own** tenant's key; each serves its tenant with that tenant's cert and **cannot** complete a handshake for the other; after a control-plane restart (a new replica is Ready only after its first publish, so only the late-join catch-up can serve a node) and a restart of one node's edge-proxy, the fresh Envoy again holds only its own tenant's key. |
 
 ## Topology
 
