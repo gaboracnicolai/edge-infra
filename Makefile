@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls test-integration argocd-apply argocd-diff docker-build-local kind-e2e kind-cutover kind-rollback
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins test-integration argocd-apply argocd-diff docker-build-local kind-e2e kind-cutover kind-rollback
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -55,6 +55,11 @@ helm-template-dry-run:
 # Fails if anyone reverts xDS to plaintext or drops the SAN pin.
 verify-xds-mtls:
 	bash deploy/hack/verify-xds-mtls.sh
+
+# Render every chart for base + every env overlay and fail if any image runs on
+# :latest or no tag. Pin images to the SHA you pushed, as the server does.
+verify-image-pins:
+	bash deploy/hack/verify-image-pins.sh
 
 # Cross-language integration test for the OSB -> data-plane translator: stands up
 # a throwaway Postgres with BOTH schemas and proves an OSB provision surfaces in

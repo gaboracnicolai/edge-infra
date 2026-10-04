@@ -40,3 +40,13 @@ jobs:
           done
       - name: Verify xDS mTLS invariant
         run: make verify-xds-mtls
+      - name: No image on a floating tag
+        run: make verify-image-pins
+      - name: The image-pin check can fail
+        run: |
+          set -uo pipefail
+          if bash deploy/hack/verify-image-pins.sh --set image.tag=latest >/dev/null; then
+            echo "verify-image-pins passed a chart forced onto :latest"
+            exit 1
+          fi
+          echo "verify-image-pins refused :latest"
