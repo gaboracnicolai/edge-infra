@@ -9,6 +9,7 @@ security proofs build on.
 git clone … && cd edge-infra
 make kind-e2e             # ONE command: create cluster, run every phase, delete cluster
 make kind-cutover         # the CFG-1 launch-day cutover, in order, on its own cluster
+make kind-rollback        # the ext_authz rollback, from the cutover state, on its own cluster
 deploy/local/up.sh        # stand everything up (idempotent, re-runnable)
 deploy/local/down.sh      # tear the cluster down
 ```
@@ -26,6 +27,13 @@ step it checks that tenant routes still answer 200, that a jwt route is never se
 valid token, and that the fleet is not frozen on last-good. CI runs it on the same paths
 (`.github/workflows/kind-cutover.yaml`). The real-cluster steps are
 [docs/ext-authz-launch-runbook.md](../../docs/ext-authz-launch-runbook.md).
+
+`make kind-rollback` (`deploy/local/rollback.sh`) runs the same steps on its own cluster
+(`edge-rollback`), records what the gateway serves just before the enable, then takes the
+auth-service down with ext_authz on. It shows that flipping `extAuthz.enabled` back alone leaves
+every gated request denied, and that the full revert (jwt routes out first, then the control-plane
+release back to its pre-enable revision) restores exactly the pre-enable traffic and xDS version.
+CI runs it on the same paths (`.github/workflows/kind-rollback.yaml`).
 
 The end state: a request to the node's published **:443** for each tenant's host
 reaches **that tenant's** backend.
@@ -148,6 +156,7 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
 | `up.sh` / `down.sh` | Phase-by-phase standup / teardown. |
 | `e2e.sh` | `make kind-e2e`: fresh cluster → every phase → teardown. |
 | `cutover.sh` | `make kind-cutover`: fresh cluster → the CFG-1 cutover in launch-day order, checked per step → teardown. |
+| `rollback.sh` | `make kind-rollback`: fresh cluster → cutover state → auth-service down → flip-back-alone (denied) → full revert (exactly as before) → teardown. |
 | `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker, secure (whoami+minter) backend, OSB stub upstream. |
 | `values/` | Per-chart local overlays (images + the adaptations above). |
 | `.pki-bootstrap/` | Generated admin PKI + KEK + signing key (gitignored). |

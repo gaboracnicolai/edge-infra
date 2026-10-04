@@ -425,7 +425,8 @@ rehearse() {
 
 if [ "$#" -gt 0 ]; then
   for _fn in "$@"; do "$_fn"; done
-  exit 0
+  # `return` when sourced (rollback.sh sources this with `:` for its steps).
+  return 0 2>/dev/null || exit 0
 fi
 
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
