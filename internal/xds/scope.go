@@ -3,6 +3,7 @@ package xds
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -50,6 +51,54 @@ func gatewayServesNode(g store.Gateway, node string) bool {
 		}
 	}
 	return true
+}
+
+// listenerCollisionError names the first two gateways one edge node would receive
+// on the same port, or returns nil. Every listener binds 0.0.0.0:<port>, so such a
+// pair is two listeners on one address on that node and Envoy can bind only one.
+// Gateways pinned to different nodes may share a port: no node holds both.
+func listenerCollisionError(gateways []store.Gateway) error {
+	byPort := map[uint32][]store.Gateway{}
+	for _, g := range gateways {
+		byPort[g.Port] = append(byPort[g.Port], g)
+	}
+	ports := make([]uint32, 0, len(byPort))
+	for p := range byPort {
+		ports = append(ports, p)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	for _, p := range ports {
+		gs := byPort[p]
+		sort.Slice(gs, func(i, j int) bool { return gs[i].Name < gs[j].Name })
+		for i := range gs {
+			for j := i + 1; j < len(gs); j++ {
+				if gatewaysShareANode(gs[i], gs[j]) {
+					return fmt.Errorf("gateways %q and %q both listen on 0.0.0.0:%d on the same edge node; "+
+						"Envoy can bind only one — move one to another port or pin them to different nodes",
+						gs[i].Name, gs[j].Name, p)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// gatewaysShareANode reports whether some edge node serves both a and b. The only
+// nodes that can tell two selectors apart are the ones they name, plus any node
+// neither names (which serves exactly the unpinned gateways).
+func gatewaysShareANode(a, b store.Gateway) bool {
+	candidates := []string{"\x00a-node-no-selector-names"}
+	for _, g := range []store.Gateway{a, b} {
+		for _, v := range g.NodeSelector {
+			candidates = append(candidates, v)
+		}
+	}
+	for _, n := range candidates {
+		if gatewayServesNode(a, n) && gatewayServesNode(b, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // nodePins renders every gateway's non-empty node_selector as one deterministic

@@ -33,6 +33,7 @@
 #  19  confidential compute: the workload starts only with a verified attestation
 #  20  one HTTPS port serves two hosts, each with its own per-route cert (SNI)
 #  21  an OSB HTTPS service: public host's cert + stub body via a DNS upstream
+#  22  a second :443 gateway is refused and :443 keeps serving (red-first)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -1846,6 +1847,57 @@ ON CONFLICT (name) DO UPDATE SET cert_pem=EXCLUDED.cert_pem,key_pem=EXCLUDED.key
   ok "PHASE 21 — an OSB HTTPS service with a public host and a DNS upstream served, then deprovisioned"
 }
 
+# ---- Phase 22 — a second :443 gateway is refused; :443 keeps serving --------
+# drop_collide_gateway removes the injected second :443 gateway (idempotent).
+drop_collide_gateway() {
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 \
+    -c "DELETE FROM gateways WHERE name='collide-443';" >/dev/null
+}
+
+phase22_listener_collision() {
+  section "PHASE 22 — a second :443 gateway is refused and :443 keeps serving (red-first)"
+  drop_collide_gateway   # clean any prior injection (idempotent)
+
+  section "RED baseline — tenant-a/b serve 200 on :443; the listener_collision series exists"
+  local ca cb m0 before
+  ca="$(gw_code tenant-a.local)"; cb="$(gw_code tenant-b.local)"
+  { [ "$ca" = 200 ] && [ "$cb" = 200 ]; } || die "PHASE22 baseline broken: tenant-a/b not both 200 ($ca/$cb)"
+  m0="$(cp_scrape)"; before="$(blocked_of "$m0" listener_collision)"
+  [ -n "$before" ] || die "PHASE22 FAIL: xds_snapshots_blocked_total{reason=\"listener_collision\"} is absent (it must exist from t=0)"
+  log "tenant-a=$ca tenant-b=$cb ; listener_collision = $before"
+
+  # Unpinned, so every node would hold two listeners on 0.0.0.0:443 next to local-gw.
+  section "add a second gateway on :443 (collide-443, unpinned) via the data path"
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q -c "
+INSERT INTO gateways (id,name,port,protocol,node_selector)
+VALUES ('collide-443','collide-443',443,'HTTP','{}'::jsonb)
+ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,node_selector=EXCLUDED.node_selector,updated_at=now();" >/dev/null
+  sleep 10   # reconciler poll (~5s) + guard trip
+
+  section "GREEN — refused: counter rose, Envoy has no collide-443 listener, :443 still 200"
+  local m1 after dump ca2 cb2
+  m1="$(cp_scrape)"; after="$(blocked_of "$m1" listener_collision)"
+  log "listener_collision = $after"
+  awk -v a="$before" -v b="${after:-0}" 'BEGIN{exit !(b>a)}' \
+    || { drop_collide_gateway; die "PHASE22 FAIL: listener_collision did not rise ($before -> ${after:-<absent>}) — the second :443 gateway was not refused"; }
+  k -n "$INFRA_NS" logs deploy/edge-control-plane --tail=60 2>/dev/null \
+    | grep -a 'refusing to publish colliding listeners' | tail -1 | sed 's/^/    /'
+  dump="$(envoy_config_dump "$(ep_pod)")"
+  has "$dump" collide-443 && { drop_collide_gateway; die "PHASE22 FAIL: collide-443 reached Envoy — the colliding snapshot was published"; }
+  ca2="$(gw_code tenant-a.local)"; cb2="$(gw_code tenant-b.local)"
+  { [ "$ca2" = 200 ] && [ "$cb2" = 200 ]; } \
+    || { drop_collide_gateway; die "PHASE22 FAIL: :443 broke while a second :443 gateway existed ($ca2/$cb2)"; }
+  ok "GREEN — collide-443 refused ($before -> $after); absent from Envoy; tenant-a=$ca2 tenant-b=$cb2"
+
+  section "cleanup — remove the second gateway; publishing resumes"
+  drop_collide_gateway
+  local i=0
+  while [ "$i" -lt 15 ]; do [ "$(gw_code tenant-a.local)" = 200 ] && break; i=$((i + 1)); sleep 2; done
+  ok "PHASE 22 — a second :443 gateway refused; the last-good :443 kept serving"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1876,7 +1928,8 @@ main() {
   phase19_confidential
   phase20_sni_certs
   phase21_osb_https_public_host
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream."
+  phase22_listener_collision
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
