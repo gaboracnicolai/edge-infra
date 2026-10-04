@@ -309,11 +309,16 @@ async def run_worker(cfg: Settings, pool, js) -> None:
             held = still_held
         if held and time.monotonic() - last_beat >= HOLD_BEAT_S:
             log.warning("provisioning frozen; holding queued specs", held=len(held))
+            touched = []
             for msg in held:
                 try:
                     await msg.in_progress()
+                    touched.append(msg)
                 except Exception:  # noqa: BLE001 — a lapsed touch costs one delivery, not the loop
+                    # Drop it: JetStream redelivers it, and holding both copies
+                    # would apply the spec twice on unfreeze.
                     log.exception("could not touch a held spec; it will be redelivered")
+            held = touched
             last_beat = time.monotonic()
 
 
