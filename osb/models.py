@@ -38,8 +38,13 @@ class ServiceSpec(BaseModel):
 
     name: str = Field(pattern=specvalidation.SERVICE_NAME_PATTERN)
     team: str = Field(pattern=specvalidation.SERVICE_NAME_PATTERN)
+    # The upstream Envoy forwards to: an IP literal (served over EDS) or a
+    # hostname (served as a STRICT_DNS cluster, resolved by Envoy).
     host: str = Field(min_length=1, max_length=253)
     port: int = Field(ge=1, le=65535)
+    # The name clients use — the route's Host match and, on HTTPS, the SNI the
+    # route's cert is served for. Unset = the upstream host, as before the split.
+    public_host: str | None = Field(default=None, min_length=1, max_length=253)
     protocol: Literal["HTTP", "HTTPS"] = "HTTP"
     tls_secret_name: str | None = None
     client_ca_secret_name: str | None = None
@@ -64,6 +69,20 @@ class ServiceSpec(BaseModel):
         """Constrain host to an IP literal or RFC-1123 hostname — it is
         interpolated into Envoy/xDS cluster config (ISO 27001 A.14)."""
         return specvalidation.validate_host(v)
+
+    @field_validator("public_host")
+    @classmethod
+    def _public_host_is_ip_or_hostname(cls, v: str | None) -> str | None:
+        """Same shape as host — it is interpolated into the route's domains and
+        the SNI filter-chain match (ISO 27001 A.14)."""
+        if v is not None:
+            specvalidation.validate_host(v)
+        return v
+
+    @property
+    def route_host(self) -> str:
+        """The host the route matches: public_host, else the upstream host."""
+        return self.public_host or self.host
 
     @field_validator("tls_secret_name")
     @classmethod

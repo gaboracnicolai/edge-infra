@@ -53,7 +53,7 @@ func TestBuildListeners_ExtAuthzDisabled_NoFilter(t *testing.T) {
 func TestBuildClusters_ExtAuthz_AuthServiceClusterEmitted(t *testing.T) {
 	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
 	var found *clusterv3.Cluster
-	for _, r := range BuildClusters(nil, ea, RateLimitServiceOptions{}) {
+	for _, r := range BuildClusters(nil, nil, ea, RateLimitServiceOptions{}) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
 			found = c
 		}
@@ -68,7 +68,7 @@ func TestBuildClusters_ExtAuthz_AuthServiceClusterEmitted(t *testing.T) {
 }
 
 func TestBuildClusters_ExtAuthzDisabled_NoAuthServiceCluster(t *testing.T) {
-	for _, r := range BuildClusters(nil, ExtAuthzOptions{Enabled: false}, RateLimitServiceOptions{}) {
+	for _, r := range BuildClusters(nil, nil, ExtAuthzOptions{Enabled: false}, RateLimitServiceOptions{}) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
 			t.Fatal("auth_service cluster must not be emitted when disabled")
 		}
@@ -77,7 +77,7 @@ func TestBuildClusters_ExtAuthzDisabled_NoAuthServiceCluster(t *testing.T) {
 
 func authServiceClusterFrom(t *testing.T, ea ExtAuthzOptions) *clusterv3.Cluster {
 	t.Helper()
-	for _, r := range BuildClusters(nil, ea, RateLimitServiceOptions{}) {
+	for _, r := range BuildClusters(nil, nil, ea, RateLimitServiceOptions{}) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == authServiceClusterName {
 			return c
 		}

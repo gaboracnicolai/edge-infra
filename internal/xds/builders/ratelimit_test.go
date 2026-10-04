@@ -54,7 +54,7 @@ func TestBuildListeners_RateLimitServiceDisabled_NoFilter(t *testing.T) {
 
 func TestBuildClusters_RateLimitService_ClusterEmitted(t *testing.T) {
 	var found *clusterv3.Cluster
-	for _, r := range BuildClusters(nil, ExtAuthzOptions{}, enabledRLS()) {
+	for _, r := range BuildClusters(nil, nil, ExtAuthzOptions{}, enabledRLS()) {
 		if c, ok := r.(*clusterv3.Cluster); ok && c.Name == rlsClusterName {
 			found = c
 		}

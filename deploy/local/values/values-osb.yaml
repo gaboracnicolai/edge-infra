@@ -26,3 +26,8 @@ tls: null
 networkPolicy:
   enabled: true
   gatewayCIDRs: ["172.16.0.0/12"]
+
+# The OSB shared HTTPS listener moves off :443, which Phase 8's plaintext
+# local-gw already holds — two listeners on one port collide. Phase 21 reads the
+# port back from the worker's SHARED_HTTPS_PORT.
+sharedHttpsPort: 10443

@@ -39,3 +39,9 @@ Phase 20 runs one HTTPS port for several hosts, each with its own cert: two rout
 on one shared `:9443` gateway each carry a cert, and each host is served its own
 cert and backend by SNI, a Host from another SNI finds no route, and an SNI no
 route names fails the handshake.
+
+Phase 21 provisions an HTTPS service through the OSB broker with a public host
+(`shop.e2e.local`) separate from its upstream (the stub's Service DNS name), on
+the broker's configurable shared HTTPS port (`:10443` here, `sharedHttpsPort`):
+the host is served its own cert and the stub's body, Envoy holds the upstream as
+a STRICT_DNS cluster, and no edge-proxy's `update_rejected` counter moves.

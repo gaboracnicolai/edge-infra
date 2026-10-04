@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
@@ -20,7 +21,7 @@ func buildFromDomain(t *testing.T, dom *store.Snapshot) *cachev3.Snapshot {
 	res := map[resourcev3.Type][]types.Resource{
 		resourcev3.ListenerType: builders.BuildListeners(dom.Gateways, dom.Routes, builders.RateLimitOptions{}, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{}),
 		resourcev3.RouteType:    builders.BuildRouteConfigs(dom.Gateways, dom.Routes, builders.RateLimitServiceOptions{}),
-		resourcev3.ClusterType:  builders.BuildClusters(dom.Clusters, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{}),
+		resourcev3.ClusterType:  builders.BuildClusters(dom.Clusters, dom.Endpoints, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{}),
 		resourcev3.EndpointType: builders.BuildEndpoints(dom.Clusters, dom.Endpoints),
 		resourcev3.SecretType:   builders.BuildSecrets(dom.Secrets),
 	}
@@ -63,6 +64,42 @@ func TestCoverage_RouteToNonexistentClusterCaughtByWidenedCheck(t *testing.T) {
 		"Consistent() does NOT flag a route forwarding to a cluster absent from CDS")
 	require.Error(t, danglingRouteClusterError(snap),
 		"the widened R8 check MUST flag a route to a cluster absent from CDS")
+}
+
+// B28.200: a hostname upstream is a STRICT_DNS cluster carrying its endpoint
+// inline, an IP upstream stays on EDS, and the snapshot holding both is
+// consistent — the hostname never reaches an EDS assignment Envoy would reject.
+func TestCoverage_HostnameUpstreamIsStrictDNSAndConsistent(t *testing.T) {
+	dom := &store.Snapshot{
+		Gateways: []store.Gateway{{ID: "gw1", Name: "edge-http", Port: 8080, Protocol: "HTTP"}},
+		Routes: []store.Route{
+			{ID: "r1", Name: "dns", GatewayID: "gw1", Hosts: []string{"shop.example.com"}, PathPrefix: "/", ClusterName: "dns-cluster", AuthPolicy: "none"},
+			{ID: "r2", Name: "ip", GatewayID: "gw1", Hosts: []string{"ip.example.com"}, PathPrefix: "/", ClusterName: "ip-cluster", AuthPolicy: "none"},
+		},
+		Clusters: []store.Cluster{
+			{ID: "c1", Name: "dns-cluster", ConnectTimeout: 5 * time.Second, LbPolicy: "ROUND_ROBIN"},
+			{ID: "c2", Name: "ip-cluster", ConnectTimeout: 5 * time.Second, LbPolicy: "ROUND_ROBIN"},
+		},
+		Endpoints: []store.Endpoint{
+			{ID: "e1", ClusterID: "c1", Address: "echo.osb-stub.svc.cluster.local", Port: 5678, Weight: 1},
+			{ID: "e2", ClusterID: "c2", Address: "10.0.0.1", Port: 8080, Weight: 1},
+		},
+	}
+	snap := buildFromDomain(t, dom)
+	require.NoError(t, snap.Consistent())
+	require.NoError(t, danglingRouteClusterError(snap))
+
+	clusters := snap.GetResources(resourcev3.ClusterType)
+	dns := clusters["dns-cluster"].(*clusterv3.Cluster)
+	require.Equal(t, clusterv3.Cluster_STRICT_DNS, dns.GetType())
+	sa := dns.GetLoadAssignment().GetEndpoints()[0].GetLbEndpoints()[0].GetEndpoint().GetAddress().GetSocketAddress()
+	require.Equal(t, "echo.osb-stub.svc.cluster.local", sa.GetAddress())
+	require.Equal(t, uint32(5678), sa.GetPortValue())
+	require.Equal(t, clusterv3.Cluster_EDS, clusters["ip-cluster"].(*clusterv3.Cluster).GetType())
+
+	cla := snap.GetResources(resourcev3.EndpointType)
+	require.Contains(t, cla, "ip-cluster")
+	require.NotContains(t, cla, "dns-cluster", "a STRICT_DNS cluster must not also get an EDS assignment")
 }
 
 // A fully healthy domain trips neither check.

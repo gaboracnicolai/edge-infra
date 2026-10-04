@@ -309,7 +309,7 @@ func TestLoadSnapshot_OSBPerServicePolicy(t *testing.T) {
 	if !builtRouteHasLocalRateLimit(routeCfgs, derived) {
 		t.Errorf("built route %s missing local_ratelimit typed_per_filter_config", derived)
 	}
-	clusters := builders.BuildClusters(snap.Clusters, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{})
+	clusters := builders.BuildClusters(snap.Clusters, snap.Endpoints, builders.ExtAuthzOptions{}, builders.RateLimitServiceOptions{})
 	if !builtClusterHasHealthCheck(clusters, derived, "/healthz") {
 		t.Errorf("built cluster %s missing HTTP health check for /healthz", derived)
 	}
