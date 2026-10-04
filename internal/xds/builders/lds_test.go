@@ -5,10 +5,12 @@ import (
 	"testing"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	earlyhmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/http/early_header_mutation/header_mutation/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	cachetypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -437,5 +439,71 @@ func TestBuildListeners_Mtls_StillRequires(t *testing.T) {
 	req, caName := chainMTLS(t, l.FilterChains[0])
 	if !req || caName != "ca-m" {
 		t.Errorf("mtls must require the client cert + validation_context; got require=%v ca=%q", req, caName)
+	}
+}
+
+// Every filter chain — plain HTTP and each per-SNI chain — trusts the TCP peer
+// rather than X-Forwarded-For, routes on the normalised path, carries the
+// connection timeouts, and strips identity headers before any filter runs.
+func TestBuildListeners_ConnectionManagerHardened(t *testing.T) {
+	gws := []store.Gateway{sampleGateway(), {ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}}
+	routes := []store.Route{
+		{Name: "osb-t-a", GatewayID: "https", ClusterName: "osb-t-a", Hosts: []string{"a.example.com"}, PathPrefix: "/", TLSSecret: "sec-a"},
+		{Name: "osb-t-b", GatewayID: "https", ClusterName: "osb-t-b", Hosts: []string{"b.example.com"}, PathPrefix: "/", TLSSecret: "sec-b"},
+	}
+	chains := 0
+	for _, res := range BuildListeners(gws, routes, RateLimitOptions{}, ExtAuthzOptions{Enabled: true}, RateLimitServiceOptions{}) {
+		for _, fc := range listenerFrom(t, res).FilterChains {
+			chains++
+			var hcm hcmv3.HttpConnectionManager
+			if err := fc.Filters[0].GetTypedConfig().UnmarshalTo(&hcm); err != nil {
+				t.Fatalf("unmarshal hcm: %v", err)
+			}
+			if !hcm.GetUseRemoteAddress().GetValue() || hcm.GetXffNumTrustedHops() != 0 {
+				t.Errorf("use_remote_address=%v xff_num_trusted_hops=%d; want true, 0", hcm.GetUseRemoteAddress().GetValue(), hcm.GetXffNumTrustedHops())
+			}
+			if !hcm.GetNormalizePath().GetValue() || !hcm.GetMergeSlashes() ||
+				hcm.GetPathWithEscapedSlashesAction() != hcmv3.HttpConnectionManager_UNESCAPE_AND_REDIRECT {
+				t.Errorf("path handling: normalize=%v merge_slashes=%v escaped=%v", hcm.GetNormalizePath().GetValue(), hcm.GetMergeSlashes(), hcm.GetPathWithEscapedSlashesAction())
+			}
+			if hcm.GetRequestHeadersTimeout().AsDuration() != 10*time.Second ||
+				hcm.GetStreamIdleTimeout().AsDuration() != 5*time.Minute ||
+				hcm.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration() != time.Hour {
+				t.Errorf("timeouts: headers=%v stream_idle=%v idle=%v", hcm.GetRequestHeadersTimeout().AsDuration(),
+					hcm.GetStreamIdleTimeout().AsDuration(), hcm.GetCommonHttpProtocolOptions().GetIdleTimeout().AsDuration())
+			}
+			if hcm.GetCommonHttpProtocolOptions().GetHeadersWithUnderscoresAction() != corev3.HttpProtocolOptions_DROP_HEADER {
+				t.Errorf("headers_with_underscores_action = %v; want DROP_HEADER", hcm.GetCommonHttpProtocolOptions().GetHeadersWithUnderscoresAction())
+			}
+
+			ext := hcm.GetEarlyHeaderMutationExtensions()
+			if len(ext) != 1 {
+				t.Fatalf("early_header_mutation_extensions = %d; want 1", len(ext))
+			}
+			var hm earlyhmv3.HeaderMutation
+			if err := ext[0].GetTypedConfig().UnmarshalTo(&hm); err != nil {
+				t.Fatalf("unmarshal early header mutation: %v", err)
+			}
+			var prefixes, removed []string
+			for _, m := range hm.GetMutations() {
+				if p := m.GetRemoveOnMatch().GetKeyMatcher().GetPrefix(); p != "" {
+					prefixes = append(prefixes, p)
+				}
+				if r := m.GetRemove(); r != "" {
+					removed = append(removed, r)
+				}
+			}
+			if !slices.Equal(prefixes, []string{"x-user-"}) {
+				t.Errorf("prefix strips = %v; want [x-user-]", prefixes)
+			}
+			for _, h := range []string{"x-auth-iss", "x-auth-method", "x-client-cert-subject", "x-gateway-auth"} {
+				if !slices.Contains(removed, h) {
+					t.Errorf("%s is not stripped (removed: %v)", h, removed)
+				}
+			}
+		}
+	}
+	if chains != 3 {
+		t.Fatalf("checked %d filter chains; want 3 (one HTTP, two SNI)", chains)
 	}
 }
