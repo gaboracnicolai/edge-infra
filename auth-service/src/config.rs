@@ -22,10 +22,14 @@ pub struct Config {
     pub jwt_audience: String,
     /// Expected JWT issuer.
     pub jwt_issuer: String,
-    /// Shared secret injected as the `x-gateway-auth` header on every
-    /// authenticated request, proving the request transited this gateway.
-    /// Backends reject any request that lacks the matching value.
-    pub gateway_auth_secret: String,
+    /// PEM Ed25519 private key (TRANSIT_SIGNING_KEY) that signs the transit
+    /// assertion injected as `x-gateway-auth` on every authorized request.
+    /// Backends verify it against the public JWKS this service publishes.
+    pub transit_signing_key: String,
+    /// `iss` of every transit assertion (TRANSIT_ISSUER).
+    pub transit_issuer: String,
+    /// Lifetime of a transit assertion in seconds (TRANSIT_TTL_S).
+    pub transit_ttl_s: u64,
     /// `RUST_LOG`-style log level.
     pub log_level: String,
     /// Path to the PEM-encoded server TLS certificate (AUTH_TLS_CERT).
@@ -58,16 +62,12 @@ impl Config {
             )));
         }
 
-        // Transit-proof shared secret. Fail closed: refuse to start without a
-        // sufficiently long secret rather than silently injecting a weak or
-        // empty value that a caller could guess and forge.
-        let gateway_auth_secret = required("GATEWAY_AUTH_SECRET")?;
-        if gateway_auth_secret.len() < 16 {
-            return Err(AppError::Config(format!(
-                "GATEWAY_AUTH_SECRET must be at least 16 characters (got {})",
-                gateway_auth_secret.len()
-            )));
-        }
+        // Transit-assertion signing key. Fail closed: refuse to start without
+        // one rather than forward requests a backend cannot verify.
+        let transit_signing_key = required("TRANSIT_SIGNING_KEY")?;
+        let transit_ttl_s = optional("TRANSIT_TTL_S", "30")
+            .parse::<u64>()
+            .map_err(|e| AppError::Config(format!("TRANSIT_TTL_S parse: {e}")))?;
 
         let tls_cert_file = optional_some("AUTH_TLS_CERT");
         let tls_key_file = optional_some("AUTH_TLS_KEY");
@@ -87,7 +87,9 @@ impl Config {
             jwks_ca_file: optional_some("JWKS_CA_FILE"),
             jwt_audience: required("JWT_AUDIENCE")?,
             jwt_issuer: required("JWT_ISSUER")?,
-            gateway_auth_secret,
+            transit_signing_key,
+            transit_issuer: optional("TRANSIT_ISSUER", "edge-gateway"),
+            transit_ttl_s,
             log_level: optional("LOG_LEVEL", "info"),
             tls_cert_file,
             tls_key_file,
@@ -109,7 +111,7 @@ mod tests {
         std::env::set_var("JWKS_URL", "https://auth.example.com/.well-known/jwks.json");
         std::env::set_var("JWT_AUDIENCE", "test-audience");
         std::env::set_var("JWT_ISSUER", "https://auth.example.com/");
-        std::env::set_var("GATEWAY_AUTH_SECRET", "test-gateway-shared-secret");
+        std::env::set_var("TRANSIT_SIGNING_KEY", "-----BEGIN PRIVATE KEY-----");
         std::env::remove_var("AUTH_TLS_CERT");
         std::env::remove_var("AUTH_TLS_KEY");
         std::env::remove_var("AUTH_TLS_CA");
@@ -146,25 +148,13 @@ mod tests {
     }
 
     #[test]
-    fn test_gateway_auth_secret_required() {
+    fn test_transit_signing_key_required() {
         let _lock = ENV_LOCK.lock().unwrap();
         base_env();
-        std::env::remove_var("GATEWAY_AUTH_SECRET");
+        std::env::remove_var("TRANSIT_SIGNING_KEY");
         let err = Config::from_env().unwrap_err();
         assert!(
-            err.to_string().contains("GATEWAY_AUTH_SECRET"),
-            "error was: {err}"
-        );
-    }
-
-    #[test]
-    fn test_gateway_auth_secret_too_short_rejected() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        base_env();
-        std::env::set_var("GATEWAY_AUTH_SECRET", "short");
-        let err = Config::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("GATEWAY_AUTH_SECRET"),
+            err.to_string().contains("TRANSIT_SIGNING_KEY"),
             "error was: {err}"
         );
     }

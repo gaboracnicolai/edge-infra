@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use auth_service::auth::AuthService;
 use auth_service::jwks::JwksCache;
 use auth_service::metrics::Metrics;
+use auth_service::transit::{TransitError, TransitSigner, TransitVerifier};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -34,7 +35,7 @@ use tonic::Request;
 const TEST_AUDIENCE: &str = "edge.example.com";
 const TEST_ISSUER: &str = "https://auth.example.com";
 const TEST_KID: &str = "test-kid";
-const TEST_GATEWAY_SECRET: &str = "test-gateway-shared-secret";
+const TEST_TRANSIT_ISSUER: &str = "edge-gateway";
 
 #[derive(Debug, Serialize)]
 struct TestClaims {
@@ -144,13 +145,22 @@ fn build_service(jwks: JwkSet) -> (AuthService, Arc<Metrics>) {
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[TEST_AUDIENCE]);
     validation.set_issuer(&[TEST_ISSUER]);
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .expect("transit keygen");
+    let transit = TransitSigner::from_pkcs8(pkcs8.as_ref(), TEST_TRANSIT_ISSUER, 30)
+        .expect("transit signer");
     let service = AuthService {
         jwks: JwksCache::from_jwk_set(jwks),
         validation,
         metrics: Arc::clone(&metrics),
-        gateway_secret: TEST_GATEWAY_SECRET.to_string(),
+        transit: Arc::new(transit),
     };
     (service, metrics)
+}
+
+/// A backend's verifier for `svc`'s assertions, built from its public JWKS.
+fn backend_verifier(svc: &AuthService) -> TransitVerifier {
+    TransitVerifier::from_jwks(&svc.transit.jwks(), TEST_TRANSIT_ISSUER).expect("verifier")
 }
 
 fn header_value<'a>(headers: &'a [HeaderValueOption], key: &str) -> Option<&'a str> {
@@ -224,7 +234,8 @@ async fn test_valid_jwt_returns_ok() {
 async fn test_gateway_auth_header_injected() {
     // The transit-proof header is what lets a backend (e.g. Track) trust
     // x-user-id: without it, an exposed backend port lets anyone forge
-    // identity. Every authenticated request must carry the shared secret.
+    // identity. Every authenticated request carries a signed assertion that
+    // a backend verifies once, for this request and this user.
     let fix = make_fixture(TEST_KID);
     let (svc, _metrics) = build_service(fix.jwks.clone());
 
@@ -242,10 +253,18 @@ async fn test_gateway_auth_header_injected() {
         Some(HttpResponse::OkResponse(ok)) => ok,
         other => panic!("expected OkResponse, got {other:?}"),
     };
+    let assertion = header_value(&ok.headers, "x-gateway-auth")
+        .expect("gateway must inject the transit assertion");
+    let backend = backend_verifier(&svc);
+    let vouched = backend
+        .verify(assertion, "GET", "example.com", "/")
+        .expect("a backend must accept the gateway's assertion");
+    assert_eq!(vouched.sub, "user-7");
+    assert_eq!(vouched.amr, "jwt");
     assert_eq!(
-        header_value(&ok.headers, "x-gateway-auth"),
-        Some(TEST_GATEWAY_SECRET),
-        "gateway must inject the shared transit-proof secret"
+        backend.verify(assertion, "GET", "example.com", "/"),
+        Err(TransitError::Replayed),
+        "the same assertion must not be accepted twice"
     );
 }
 
@@ -277,11 +296,11 @@ async fn test_gateway_auth_overwrites_client_supplied_value() {
 
     let opt = header_opt(&ok.headers, "x-gateway-auth")
         .expect("x-gateway-auth must be present");
-    assert_eq!(
-        opt.header.as_ref().map(|h| h.value.as_str()),
-        Some(TEST_GATEWAY_SECRET),
-        "value must be the real secret, not the client's forgery"
-    );
+    let value = opt.header.as_ref().map(|h| h.value.as_str()).unwrap_or_default();
+    assert_ne!(value, "forged-by-client", "the client's forgery must not survive");
+    backend_verifier(&svc)
+        .verify(value, "GET", "example.com", "/")
+        .expect("value must be the gateway's own assertion");
     assert_eq!(
         opt.append_action,
         HeaderAppendAction::OverwriteIfExistsOrAdd as i32,

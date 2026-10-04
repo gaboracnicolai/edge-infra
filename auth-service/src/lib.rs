@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod jwks;
 pub mod metrics;
+pub mod transit;
 
 /// Install a process-wide rustls `CryptoProvider` so TLS configs can be built.
 ///

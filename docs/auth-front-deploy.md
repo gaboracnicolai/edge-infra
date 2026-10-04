@@ -59,11 +59,12 @@ kubectl -n infra create secret generic issuer-secrets \
 openssl genrsa -out 2026-06.pem 2048
 kubectl -n infra create secret generic issuer-signing-keys --from-file=2026-06.pem
 
-# Gateway transit-proof secret (shared with Track) added to the auth-service
-# Secret, plus point JWKS at the issuer and keep iss/aud consistent.
+# Gateway transit-assertion signing key added to the auth-service Secret,
+# plus point JWKS at the issuer and keep iss/aud consistent.
+openssl genpkey -algorithm ed25519 -out transit.pem
 kubectl -n infra patch secret auth-service-secrets --type merge -p "$(cat <<JSON
 {"stringData":{
-  "GATEWAY_AUTH_SECRET":"$(openssl rand -hex 32)",
+  "TRANSIT_SIGNING_KEY":$(jq -Rs . transit.pem),
   "JWKS_URL":"https://edge-issuer.infra.svc.cluster.local:8081/.well-known/jwks.json",
   "JWT_ISSUER":"https://edge-issuer.infra.svc.cluster.local:8081",
   "JWT_AUDIENCE":"edge.gateway"
@@ -72,8 +73,13 @@ JSON
 )"
 ```
 
-> The same `GATEWAY_AUTH_SECRET` value must be configured on Track so it can
-> verify the `x-gateway-auth` header.
+> `x-gateway-auth` now carries a signed transit assertion, not a shared secret:
+> an EdDSA JWT that names the request (`htm` method, `htu` host+path) and the
+> identity (`sub`, `amr`, `email`, `teams`), expires in `TRANSIT_TTL_S` (30s)
+> and carries a `jti` a backend accepts once. Backends verify it with the
+> public key at `http://auth-service.infra:9090/.well-known/transit-jwks.json`;
+> `auth_service::transit::TransitVerifier` is the reference verifier, and it
+> refuses an expired, replayed, re-targeted or foreign-key assertion.
 
 ## 3. Deploy
 

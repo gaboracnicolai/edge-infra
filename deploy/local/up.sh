@@ -308,6 +308,11 @@ phase5_secrets() {
   #    Phase-7 issuer overlay to match.
   [ -f "$PKI/k1.pem" ] || openssl genrsa -out "$PKI/k1.pem" 2048 2>/dev/null
 
+  # 3. Gateway transit-assertion key (Ed25519) — reuse if present. P1 verifies
+  #    the injected x-gateway-auth against its public half.
+  [ -f "$PKI/transit.pem" ] || openssl genpkey -algorithm ed25519 -out "$PKI/transit.pem" 2>/dev/null \
+    || die "openssl could not generate the Ed25519 transit key (needs OpenSSL 3)"
+
   # DSNs — sslmode=disable locally (prod uses TLS). One shared 'edge' DB for
   # control-plane + osb + secrets; issuer has its own 'issuer' DB.
   local PGH="postgres.${INFRA_NS}.svc.cluster.local"
@@ -346,12 +351,12 @@ phase5_secrets() {
   apply_secret "$INFRA_NS" generic issuer-signing-keys \
     --from-file=k1.pem="$PKI/k1.pem"
 
-  # auth-service: JWKS -> issuer (https + SAN match); iss/aud match; >=16-char secret.
+  # auth-service: JWKS -> issuer (https + SAN match); iss/aud match; transit key.
   apply_secret "$INFRA_NS" generic auth-service-secrets \
     --from-literal=JWKS_URL="${ISSUER_URL}/.well-known/jwks.json" \
     --from-literal=JWT_ISSUER="$ISSUER_URL" \
     --from-literal=JWT_AUDIENCE="$AUD" \
-    --from-literal=GATEWAY_AUTH_SECRET="local-dev-gateway-auth-secret-0123456789"
+    --from-file=TRANSIT_SIGNING_KEY="$PKI/transit.pem"
 
   # edge-secrets custodian (out-of-band admin PKI from bootstrap-pki.sh).
   apply_secret "$INFRA_NS" generic edge-admin-ca \
@@ -924,6 +929,38 @@ phase12_extauthz_cutover() {
   echo "  secure.local + valid JWT -> HTTP $c1; whoami reflected injected headers:"
   printf '%s\n' "$b1" | grep -iE 'X-User-Id|X-User-Teams|X-User-Email|X-Auth-Iss|X-Gateway-Auth' | sed 's/^/    /'
   ok "P1 GREEN — 200 + x-user-id/x-user-email/x-auth-iss/x-gateway-auth injected (JWT-derived)"
+
+  section "P1 transit — x-gateway-auth is a signed, short-lived assertion for THIS request"
+  local ga ah ap as tdir jwks claims
+  ga="$(printf '%s\n' "$b1" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-gateway-auth"{print $2; exit}')"
+  IFS=. read -r ah ap as <<<"$ga"
+  [ -n "$as" ] || die "P1 FAIL: x-gateway-auth is not a signed assertion (got '${ga:0:40}')"
+  [ "$(b64url_d "$ah" | jq -r .alg)" = EdDSA ] || die "P1 FAIL: assertion is not EdDSA-signed"
+  claims="$(b64url_d "$ap")"
+  printf '%s' "$claims" | jq -e --arg e "$UMAIL" \
+    '.amr == "jwt" and .email == $e and .htm == "GET" and .htu == "secure.local/" and (.exp - .iat) == 30 and (.jti | length) > 0' >/dev/null \
+    || die "P1 FAIL: assertion claims do not name this request and user: $claims"
+  # The public key a backend verifies with, as auth-service publishes it.
+  kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward deploy/auth-service 19090:9090 >/dev/null 2>&1 &
+  local pf=$!; sleep 4
+  jwks="$(curl -s --max-time 6 http://127.0.0.1:19090/.well-known/transit-jwks.json 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true; wait "$pf" 2>/dev/null || true
+  [ "$(printf '%s' "$jwks" | jq -r '.keys[0].kid')" = "$(b64url_d "$ah" | jq -r .kid)" ] \
+    || die "P1 FAIL: /.well-known/transit-jwks.json does not publish the assertion's kid (got: ${jwks:-nothing})"
+  # Rebuild a PEM from the published x (SPKI prefix for Ed25519 + 32 raw bytes)
+  # and check the signature with it — exactly what a backend does.
+  tdir="$(mktemp -d)"
+  { printf '\060\052\060\005\006\003\053\145\160\003\041\000'; b64url_d "$(printf '%s' "$jwks" | jq -r '.keys[0].x')"; } > "$tdir/pub.der"
+  openssl pkey -pubin -inform DER -in "$tdir/pub.der" -out "$tdir/pub.pem" 2>/dev/null
+  printf '%s' "$ah.$ap" > "$tdir/msg"; b64url_d "$as" > "$tdir/sig"
+  openssl pkeyutl -verify -pubin -inkey "$tdir/pub.pem" -rawin -in "$tdir/msg" -sigfile "$tdir/sig" >/dev/null 2>&1 \
+    || die "P1 FAIL: the assertion's signature does not verify against the published transit key"
+  printf '%s' "$ah.${ap}x" > "$tdir/msg"
+  openssl pkeyutl -verify -pubin -inkey "$tdir/pub.pem" -rawin -in "$tdir/msg" -sigfile "$tdir/sig" >/dev/null 2>&1 \
+    && die "P1 FAIL: a tampered assertion still verified — the signature check is not checking"
+  rm -rf "$tdir"
+  echo "  x-gateway-auth claims: $(printf '%s' "$claims" | jq -c '{sub,amr,email,htm,htu,ttl:(.exp-.iat)}')"
+  ok "P1 transit GREEN — x-gateway-auth is an EdDSA assertion for GET secure.local/ and $UMAIL, 30s, verified with the published key"
 
   section "P1 anti-spoof — a client-forged x-user-email MUST be overwritten"
   local bsp lsp

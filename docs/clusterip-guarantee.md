@@ -2,7 +2,7 @@
 
 **Goal:** backends (Track, Lens, Docs, Code) are reachable **only through the
 gateway**, never on a directly-routable port. This is the assumption the
-transit-proof header (`x-gateway-auth`) rests on: the shared secret is only
+transit-proof header (`x-gateway-auth`) rests on: the signed assertion is only
 meaningful if a caller cannot reach a backend without passing through the
 gateway in the first place. If a backend port were publicly routable, an
 attacker could skip the gateway and forge `x-user-id` / `x-user-email`.
