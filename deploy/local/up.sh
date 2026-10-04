@@ -1328,26 +1328,30 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
 
 # ---- Phase 17 — the charts' NetworkPolicies refuse a pod outside the flows ----
 # reach <ns> <deploy> <host> <port> — "connected" when a TCP connection from that
-# workload opens (whatever the protocol says after), "dropped" when it never
-# does, "error" when the probe itself could not run.
+# workload opens (whatever the protocol says after); otherwise "dropped (curl
+# exit N)": 28 = timed out (dropped on the way to a pod), 7 = refused or, from
+# a node, denied in its own OUTPUT chain (connect() fails at once with EPERM).
 reach() {
-  local t
-  t="$(k -n "$1" exec "deploy/$2" -- curl -sk --connect-timeout 4 -m 6 -o /dev/null -w '%{time_connect}' "https://$3:$4/" 2>/dev/null || true)"
-  reach_verdict "$t"
+  local out
+  out="$(k -n "$1" exec "deploy/$2" -- sh -c \
+    'curl -sk --connect-timeout 4 -m 6 -o /dev/null -w "%{time_connect}" "$0"; echo " $?"' "https://$3:$4/" 2>/dev/null || true)"
+  reach_verdict "$out"
 }
 # reach_from_node <node> <ip> <port> — the same probe from a kind node, i.e. from
 # the node network the hostNetwork gateway sends from.
 reach_from_node() {
-  local t
-  t="$(docker exec "$1" curl -sk --connect-timeout 4 -m 6 -o /dev/null -w '%{time_connect}' "https://$2:$3/" 2>/dev/null || true)"
-  reach_verdict "$t"
+  local out
+  out="$(docker exec "$1" sh -c \
+    'curl -sk --connect-timeout 4 -m 6 -o /dev/null -w "%{time_connect}" "$0"; echo " $?"' "https://$2:$3/" 2>/dev/null || true)"
+  reach_verdict "$out"
 }
-reach_verdict() {
-  if [ -z "$1" ]; then echo error
-  elif awk -v t="$1" 'BEGIN { exit !(t + 0 > 0) }'; then echo connected
-  else echo dropped; fi
+reach_verdict() {  # "<time_connect> <curl exit>"
+  if [ -z "$1" ]; then echo "error (the probe did not run)"
+  elif awk -v t="${1% *}" 'BEGIN { exit !(t + 0 > 0) }'; then echo connected
+  else echo "dropped (curl exit ${1##* })"; fi
 }
-reach_is() { local want="$1"; shift; [ "$(reach "$@")" = "$want" ]; }
+reach_is() { local want="$1"; shift; case "$(reach "$@")" in "$want"*) return 0 ;; *) return 1 ;; esac; }
+reach_from_node_is() { local want="$1"; shift; case "$(reach_from_node "$@")" in "$want"*) return 0 ;; *) return 1 ;; esac; }
 
 phase17_network_policy() {
   section "PHASE 17 — the charts' NetworkPolicies: a pod outside the allowed flows is refused (red-first)"
@@ -1355,26 +1359,10 @@ phase17_network_policy() {
   wait_rollout deploy/attacker sec3-attacker 60s
   local atk_ip; atk_ip="$(k -n sec3-attacker get pod -l app=attacker -o jsonpath='{.items[0].status.podIP}')"
   log "attacker pod $atk_ip (namespace sec3-attacker — no chart allows it)"
-  local AS="auth-service.${INFRA_NS}.svc.cluster.local"
-
-  # RED first: auth-service's policy switched off, the attacker reaches ext_authz.
-  section "RED — auth-service NetworkPolicy OFF: the attacker reaches ext_authz :50051"
-  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
-    --set networkPolicy.enabled=false --wait --timeout 120s >/dev/null
-  k -n "$INFRA_NS" get networkpolicy auth-service >/dev/null 2>&1 && die "RED setup: auth-service NetworkPolicy still present"
-  retry 15 2 reach_is connected sec3-attacker attacker "$AS" 50051 \
-    || die "RED baseline broken: the attacker cannot reach auth-service:50051 even with no policy"
-  ok "RED — no policy: attacker($atk_ip) -> auth-service:50051 connected"
-
-  section "GREEN — auth-service NetworkPolicy back ON: the same connection is dropped"
-  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
-    --set networkPolicy.enabled=true --wait --timeout 120s >/dev/null
-  retry 15 2 reach_is dropped sec3-attacker attacker "$AS" 50051 \
-    || die "GREEN FAIL: auth-service:50051 still reachable from the attacker with the chart's policy on"
-  ok "GREEN — chart policy on: attacker($atk_ip) -> auth-service:50051 dropped"
 
   # Every chart port, two sources each: the attacker (refused) and a node, the
   # gateway's own source (allowed) — so a drop is the policy, not a dead pod.
+  # Policies have been in place since Phase 7, so nothing is reprogramming here.
   section "every chart's port: attacker dropped, gateway (node network) allowed"
   local node="${CLUSTER_NAME}-worker2" t svc port ip eps r
   for t in auth-service:50051:gw edge-control-plane:18000:gw edge-issuer:8081:gw \
@@ -1382,16 +1370,38 @@ phase17_network_policy() {
     svc="${t%%:*}"; port="$(printf '%s' "$t" | cut -d: -f2)"
     eps="$(k -n "$INFRA_NS" get endpoints "$svc" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
     if [ -z "$eps" ]; then warn "$svc has no ready endpoints — skipped (a refused connection would prove nothing)"; continue; fi
-    r="$(reach sec3-attacker attacker "$svc.${INFRA_NS}.svc.cluster.local" "$port")"
-    echo "  attacker -> $svc:$port  =>  $r"
-    [ "$r" = dropped ] || die "$svc:$port NOT refused to a pod outside the allowed flows ($r)"
     if [ "${t##*:}" = gw ]; then
       ip="$(k -n "$INFRA_NS" get svc "$svc" -o jsonpath='{.spec.clusterIP}')"
+      retry 10 2 reach_from_node_is connected "$node" "$ip" "$port" || true
       r="$(reach_from_node "$node" "$ip" "$port")"
       echo "  node $node -> $svc:$port  =>  $r"
-      [ "$r" = connected ] || die "$svc:$port refused to the gateway's node network ($r) — the policy blocks an allowed flow"
+      if [ "$r" != connected ]; then
+        k -n "$INFRA_NS" get endpoints "$svc" -o wide; k -n "$INFRA_NS" get pods -o wide | grep -E "^${svc}" || true
+        die "$svc:$port refused to the gateway's node network ($r) — the policy blocks an allowed flow"
+      fi
     fi
+    r="$(reach sec3-attacker attacker "$svc.${INFRA_NS}.svc.cluster.local" "$port")"
+    echo "  attacker -> $svc:$port  =>  $r"
+    case "$r" in dropped*) ;; *) die "$svc:$port NOT refused to a pod outside the allowed flows ($r)" ;; esac
   done
+
+  # RED first, on one chart: its policy switched off, the attacker gets in;
+  # switched back on, it is dropped again — the refusal is the chart's policy.
+  local AS="auth-service.${INFRA_NS}.svc.cluster.local"
+  section "RED — auth-service NetworkPolicy OFF: the attacker reaches ext_authz :50051"
+  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
+    --set networkPolicy.enabled=false --wait --timeout 120s >/dev/null
+  k -n "$INFRA_NS" get networkpolicy auth-service >/dev/null 2>&1 && die "RED setup: auth-service NetworkPolicy still present"
+  retry 15 2 reach_is connected sec3-attacker attacker "$AS" 50051 \
+    || die "RED baseline broken: the attacker cannot reach auth-service:50051 even with no policy ($(reach sec3-attacker attacker "$AS" 50051))"
+  ok "RED — no policy: attacker($atk_ip) -> auth-service:50051 connected"
+
+  section "GREEN — auth-service NetworkPolicy back ON: the same connection is dropped"
+  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
+    --set networkPolicy.enabled=true --wait --timeout 120s >/dev/null
+  retry 15 2 reach_is dropped sec3-attacker attacker "$AS" 50051 \
+    || die "GREEN FAIL: auth-service:50051 still reachable from the attacker with the chart's policy on"
+  ok "GREEN — chart policy on: attacker($atk_ip) -> auth-service:50051 $(reach sec3-attacker attacker "$AS" 50051)"
   ok "PHASE 17 — every chart refuses a pod outside its allowed flows; the gateway's flows stay open"
 }
 
