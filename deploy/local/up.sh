@@ -25,6 +25,10 @@
 #  11  SEC-3 Property 2 — Calico drops the bypass hop, gateway stays allowed
 #  12  CFG-1 flip + ext_authz LIVE — four properties, red-first, one at a time
 #  13  R8 fail-static inconsistent-snapshot guard (live, red-first)
+#  14  fail-static guard counters exported as metrics (live, red-first)
+#  15  OSB broker answers; a service it provisions is served through Envoy
+#
+# One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
 # Run a single phase for iteration, e.g.:  deploy/local/up.sh phase3_images
 set -euo pipefail
@@ -1053,6 +1057,132 @@ phase14_failstatic_metrics() {
   ok "Phase 14 (fail-static metrics) verified — cleaned up; tenant-a/b serving"
 }
 
+# ---- Phase 15 — the OSB broker answers, and its provision is served ---------
+# The tenant key the broker resolves to team 'e2e' (stored hashed, as in prod).
+OSB_KEY="${OSB_KEY:-local-e2e-osb-tenant-key-0123456789}"
+OSB_TEAM="e2e"
+OSB_SERVICE="e2e-stub"
+
+# osb_call <METHOD> <path> [json-body] — call the broker API (plain HTTP in the
+# cluster) through a short-lived port-forward, as the 'e2e' tenant. Echoes
+# "<http_code> <body>"; the code is 000 if the broker never answered.
+osb_call() {
+  local m="$1" path="$2" data="${3:-}" lp="${OSB_LP:-18080}" pid out code=000 i=0
+  k -n "$INFRA_NS" port-forward svc/edge-osb "${lp}:8080" >/dev/null 2>&1 &
+  pid=$!
+  while [ "$i" -lt 20 ]; do
+    if [ -n "$data" ]; then
+      out="$(curl -s --max-time 6 -w '\n%{http_code}' -X "$m" -H "Authorization: Bearer $OSB_KEY" \
+        -H 'Content-Type: application/json' -d "$data" "http://127.0.0.1:${lp}${path}" 2>/dev/null || true)"
+    else
+      out="$(curl -s --max-time 6 -w '\n%{http_code}' -X "$m" -H "Authorization: Bearer $OSB_KEY" \
+        "http://127.0.0.1:${lp}${path}" 2>/dev/null || true)"
+    fi
+    code="$(printf '%s\n' "$out" | tail -1)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    i=$((i + 1)); sleep 1
+  done
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" 2>/dev/null || true
+  printf '%s %s' "${code:-000}" "$(printf '%s\n' "$out" | sed '$d')"
+}
+
+# osb_wait_completed <request_id> — poll the broker until the worker has applied
+# the request (COMPLETED); dies on FAILED or after ~90s.
+osb_wait_completed() {
+  local rid="$1" i=0 r st=""
+  while [ "$i" -lt 45 ]; do
+    r="$(osb_call GET "/v1/requests/$rid")"
+    st="$(printf '%s' "${r#* }" | jq -r '.status // empty' 2>/dev/null || true)"
+    case "$st" in
+      COMPLETED) ok "request $rid COMPLETED by the OSB worker"; return 0 ;;
+      FAILED) die "PHASE15 FAIL: request $rid FAILED — $(printf '%s' "${r#* }" | jq -r '.error // empty')" ;;
+    esac
+    i=$((i + 1)); sleep 2
+  done
+  die "PHASE15 FAIL: request $rid never completed (last status '${st:-<none>}', last answer: $r)"
+}
+
+# gw80_code / gw80_body <host> — a request through the gateway's shared HTTP
+# listener (node :80), where OSB-provisioned HTTP services land.
+gw80_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H "Host: $1" http://127.0.0.1:80/ 2>/dev/null || true; }
+gw80_body() { curl -s --max-time 6 -H "Host: $1" http://127.0.0.1:80/ 2>/dev/null || true; }
+
+phase15_osb_broker() {
+  section "PHASE 15 — the OSB broker answers; a service it provisions is served through Envoy"
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+
+  section "register the 'e2e' tenant API key (stored as its SHA-256, never in the clear)"
+  local kh; kh="$(printf '%s' "$OSB_KEY" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -c \
+    "INSERT INTO tenant_api_keys (key_hash, team) VALUES ('$kh', '$OSB_TEAM') ON CONFLICT (key_hash) DO UPDATE SET team = EXCLUDED.team;" >/dev/null
+  ok "tenant key registered for team '$OSB_TEAM'"
+
+  section "deploy the stub upstream (osb-stub/echo -> OSB-PROVISIONED-BACKEND)"
+  k apply -f "$LOCAL_DIR/manifests/osb-stub.yaml"
+  wait_rollout deploy/echo osb-stub 120s
+  local sip; sip="$(k -n osb-stub get svc echo -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$sip" ] || die "osb-stub echo ClusterIP unresolved"
+  log "stub upstream ClusterIP=$sip:5678 (also the Host the provisioned route matches)"
+
+  section "the broker answers — GET /healthz"
+  local r; r="$(osb_call GET /healthz)"
+  echo "  GET /healthz -> HTTP ${r%% *}  ${r#* }"
+  [ "${r%% *}" = 200 ] && has "$r" '"ok":true' || die "PHASE15 FAIL: the broker did not answer /healthz (got: $r)"
+  ok "edge-osb answers"
+
+  # Clean slate for re-runs: a prior run may have left the service provisioned.
+  r="$(osb_call DELETE "/v1/services/$OSB_SERVICE")"
+  if [ "${r%% *}" = 202 ]; then
+    log "removing a leftover '$OSB_SERVICE' from a prior run"
+    osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  fi
+
+  section "RED — before provisioning, Host $sip is NOT served on :80"
+  local c0; c0="$(gw80_code "$sip")"
+  echo "  :80 Host $sip -> HTTP $c0"
+  [ "$c0" != 200 ] || die "PHASE15 FAIL: Host $sip already served 200 before the broker provisioned it — the proof would be vacuous"
+  ok "RED proven — not served ($c0)"
+
+  section "POST /v1/services — provision '$OSB_SERVICE' (HTTP, auth_policy=none) -> the stub"
+  r="$(osb_call POST /v1/services \
+    "{\"name\":\"$OSB_SERVICE\",\"team\":\"$OSB_TEAM\",\"host\":\"$sip\",\"port\":5678,\"protocol\":\"HTTP\",\"auth_policy\":\"none\"}")"
+  echo "  POST /v1/services -> HTTP ${r%% *}  ${r#* }"
+  [ "${r%% *}" = 202 ] || die "PHASE15 FAIL: provision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+
+  section "GREEN — the provisioned service is served through Envoy on :80"
+  local i=0 c1="" b1=""
+  while [ "$i" -lt 30 ]; do
+    c1="$(gw80_code "$sip")"
+    [ "$c1" = 200 ] && break
+    i=$((i + 1)); sleep 2
+  done
+  b1="$(gw80_body "$sip")"
+  echo "  :80 Host $sip -> HTTP $c1  body: $(printf '%s' "$b1" | tr -d '\n')"
+  { [ "$c1" = 200 ] && has "$b1" OSB-PROVISIONED-BACKEND; } \
+    || die "PHASE15 FAIL: the provisioned service is not served by the stub through Envoy (HTTP $c1)"
+  has "$(envoy_config_dump "$(ep_pod)")" "osb-${OSB_TEAM}-${OSB_SERVICE}" \
+    || die "PHASE15 FAIL: Envoy has no osb-${OSB_TEAM}-${OSB_SERVICE} cluster/route"
+  ok "GREEN — broker -> NATS -> worker -> Postgres -> control-plane -> xDS -> Envoy -> stub: 200 OSB-PROVISIONED-BACKEND"
+
+  section "DELETE /v1/services/$OSB_SERVICE — deprovision, and the route goes away"
+  r="$(osb_call DELETE "/v1/services/$OSB_SERVICE")"
+  echo "  DELETE /v1/services/$OSB_SERVICE -> HTTP ${r%% *}  ${r#* }"
+  [ "${r%% *}" = 202 ] || die "PHASE15 FAIL: deprovision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  i=0
+  local c2=""
+  while [ "$i" -lt 30 ]; do
+    c2="$(gw80_code "$sip")"
+    [ "$c2" != 200 ] && break
+    i=$((i + 1)); sleep 2
+  done
+  echo "  :80 Host $sip -> HTTP $c2"
+  [ "$c2" != 200 ] || die "PHASE15 FAIL: still served 200 after deprovision"
+  ok "Phase 15 (OSB broker) verified — provisioned, served, deprovisioned"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1076,7 +1206,8 @@ main() {
   phase12_extauthz_cutover
   phase13_inconsistent_guard
   phase14_failstatic_metrics
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics."
+  phase15_osb_broker
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

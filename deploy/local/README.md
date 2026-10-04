@@ -7,9 +7,16 @@ security proofs build on.
 
 ```
 git clone … && cd edge-infra
+make kind-e2e             # ONE command: create cluster, run every phase, delete cluster
 deploy/local/up.sh        # stand everything up (idempotent, re-runnable)
 deploy/local/down.sh      # tear the cluster down
 ```
+
+`make kind-e2e` (`deploy/local/e2e.sh`) creates its own cluster (`edge-e2e`), runs all of
+`up.sh`, and deletes the cluster whether the run passed or failed (`KEEP_CLUSTER=1` keeps it
+for debugging). CI runs it on every change to a chart, the dev overlays, `k8s/` or this
+directory (`.github/workflows/kind-e2e.yaml`). Which self-host page claim each phase proves:
+[docs/self-host-claims.md](../../docs/self-host-claims.md).
 
 The end state: a request to the node's published **:443** for each tenant's host
 reaches **that tenant's** backend.
@@ -62,6 +69,8 @@ release is cleared before re-install.
 | 10 | **SEC-3 Property 1** (admission) | Applies the Kyverno guardrails (Enforce), then proves red-first: a NetworkPolicy allowing from an empty podSelector `{}` is **DENIED**; a NodePort backend Service is **DENIED**. |
 | 11 | **SEC-3 Property 2** (data-plane) | A pod-network attacker (IP outside NODE_CIDR) reaches each backend's ClusterIP with no policy (RED), then — after the resolved backend policy — is **dropped** while the node-`:443` gateway path stays **200** (two separate assertions). |
 | 12 | **CFG-1 flip + ext_authz LIVE** | Four properties, red-first: (P4) the CFG-1 guard refuses a jwt route while ext_authz is OFF; then the live flip; (P1) a real minted JWT → 200 + trusted identity-header injection (forged headers overwritten); (P2) no/invalid JWT → 401; (P3) auth-service down → fail-closed 403. |
+| 13–14 | **R8 fail-static guard + metrics** | A dangling route is refused, the last good config keeps serving, and the blocked counter rises on the live `/metrics`. |
+| 15 | **OSB broker** | `edge-osb` answers `/healthz`; a tenant-keyed `POST /v1/services` is completed by the worker and the new host is served through Envoy :80 by a stub (`OSB-PROVISIONED-BACKEND`); `DELETE` removes it again. |
 
 ## Topology
 
@@ -128,7 +137,8 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
 | `lib.sh` | Shared config + helpers (sourced; no side effects). |
 | `kind-config.yaml` | Multi-node cluster, default CNI disabled, publishes 80/443. |
 | `up.sh` / `down.sh` | Phase-by-phase standup / teardown. |
-| `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker, secure (whoami+minter) backend. |
+| `e2e.sh` | `make kind-e2e`: fresh cluster → every phase → teardown. |
+| `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker, secure (whoami+minter) backend, OSB stub upstream. |
 | `values/` | Per-chart local overlays (images + the adaptations above). |
 | `.pki-bootstrap/` | Generated admin PKI + KEK + signing key (gitignored). |
 
