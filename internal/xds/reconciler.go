@@ -54,6 +54,10 @@ type Reconciler struct {
 	// signal — never a silent bypass.
 	authWantedButExtAuthzOff atomic.Uint64
 
+	// listenerCollisionsBlocked counts reconciles withheld because two gateways one
+	// node would receive listen on the same port (listenerCollisionError).
+	listenerCollisionsBlocked atomic.Uint64
+
 	// First-boot degraded-PUBLISH counters — distinct from the *Blocked guard
 	// counters above. On first boot (prev == nil) the empty-collapse and
 	// inconsistent guards are EXEMPT and the bad config IS published so a fresh edge
@@ -171,6 +175,12 @@ func (r *Reconciler) EmptySnapshotsBlocked() uint64 {
 // auth while ext_authz was globally disabled. Exposed for tests and metrics.
 func (r *Reconciler) AuthWantedButExtAuthzOff() uint64 {
 	return r.authWantedButExtAuthzOff.Load()
+}
+
+// ListenerCollisionsBlocked reports how many reconciles were withheld because two
+// gateways one node would receive listen on the same port.
+func (r *Reconciler) ListenerCollisionsBlocked() uint64 {
+	return r.listenerCollisionsBlocked.Load()
 }
 
 // EmptyFirstBootPublished reports how many times a first-boot reconcile (no
@@ -291,6 +301,30 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 			"client_ca_secret_name — mtls disables ext_authz for that route, and without a client CA " +
 			"no client certificate is requested or verified either, so the route would serve " +
 			"unauthenticated; set client_ca_secret_name, or change auth_policy")
+	}
+
+	// Fail-static listener-collision guard. Two gateways one node receives on the
+	// same port render two listeners on one address: Envoy binds one, rejects the
+	// other and NACKs the update, and which one wins depends on delivery order — a
+	// new :443 gateway could take the port from the one already serving. Withhold
+	// the whole snapshot instead: every node keeps the last-good config (a proxy
+	// that connects meanwhile is still caught up to it), the refusal is logged and
+	// counted, and publishing resumes once the collision is gone. First boot is not
+	// exempt: there is no right listener to publish. Returns nil, like the other
+	// fail-static guards, so the loop still reads as alive.
+	if cErr := listenerCollisionError(domain.Gateways); cErr != nil {
+		r.listenerCollisionsBlocked.Add(1)
+		lastGood := ""
+		if prev := r.localLast.Load(); prev != nil {
+			lastGood = prev.Version
+			r.catchUpConnectedNodes(ctx, prev.Version)
+		}
+		r.log.Error("refusing to publish colliding listeners; keeping last-good config",
+			"err", cErr,
+			"last_good_version", lastGood,
+			"blocked_total", r.listenerCollisionsBlocked.Load(),
+		)
+		return nil
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{

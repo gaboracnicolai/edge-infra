@@ -19,6 +19,7 @@ type reconcilerCounters interface {
 	EmptySnapshotsBlocked() uint64
 	InconsistentSnapshotsBlocked() uint64
 	AuthWantedButExtAuthzOff() uint64
+	ListenerCollisionsBlocked() uint64
 	EmptyFirstBootPublished() uint64
 	InconsistentFirstBootPublished() uint64
 
@@ -34,6 +35,7 @@ const (
 	reasonEmpty        = "empty"                    // empty-collapse guard: zero listeners/clusters
 	reasonInconsistent = "inconsistent"             // consistency guard: dangling reference / blackhole route
 	reasonAuthOff      = "auth_wanted_extauthz_off" // CFG-1: a route wants auth but ext_authz is off
+	reasonCollision    = "listener_collision"       // two gateways one node receives share a port
 )
 
 // reason label values for xds_snapshots_published_degraded_total.
@@ -130,6 +132,7 @@ func (c *reconcilerCollector) Collect(ch chan<- prometheus.Metric) {
 	emit(snapshotsBlockedDesc, reasonEmpty, c.src.EmptySnapshotsBlocked())
 	emit(snapshotsBlockedDesc, reasonInconsistent, c.src.InconsistentSnapshotsBlocked())
 	emit(snapshotsBlockedDesc, reasonAuthOff, c.src.AuthWantedButExtAuthzOff())
+	emit(snapshotsBlockedDesc, reasonCollision, c.src.ListenerCollisionsBlocked())
 	emit(snapshotsPublishedDegradedDesc, reasonEmptyFirstBoot, c.src.EmptyFirstBootPublished())
 	emit(snapshotsPublishedDegradedDesc, reasonInconsistentFirstBoot, c.src.InconsistentFirstBootPublished())
 
