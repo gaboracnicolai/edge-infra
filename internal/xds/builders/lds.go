@@ -7,13 +7,16 @@ import (
 	"strings"
 	"time"
 
+	mutationv3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	tlsinspectorv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	earlyhmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/http/early_header_mutation/header_mutation/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
@@ -66,6 +69,7 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 			// any route on this gateway carries a per-service limit.
 			HttpFilters: httpFilters(rl, ea, rls, anyRouteNeedsLocalRateLimit(routes)),
 		}
+		hardenConnectionManager(hcm)
 		return &listenerv3.Filter{
 			Name: wellknown.HTTPConnectionManager,
 			ConfigType: &listenerv3.Filter_TypedConfig{
@@ -108,6 +112,75 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 		ListenerFilters: listenerFilters,
 		FilterChains:    chains,
 	}
+}
+
+// identityHeaderPrefix and assertedHeaders are the request headers only the
+// auth-service may set (auth-service/src/auth.rs: the JWT path's x-user-* and
+// x-auth-iss, the cert path's x-auth-method and x-client-cert-subject, and the
+// x-gateway-auth transit proof on both). A client never legitimately sends them.
+const identityHeaderPrefix = "x-user-"
+
+var assertedHeaders = []string{"x-auth-iss", "x-auth-method", "x-client-cert-subject", "x-gateway-auth"}
+
+// Connection-manager timeouts. request_headers_timeout bounds a slowloris that
+// trickles its headers; the idle timeouts reap stalled streams and connections.
+// There is deliberately no request_timeout: it would cut off a long streaming
+// request body, and the stream idle timeout already catches one that stalls.
+const (
+	requestHeadersTimeout = 10 * time.Second
+	streamIdleTimeout     = 5 * time.Minute
+	connectionIdleTimeout = time.Hour
+)
+
+// hardenConnectionManager applies the edge-proxy settings every listener needs,
+// whatever its routes or auth:
+//
+//   - use_remote_address: the client address is the TCP peer, not whatever the
+//     client wrote in X-Forwarded-For, so the remote_address rate limit and the
+//     internal/external decision cannot be spoofed.
+//   - normalize_path + merge_slashes + unescape-and-redirect of %2F/%5C: routes
+//     match the path the backend will see, so /public/../admin is routed (and
+//     authorized) as /admin rather than slipping through the /public route.
+//   - headers with underscores are dropped: x_user_id would pass a strip of
+//     x-user-id, and CGI/WSGI-style backends read both as HTTP_X_USER_ID.
+//   - every identity header is stripped before any filter runs. ext_authz then
+//     re-adds the verified ones on an authenticated request, so a forged
+//     x-user-id reaches no backend: not where ext_authz is off (auth_policy none
+//     or mtls, or ext_authz disabled), and not on a jwt_or_mtls request the
+//     client cert authorized, which the auth-service gives no x-user-* at all.
+func hardenConnectionManager(hcm *hcmv3.HttpConnectionManager) {
+	hcm.UseRemoteAddress = wrapperspb.Bool(true)
+	hcm.NormalizePath = wrapperspb.Bool(true)
+	hcm.MergeSlashes = true
+	hcm.PathWithEscapedSlashesAction = hcmv3.HttpConnectionManager_UNESCAPE_AND_REDIRECT
+	hcm.RequestHeadersTimeout = durationpb.New(requestHeadersTimeout)
+	hcm.StreamIdleTimeout = durationpb.New(streamIdleTimeout)
+	hcm.CommonHttpProtocolOptions = &corev3.HttpProtocolOptions{
+		IdleTimeout:                  durationpb.New(connectionIdleTimeout),
+		HeadersWithUnderscoresAction: corev3.HttpProtocolOptions_DROP_HEADER,
+	}
+	hcm.EarlyHeaderMutationExtensions = []*corev3.TypedExtensionConfig{{
+		Name:        "envoy.http.early_header_mutation.header_mutation",
+		TypedConfig: mustAny(&earlyhmv3.HeaderMutation{Mutations: identityHeaderStrip()}),
+	}}
+}
+
+// identityHeaderStrip removes every x-user-* header and each asserted header.
+func identityHeaderStrip() []*mutationv3.HeaderMutation {
+	out := []*mutationv3.HeaderMutation{{
+		Action: &mutationv3.HeaderMutation_RemoveOnMatch_{
+			RemoveOnMatch: &mutationv3.HeaderMutation_RemoveOnMatch{
+				KeyMatcher: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Prefix{Prefix: identityHeaderPrefix},
+					IgnoreCase:   true,
+				},
+			},
+		},
+	}}
+	for _, h := range assertedHeaders {
+		out = append(out, &mutationv3.HeaderMutation{Action: &mutationv3.HeaderMutation_Remove{Remove: h}})
+	}
+	return out
 }
 
 // tlsInspectorFilter reads the SNI from the TLS ClientHello so the listener can

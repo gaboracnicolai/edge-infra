@@ -1898,6 +1898,75 @@ ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,node_selector=EXCLUDED.node_
   ok "PHASE 22 — a second :443 gateway refused; the last-good :443 kept serving"
 }
 
+# ---- Phase 23 — forged identity headers and path traversal (B28.202) --------
+# harden-public is an open (auth_policy none) /public route on secure.local, next
+# to Phase 12's jwt route on /. Routes load ORDER BY name, so harden-public is
+# matched first: un-normalised, /public/../admin would ride it past ext_authz.
+drop_harden_route() {
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 \
+    -c "DELETE FROM routes WHERE name='harden-public';" >/dev/null
+}
+
+# path_code <host> <path> [extra curl args...] — status for a raw path; curl
+# would collapse ../ itself without --path-as-is.
+path_code() { local host="$1" path="$2"; shift 2; curl -s --path-as-is -o /dev/null -w '%{http_code}' --max-time 6 -H "Host: $host" "$@" "http://127.0.0.1:443$path" 2>/dev/null || true; }
+
+phase23_connection_manager() {
+  section "PHASE 23 — a forged x-user-id never reaches a backend; a path traversal is refused without a token"
+  drop_harden_route   # clean any prior injection (idempotent)
+  [ "$(gw_code secure.local)" = 401 ] || die "PHASE23 baseline broken: secure.local / without a token is not 401 (ext_authz off?)"
+
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q -c "
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,deleted_at)
+VALUES ('harden-public','harden-public','local-gw',ARRAY['secure.local']::text[],'/public','secure-whoami',30,'none',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,
+  cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;" >/dev/null
+  retry 20 2 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 -H 'Host: secure.local' http://127.0.0.1:443/public)\" = 200 ]" \
+    || { drop_harden_route; die "PHASE23: secure.local/public (auth_policy none) never served 200"; }
+  ok "secure.local/public (none) serves 200 without a token; secure.local/ (jwt) is 401"
+
+  section "forged identity headers on the open route — none may reach whoami"
+  local body low
+  body="$(curl -s --max-time 6 -H 'Host: secure.local' -H 'x-user-id: forged-admin' -H 'X-User-Teams: forged-root' \
+    -H 'x_user_id: forged-underscore' -H 'x-user-email: forged@evil.example' -H 'x-gateway-auth: forged-transit' \
+    -H 'x-auth-iss: forged-issuer' -H 'X-Forwarded-For: 6.6.6.6' http://127.0.0.1:443/public 2>/dev/null || true)"
+  printf '%s\n' "$body" | grep -iE '^(GET|X-User|X_User|X-Gateway|X-Auth|X-Forwarded-For|X-Envoy-External)' | sed 's/^/    /'
+  has "$body" 'GET /public' || { drop_harden_route; die "PHASE23: whoami did not answer the forged-header request"; }
+  low="$(printf '%s' "$body" | tr 'A-Z' 'a-z')"
+  local forged
+  for forged in forged-admin forged-root forged-underscore forged@evil.example forged-transit forged-issuer; do
+    has "$low" "$forged" && { drop_harden_route; die "PHASE23 FAIL: the client-forged value '$forged' reached the backend"; }
+  done
+  ok "x-user-id, x-user-teams, x_user_id, x-user-email, x-gateway-auth and x-auth-iss were all stripped"
+
+  # use_remote_address: Envoy appends the TCP peer, so the rightmost entry is real.
+  local xff last
+  xff="$(printf '%s\n' "$body" | tr -d '\r ' | awk -F: 'tolower($1)=="x-forwarded-for"{print $2}')"
+  last="${xff##*,}"
+  { [ "$xff" != "$last" ] && [ "$last" != 6.6.6.6 ]; } \
+    || { drop_harden_route; die "PHASE23 FAIL: X-Forwarded-For '$xff' — Envoy did not append the real peer after the forged 6.6.6.6"; }
+  ok "the real peer address was appended after the forged one (X-Forwarded-For: $xff)"
+
+  section "path traversal from the open route to the jwt route, without a token"
+  local p c
+  for p in '/public/../admin' '/public/%2e%2e/admin' '/public/..%2Fadmin'; do
+    c="$(path_code secure.local "$p")"
+    echo "    $p -> HTTP $c"
+    [ "$c" = 200 ] && { drop_harden_route; die "PHASE23 FAIL: $p was served without a token (routed as /public)"; }
+  done
+  for p in '/public/../admin' '/public/%2e%2e/admin'; do
+    [ "$(path_code secure.local "$p")" = 401 ] || { drop_harden_route; die "PHASE23 FAIL: $p is not 401 — it was not routed to the jwt route as /admin"; }
+  done
+  [ "$(path_code secure.local '/public/..%2Fadmin' -L)" = 401 ] \
+    || { drop_harden_route; die "PHASE23 FAIL: /public/..%2Fadmin did not land on the jwt route (401) after its redirect"; }
+  ok "every traversal was routed as /admin and refused with 401 (the %2F form via a redirect)"
+
+  drop_harden_route
+  ok "PHASE 23 — forged identity headers stripped; a path traversal is refused without a token"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1929,7 +1998,8 @@ main() {
   phase20_sni_certs
   phase21_osb_https_public_host
   phase22_listener_collision
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused."
+  phase23_connection_manager
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
