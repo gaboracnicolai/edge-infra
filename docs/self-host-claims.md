@@ -29,3 +29,8 @@ not verified in a running system yet.
 | 15 | "Every model call from every tool goes through one self-hosted gateway" (190) | **partly** — rows 2–3 | The Envoy gateway is self-hosted and serves every request in the run. The model-routing gateway the sentence names is Lens, which these charts do not install. |
 
 Rows 9–14 need a Lens chart (or a Lens deployment in this stack) before a step can run them.
+
+Not a claim on the page, but run too: Phase 19 runs the auth-service chart's
+confidential-node option — a workload refused without a verified attestation and
+started with one, against a mock TEE (real attestation needs confidential VMs).
+See [self-host-confidential-compute.md](self-host-confidential-compute.md).

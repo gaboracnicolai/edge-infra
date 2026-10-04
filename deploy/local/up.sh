@@ -169,11 +169,11 @@ verify_phase2() {
 phase3_images() {
   section "PHASE 3 — build local images (tag ':$IMAGE_TAG') + load into kind"
 
-  section "control-plane Go binaries (server, issuer, ratelimit, secrets, migrate)"
+  section "control-plane Go binaries (server, issuer, ratelimit, secrets, migrate, attest)"
   docker build -f "$REPO_ROOT/Dockerfile.control-plane" --target server \
     -t "edge-control-plane:$IMAGE_TAG" "$REPO_ROOT"
   local tgt
-  for tgt in issuer ratelimit secrets migrate; do
+  for tgt in issuer ratelimit secrets migrate attest; do
     docker build -f "$REPO_ROOT/Dockerfile.control-plane" --target "$tgt" \
       -t "edge-$tgt:$IMAGE_TAG" "$REPO_ROOT"
   done
@@ -194,7 +194,8 @@ phase3_images() {
   for img in \
     "edge-control-plane:$IMAGE_TAG" "edge-issuer:$IMAGE_TAG" \
     "edge-ratelimit:$IMAGE_TAG" "edge-secrets:$IMAGE_TAG" \
-    "edge-migrate:$IMAGE_TAG" "edge-osb:$IMAGE_TAG" "auth-service:$IMAGE_TAG"; do
+    "edge-migrate:$IMAGE_TAG" "edge-osb:$IMAGE_TAG" "auth-service:$IMAGE_TAG" \
+    "edge-attest:$IMAGE_TAG"; do
     kind load docker-image --name "$CLUSTER_NAME" "$img"
   done
   # Public images: best-effort (the node can still pull them at runtime).
@@ -1510,6 +1511,104 @@ phase18_scim_oidc() {
   ok "PHASE 18 — SCIM-provisioned user signed in through OIDC and reached the gateway; unprovisioned and deprovisioned were refused"
 }
 
+# ---- Phase 19 — confidential compute: no verified attestation, no workload ----
+# kind has no confidential hardware: a labelled worker stands in for a
+# confidential node, RuntimeClass confidential-mock for its runtime, and a mock
+# attester for its TEE (manifests/confidential.yaml). What is real is the chart's
+# option and the gate: the auth-service chart, installed as extra releases with
+# confidential.enabled, starts only on that node and only once its attest init
+# container has verified a fresh report.
+CC_NODE="${CLUSTER_NAME}-worker"
+CC_MEASUREMENT="a3f1c07e5b2d9e48c6f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6"  # = MOCK_MEASUREMENT
+CC_ATTESTER="http://mock-attester.edge-attest.svc.cluster.local:8006/aa/evidence"
+
+# cc_install <release> <trusted-key> <evidence-url> [helm args...] — the
+# auth-service chart with its confidential-node option on. No --wait: a refused
+# pod never becomes Ready.
+cc_install() {
+  local rel="$1" key="$2" url="$3"; shift 3
+  h upgrade --install "$rel" "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" \
+    -f "$REPO_ROOT/deploy/envs/dev/values-auth-service.yaml" -f "$LOCAL_DIR/values/values-auth-service.yaml" \
+    --set confidential.enabled=true --set confidential.runtimeClassName=confidential-mock \
+    --set confidential.attestation.image.repository=edge-attest --set "confidential.attestation.image.tag=$IMAGE_TAG" \
+    --set "confidential.attestation.evidenceURL=$url" --set "confidential.attestation.trustedKey=$key" \
+    --set "confidential.attestation.measurements={$CC_MEASUREMENT}" --set confidential.attestation.timeout=10s \
+    "$@" >/dev/null
+}
+
+cc_pods() { k -n "$INFRA_NS" get pod -l "app.kubernetes.io/instance=$1" -o json; }
+
+# cc_gate_exit <release> — the attest init container's last exit code (empty
+# until it has exited once).
+cc_gate_exit() {
+  cc_pods "$1" | jq -r '.items[0].status.initContainerStatuses[0] // {} | (.state.terminated // .lastState.terminated // {}) | .exitCode // empty'
+}
+cc_gate_exited() { [ -n "$(cc_gate_exit "$1")" ]; }
+
+# cc_assert_refused <release> <reason> — the gate exited non-zero for <reason>,
+# and auth-service itself never started.
+cc_assert_refused() {
+  local rel="$1" want="$2" p code msg
+  retry 45 2 cc_gate_exited "$rel" || { cc_pods "$rel" | jq '.items[0].status'; die "$rel: the attest gate never ran to an exit"; }
+  p="$(cc_pods "$rel" | jq '.items[0]')"
+  code="$(printf '%s' "$p" | jq -r '.status.initContainerStatuses[0] | (.state.terminated // .lastState.terminated) | .exitCode')"
+  msg="$(printf '%s' "$p" | jq -r '.status.initContainerStatuses[0] | (.state.terminated // .lastState.terminated) | .message // ""')"
+  echo "  $rel: attest exit $code — $msg"
+  [ "$code" != 0 ] || die "$rel: the gate passed a pod it should have refused"
+  has "$msg" "attestation REFUSED: $want" || die "$rel: refused, but not for '$want'"
+  [ "$(printf '%s' "$p" | jq -r '[.status.containerStatuses[]? | select(.started == true or .state.running != null or .lastState.terminated != null)] | length')" = 0 ] \
+    || die "$rel: auth-service started without a verified attestation"
+  [ "$(printf '%s' "$p" | jq -r '.status.conditions[]? | select(.type == "Ready") | .status')" != True ] \
+    || die "$rel: pod Ready without a verified attestation"
+  ok "$rel refused — auth-service never started ($want)"
+}
+
+phase19_confidential() {
+  section "PHASE 19 — confidential compute: the workload starts only with a verified attestation (mock TEE)"
+  k label node "$CC_NODE" talyvor.io/confidential=true --overwrite >/dev/null
+  local keys stranger pub
+  keys="$(docker run --rm "edge-attest:$IMAGE_TAG" keygen)"
+  stranger="$(docker run --rm "edge-attest:$IMAGE_TAG" keygen | jq -r .public_key)"
+  pub="$(printf '%s' "$keys" | jq -r .public_key)"
+  sed "s|edge-attest:local|edge-attest:$IMAGE_TAG|" "$LOCAL_DIR/manifests/confidential.yaml" | k apply -f - >/dev/null
+  apply_secret edge-attest generic mock-attester-key --from-literal=private_key="$(printf '%s' "$keys" | jq -r .private_key)" >/dev/null
+  k -n edge-attest rollout restart deploy/mock-attester >/dev/null
+  wait_rollout deploy/mock-attester edge-attest 120s
+  ok "node $CC_NODE labelled confidential; mock attester up, signing with $pub"
+
+  section "RED — no attestation report (no attester at the URL): refused"
+  cc_install auth-cc-noreport "$pub" "http://no-attester.edge-attest.svc.cluster.local:8006/aa/evidence"
+  cc_assert_refused auth-cc-noreport "no attestation report"
+
+  section "RED — a report signed by a key the chart does not trust: refused"
+  cc_install auth-cc-untrusted "$stranger" "$CC_ATTESTER"
+  cc_assert_refused auth-cc-untrusted "report is not signed by the trusted attester key"
+
+  section "GREEN — a valid report from the trusted attester: auth-service starts, on the confidential node only"
+  cc_install auth-cc "$pub" "$CC_ATTESTER" --set replicaCount=2
+  wait_rollout deploy/auth-cc-auth-service "$INFRA_NS" 180s
+  local pods n pod
+  pods="$(cc_pods auth-cc)"
+  n="$(printf '%s' "$pods" | jq '.items | length')"
+  [ "$n" = 2 ] || die "GREEN: expected 2 auth-cc pods, found $n"
+  for pod in $(printf '%s' "$pods" | jq -r '.items[].metadata.name'); do
+    local p; p="$(printf '%s' "$pods" | jq --arg n "$pod" '.items[] | select(.metadata.name == $n)')"
+    echo "  $pod: node $(printf '%s' "$p" | jq -r .spec.nodeName), runtimeClass $(printf '%s' "$p" | jq -r .spec.runtimeClassName)"
+    [ "$(printf '%s' "$p" | jq -r .spec.nodeName)" = "$CC_NODE" ] || die "GREEN: $pod scheduled off the confidential node"
+    [ "$(printf '%s' "$p" | jq -r .spec.runtimeClassName)" = confidential-mock ] || die "GREEN: $pod not under the confidential RuntimeClass"
+    [ "$(printf '%s' "$p" | jq -r '.status.initContainerStatuses[0].state.terminated.exitCode')" = 0 ] || die "GREEN: $pod's gate did not pass"
+    [ "$(printf '%s' "$p" | jq -r '.status.conditions[] | select(.type == "Ready") | .status')" = True ] || die "GREEN: $pod not Ready"
+    local gl; gl="$(k -n "$INFRA_NS" logs "$pod" -c attest)"
+    has "$gl" "attestation verified" && has "$gl" "\"measurement\":\"$CC_MEASUREMENT\"" \
+      || die "GREEN: $pod's gate log does not show the verified measurement: $gl"
+  done
+  ok "GREEN — 2 auth-service pods verified $CC_MEASUREMENT, Ready, on $CC_NODE under confidential-mock"
+
+  local rel
+  for rel in auth-cc auth-cc-noreport auth-cc-untrusted; do h uninstall "$rel" -n "$INFRA_NS" >/dev/null; done
+  ok "PHASE 19 — refused with no report and with an untrusted one; started with a valid one (real SEV-SNP/TDX attestation needs confidential VMs)"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1537,7 +1636,8 @@ main() {
   phase16_sds_scope
   phase17_network_policy
   phase18_scim_oidc
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in."
+  phase19_confidential
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

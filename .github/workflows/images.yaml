@@ -101,6 +101,18 @@ jobs:
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-migrate:latest', env.OWNER) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.control-plane
+          target: attest
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ env.OWNER }}/edge-attest:${{ github.sha }}
+            ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-attest:latest', env.OWNER) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   osb:
     runs-on: ubuntu-latest

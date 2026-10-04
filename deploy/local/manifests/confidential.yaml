@@ -1,0 +1,69 @@
+# Phase 19 (B27.34) — confidential compute, as far as kind can go. kind has no
+# confidential hardware, so this stands in for it: a RuntimeClass on plain runc
+# limited to the node Phase 19 labels talyvor.io/confidential=true, and a mock
+# attester that signs reports with a key the phase generates (Secret
+# mock-attester-key). A real cluster names its confidential runtime as the
+# handler (e.g. kata-qemu-snp) and runs the TEE's own attestation agent.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: confidential-mock
+handler: runc
+scheduling:
+  nodeSelector:
+    talyvor.io/confidential: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge-attest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-attester
+  namespace: edge-attest
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mock-attester}
+  template:
+    metadata:
+      labels: {app: mock-attester}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mock-attester
+          image: edge-attest:local
+          imagePullPolicy: IfNotPresent
+          args: ["mock-attester"]
+          env:
+            - name: MOCK_ATTESTER_KEY
+              valueFrom:
+                secretKeyRef: {name: mock-attester-key, key: private_key}
+            # The launch measurement this stand-in guest reports.
+            - name: MOCK_MEASUREMENT
+              value: "a3f1c07e5b2d9e48c6f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6"
+          ports:
+            - {name: http, containerPort: 8006}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-attester
+  namespace: edge-attest
+spec:
+  selector: {app: mock-attester}
+  ports:
+    - {name: http, port: 8006, targetPort: http}

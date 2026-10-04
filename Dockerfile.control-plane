@@ -1,11 +1,12 @@
 # Multi-stage build for the Go xDS control plane, token issuer, rate-limit
-# service, TLS-secrets custodian, and shared-DB migrator.
+# service, TLS-secrets custodian, shared-DB migrator, and attestation gate.
 #
 #   docker build --target server     -t edge-control-plane .
 #   docker build --target issuer     -t edge-issuer        .
 #   docker build --target ratelimit  -t edge-ratelimit     .
 #   docker build --target secrets    -t edge-secrets       .
 #   docker build --target migrate    -t edge-migrate       .
+#   docker build --target attest     -t edge-attest        .
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 WORKDIR /app
@@ -28,6 +29,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/secrets ./cmd/secrets
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/migrate ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -o /bin/attest ./cmd/attest
 
 
 FROM gcr.io/distroless/static:nonroot AS server
@@ -64,3 +67,12 @@ FROM gcr.io/distroless/static:nonroot AS migrate
 COPY --from=builder /bin/migrate /migrate
 USER nonroot:nonroot
 ENTRYPOINT ["/migrate"]
+
+
+# The confidential-compute attestation gate (B27.34): an init container that
+# refuses to let the workload start without a verified report. `attest
+# mock-attester` is a stand-in TEE for the kind e2e only.
+FROM gcr.io/distroless/static:nonroot AS attest
+COPY --from=builder /bin/attest /attest
+USER nonroot:nonroot
+ENTRYPOINT ["/attest"]
