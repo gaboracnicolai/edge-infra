@@ -1436,6 +1436,13 @@ sso_sign_in() {
   ' sh "$ISSUER_HTTPS" "$SSO_EMAIL" "$SSO_PASS"
 }
 
+# sso_login_redirects — the issuer's /sso/login sends the browser to the IdP
+# (302), i.e. the issuer has discovered Dex; until then it answers 503.
+sso_login_redirects() {
+  [ "$(k -n tenant-secure exec minter -- curl -sk --max-time 10 -o /dev/null -w '%{http_code}' \
+    "$ISSUER_HTTPS/sso/login" 2>/dev/null || true)" = 302 ]
+}
+
 http_of() { printf '%s' "${1##*HTTP=}"; }
 body_of() { printf '%s' "${1%HTTP=*}"; }
 
@@ -1446,6 +1453,11 @@ phase18_scim_oidc() {
   k -n "$INFRA_NS" wait --for=condition=Ready certificate/dex-cert --timeout=120s >/dev/null
   wait_rollout deploy/dex "$INFRA_NS" 180s
   k -n tenant-secure wait --for=condition=Ready pod/minter --timeout=60s >/dev/null
+  # Dex's rollout can finish a moment before its Service answers; the issuer
+  # discovers it on first use and keeps answering 503 until then.
+  retry 30 2 sso_login_redirects || die "the issuer's /sso/login never redirected to Dex: $(k -n tenant-secure exec minter -- \
+    curl -sk --max-time 10 -w '\nHTTP=%{http_code}' "$ISSUER_HTTPS/sso/login" 2>&1 || true)"
+  ok "the issuer's /sso/login redirects to Dex"
 
   section "reset — delete $SSO_EMAIL if an earlier run left it"
   local out filter id
