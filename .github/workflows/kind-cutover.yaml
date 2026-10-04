@@ -1,0 +1,69 @@
+name: Kind Cutover
+
+# Runs `make kind-cutover` — the CFG-1 launch-day cutover rehearsed in order on a
+# throwaway kind cluster: main as committed (the control-plane image pin), image
+# bump, auth-service with JWKS and mTLS, client certificate, enable — with a
+# check after each step that no allowed request is refused, no refused request
+# is allowed, and the fleet never freezes on last-good. The real-cluster steps
+# are docs/ext-authz-launch-runbook.md; this keeps them honest.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - 'deploy/envs/dev/**'
+      - 'deploy/local/**'
+      - 'k8s/**'
+      - 'Makefile'
+      - '.github/workflows/kind-cutover.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - 'deploy/envs/dev/**'
+      - 'deploy/local/**'
+      - 'k8s/**'
+      - 'Makefile'
+      - '.github/workflows/kind-cutover.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: kind-cutover-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-cutover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The rehearsal builds the committed control-plane image pin from its own
+          # source (git archive <pin>), so it needs history, not a shallow clone.
+          fetch-depth: 0
+      # Pinned and checksum-verified, like every other tool this repo's CI
+      # installs. kind v0.31.0's default node image is Kubernetes v1.35.0, which
+      # is what lib.sh pins Calico / cert-manager / Kyverno for.
+      - name: Install kind, kubectl, helm (pinned + checksum-verified)
+        env:
+          KIND_VERSION: v0.31.0
+          KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+          KUBECTL_VERSION: v1.35.0
+          KUBECTL_SHA256: a2e984a18a0c063279d692533031c1eff93a262afcc0afdc517375432d060989
+          HELM_VERSION: v4.2.0
+          HELM_SHA256: 97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
+          sudo install -m 0755 kind /usr/local/bin/kind
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c -
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+          curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          kind version; kubectl version --client; helm version
+      - name: make kind-cutover
+        run: make kind-cutover

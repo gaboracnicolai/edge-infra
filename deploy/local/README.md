@@ -8,6 +8,7 @@ security proofs build on.
 ```
 git clone … && cd edge-infra
 make kind-e2e             # ONE command: create cluster, run every phase, delete cluster
+make kind-cutover         # the CFG-1 launch-day cutover, in order, on its own cluster
 deploy/local/up.sh        # stand everything up (idempotent, re-runnable)
 deploy/local/down.sh      # tear the cluster down
 ```
@@ -17,6 +18,14 @@ deploy/local/down.sh      # tear the cluster down
 for debugging). CI runs it on every change to a chart, the dev overlays, `k8s/` or this
 directory (`.github/workflows/kind-e2e.yaml`). Which self-host page claim each phase proves:
 [docs/self-host-claims.md](../../docs/self-host-claims.md).
+
+`make kind-cutover` (`deploy/local/cutover.sh`) rehearses the launch-day order on its own
+cluster (`edge-cutover`): main as committed (the control-plane image pin, which serves
+nothing), image bump, auth-service with JWKS and mTLS, client certificate, enable. After every
+step it checks that tenant routes still answer 200, that a jwt route is never served without a
+valid token, and that the fleet is not frozen on last-good. CI runs it on the same paths
+(`.github/workflows/kind-cutover.yaml`). The real-cluster steps are
+[docs/ext-authz-launch-runbook.md](../../docs/ext-authz-launch-runbook.md).
 
 The end state: a request to the node's published **:443** for each tenant's host
 reaches **that tenant's** backend.
@@ -138,6 +147,7 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
 | `kind-config.yaml` | Multi-node cluster, default CNI disabled, publishes 80/443. |
 | `up.sh` / `down.sh` | Phase-by-phase standup / teardown. |
 | `e2e.sh` | `make kind-e2e`: fresh cluster → every phase → teardown. |
+| `cutover.sh` | `make kind-cutover`: fresh cluster → the CFG-1 cutover in launch-day order, checked per step → teardown. |
 | `manifests/` | namespaces, postgres, nats, migrate Job, tenant backends, SEC-3 attacker, secure (whoami+minter) backend, OSB stub upstream. |
 | `values/` | Per-chart local overlays (images + the adaptations above). |
 | `.pki-bootstrap/` | Generated admin PKI + KEK + signing key (gitignored). |
