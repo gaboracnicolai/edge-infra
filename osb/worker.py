@@ -181,7 +181,7 @@ async def process_message(msg: Any, pool, cfg: Settings) -> bool:
                     spec.health_check.model_dump_json() if spec.health_check else None,
                     json.dumps(spec.node_selector),
                 )
-                outcome = await translator.apply_create(conn, spec)
+                outcome = await translator.apply_create(conn, spec, cfg.shared_https_port)
                 pending_webhook = await _complete_request(conn, request_id, service_name)
             metrics.services_derived_total[(spec.protocol, outcome)] += 1
         elif msg.subject == cfg.nats_subject_deprovision:

@@ -12,7 +12,8 @@ Disjointness from controller-written rows is by the ``osb-{team}-`` name prefix
 is Stage 2 and intentionally not added here.
 
 HTTPS (R4 Stage 3b-i): a service is fanned out onto the shared HTTPS listener
-(port 443), with the route carrying its ``tls_secret_name`` — a REFERENCE only.
+(port 443 unless SHARED_HTTPS_PORT says otherwise), with the route carrying its
+``tls_secret_name`` — a REFERENCE only.
 OSB never writes the cert/key material (the Stage 1 boundary); the secret must be
 provisioned separately (sub-stage 2), and SDS resolves it by name at render time.
 mtls / jwt_or_mtls transport auth remain later sub-stages.
@@ -51,19 +52,22 @@ def derived_name(team: str, name: str) -> str:
     return f"osb-{team}-{name}"
 
 
-async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
+async def apply_create(conn, spec: ServiceSpec, https_port: int = 443) -> CreateOutcome:
     """Fan a service out into gateway + cluster + endpoint + route.
 
     Runs on the caller's connection inside the caller's transaction. HTTP lands on
-    the shared ``osb-shared-http:80`` listener; HTTPS on ``osb-shared-https:443``
-    with the route carrying its ``tls_secret_name`` — a REFERENCE only; OSB never
-    writes cert/key material (SDS resolves the secret by name).
+    the shared ``osb-shared-http:80`` listener; HTTPS on ``osb-shared-https`` at
+    ``https_port`` with the route carrying its ``tls_secret_name`` — a REFERENCE
+    only; OSB never writes cert/key material (SDS resolves the secret by name).
+
+    The route matches ``spec.route_host`` (the public host clients use); the
+    endpoint is ``spec.host`` (the upstream Envoy forwards to).
     """
     dn = derived_name(spec.team, spec.name)
     if spec.protocol == "HTTPS":
         gateway, port, protocol, tls_secret, outcome = (
             SHARED_HTTPS_GATEWAY,
-            443,
+            https_port,
             "HTTPS",
             spec.tls_secret_name,  # reference only; the material lives in `secrets`
             "provisioned_https",
@@ -79,11 +83,16 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
 
     # 1. Ensure the shared gateway exists (idempotent; never per-service). The
     #    HTTPS gateway carries NO tls_secret — per-SNI certs live on the routes.
+    #    The port follows the configured value, so changing SHARED_HTTPS_PORT
+    #    moves the listener on the next provision instead of being ignored.
     await conn.execute(
         """
         INSERT INTO gateways (id, name, port, protocol, node_selector)
         VALUES ($1, $1, $2, $3, '{}'::jsonb)
-        ON CONFLICT (name) DO NOTHING
+        ON CONFLICT (name) DO UPDATE SET
+            port       = EXCLUDED.port,
+            updated_at = NOW()
+        WHERE gateways.port <> EXCLUDED.port
         """,
         gateway,
         port,
@@ -113,8 +122,10 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         spec.health_check.interval_seconds if spec.health_check else None,
     )
 
-    # 3. Endpoint — one per service. Replace so a changed host/port leaves no
-    #    orphan (endpoints have no soft-delete; the whole op is in one tx).
+    # 3. Endpoint — one per service: the upstream. An IP is served over EDS; a
+    #    hostname makes the control plane render the cluster as STRICT_DNS.
+    #    Replace so a changed host/port leaves no orphan (endpoints have no
+    #    soft-delete; the whole op is in one tx).
     await conn.execute("DELETE FROM endpoints WHERE cluster_id = $1", dn)
     await conn.execute(
         """
@@ -155,7 +166,7 @@ async def apply_create(conn, spec: ServiceSpec) -> CreateOutcome:
         """,
         dn,
         gateway,
-        [spec.host],
+        [spec.route_host],
         _DEFAULT_ROUTE_TIMEOUT_S,
         spec.rate_limit.requests_per_unit if spec.rate_limit else None,
         spec.rate_limit.unit if spec.rate_limit else None,

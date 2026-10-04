@@ -120,7 +120,7 @@ func shouldBlockInconsistent(snap *cachev3.Snapshot, hasPrev bool) bool {
 //   - Envoy's own Snapshot.Consistent() — dangling CDS->EDS (an EDS cluster with no
 //     endpoint assignment) or LDS->RDS (a listener referencing an absent route
 //     config) references. NOTE: the current builders cannot actually emit either
-//     (BuildEndpoints emits a CLA per cluster; BuildListeners/BuildRouteConfigs both
+//     (BuildEndpoints emits a CLA per EDS cluster; BuildListeners/BuildRouteConfigs both
 //     iterate the same gateways), so this arm is defence-in-depth against a future
 //     builder regression.
 //   - danglingRouteClusterError — a route whose target cluster is absent from CDS.
@@ -296,7 +296,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 	resources := map[resourcev3.Type][]types.Resource{
 		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, domain.Routes, r.rateLimit, r.extAuthz, r.rls),
 		resourcev3.RouteType:    builders.BuildRouteConfigs(domain.Gateways, domain.Routes, r.rls),
-		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters, r.extAuthz, r.rls),
+		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters, domain.Endpoints, r.extAuthz, r.rls),
 		resourcev3.EndpointType: builders.BuildEndpoints(domain.Clusters, domain.Endpoints),
 		resourcev3.SecretType:   builders.BuildSecrets(domain.Secrets),
 	}

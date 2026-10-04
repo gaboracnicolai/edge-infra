@@ -55,6 +55,11 @@ config:
   #                    the metrics surface must be closed.
   existingSecret: edge-osb-secrets
 
+# Port of the shared HTTPS listener every OSB HTTPS service lands on (the
+# worker writes it onto the osb-shared-https gateway). Change it when :443 on the
+# edge nodes already belongs to another gateway or ingress.
+sharedHttpsPort: 443
+
 # Transport security (ISO 27001 A.13). When `tls` is set, the OSB mounts its
 # cert-manager-issued secret and is told to use verify-full Postgres TLS and
 # mutual NATS TLS. Leave unset for local/plaintext dev.

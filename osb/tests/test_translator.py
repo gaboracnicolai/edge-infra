@@ -172,6 +172,32 @@ async def test_https_provisions_per_sni(pool, cfg):
     assert metrics.services_derived_total[("HTTPS", "provisioned_https")] == before + 1
 
 
+# 4b. B28.200: public_host is what the route (and its SNI cert) matches, host is
+#     the upstream the endpoint points at, and the shared HTTPS listener sits on
+#     the configured port — moving when the setting changes.
+async def test_https_public_host_split_from_dns_upstream(pool):
+    cfg = Settings(shared_https_port=10443)
+    spec = ServiceSpec(
+        name="shop", team="payments", host="echo.shop.svc.cluster.local", port=5678,
+        public_host="shop.example.com", protocol="HTTPS", tls_secret_name="shop-cert",
+    )
+    await _create(pool, cfg, spec)
+    async with pool.acquire() as c:
+        gw = await c.fetchrow("SELECT port FROM gateways WHERE name='osb-shared-https'")
+        ep = await c.fetchrow(
+            "SELECT address, port FROM endpoints WHERE cluster_id='osb-payments-shop'"
+        )
+        rt = await c.fetchrow("SELECT hosts FROM routes WHERE name='osb-payments-shop'")
+    assert gw["port"] == 10443
+    assert (ep["address"], ep["port"]) == ("echo.shop.svc.cluster.local", 5678)
+    assert list(rt["hosts"]) == ["shop.example.com"]
+
+    await _create(pool, Settings(shared_https_port=11443), spec)
+    async with pool.acquire() as c:
+        port = await c.fetchval("SELECT port FROM gateways WHERE name='osb-shared-https'")
+    assert port == 11443
+
+
 # --- adversarial (green-locking) -------------------------------------------
 
 # Partial-tx failure: a mid-fan-out error rolls the WHOLE transaction back — no

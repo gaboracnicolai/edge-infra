@@ -24,7 +24,7 @@ func TestBuildClusters_HealthCheck(t *testing.T) {
 		Name: "osb-team-svc", ConnectTimeout: 5 * time.Second, LbPolicy: "ROUND_ROBIN",
 		HealthCheckPath: "/healthz", HealthCheckIntervalSeconds: 5,
 	}
-	res := BuildClusters([]store.Cluster{sc}, ExtAuthzOptions{}, RateLimitServiceOptions{})
+	res := BuildClusters([]store.Cluster{sc}, nil, ExtAuthzOptions{}, RateLimitServiceOptions{})
 	c := clusterFrom(t, res[0])
 
 	if len(c.GetHealthChecks()) != 1 {
@@ -45,7 +45,7 @@ func TestBuildClusters_HealthCheck(t *testing.T) {
 // A cluster with no health_check renders none (controller clusters unchanged).
 func TestBuildClusters_NoHealthCheck(t *testing.T) {
 	sc := store.Cluster{Name: "plain", ConnectTimeout: 5 * time.Second, LbPolicy: "ROUND_ROBIN"}
-	res := BuildClusters([]store.Cluster{sc}, ExtAuthzOptions{}, RateLimitServiceOptions{})
+	res := BuildClusters([]store.Cluster{sc}, nil, ExtAuthzOptions{}, RateLimitServiceOptions{})
 	c := clusterFrom(t, res[0])
 	if len(c.GetHealthChecks()) != 0 {
 		t.Errorf("cluster without health_check must have no health checks; got %d", len(c.GetHealthChecks()))

@@ -12,17 +12,28 @@ import (
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
-func BuildClusters(clusters []store.Cluster, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
+// BuildClusters renders one Envoy cluster per store cluster. A cluster whose
+// endpoints are all IP literals is served over EDS (BuildEndpoints emits its
+// CLA); one with a hostname endpoint is STRICT_DNS with its endpoints inline,
+// because Envoy rejects a non-IP address in an EDS assignment and would NACK
+// the whole CDS/EDS update.
+func BuildClusters(clusters []store.Cluster, endpoints []store.Endpoint, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
+	byCluster := endpointsByCluster(endpoints)
 	out := make([]types.Resource, 0, len(clusters)+2)
 	for _, c := range clusters {
 		cl := &clusterv3.Cluster{
-			Name:                 c.Name,
-			ConnectTimeout:       durationpb.New(c.ConnectTimeout),
-			ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_EDS},
-			LbPolicy:             lbPolicy(c.LbPolicy),
-			EdsClusterConfig: &clusterv3.Cluster_EdsClusterConfig{
+			Name:           c.Name,
+			ConnectTimeout: durationpb.New(c.ConnectTimeout),
+			LbPolicy:       lbPolicy(c.LbPolicy),
+		}
+		if eps := byCluster[c.ID]; hasHostname(eps) {
+			cl.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STRICT_DNS}
+			cl.LoadAssignment = loadAssignment(c.Name, eps)
+		} else {
+			cl.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_EDS}
+			cl.EdsClusterConfig = &clusterv3.Cluster_EdsClusterConfig{
 				EdsConfig: AdsConfigSource(),
-			},
+			}
 		}
 		if c.HealthCheckPath != "" {
 			cl.HealthChecks = []*corev3.HealthCheck{activeHealthCheck(c)}

@@ -32,6 +32,7 @@
 #  18  a user created through SCIM signs in through OIDC (Dex as the IdP)
 #  19  confidential compute: the workload starts only with a verified attestation
 #  20  one HTTPS port serves two hosts, each with its own per-route cert (SNI)
+#  21  an OSB HTTPS service: public host's cert + stub body via a DNS upstream
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -1725,6 +1726,126 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   ok "PHASE 20 — two per-route certs served by SNI on one HTTPS port; an unknown SNI is refused at the handshake"
 }
 
+# ---- Phase 21 — an OSB HTTPS service: public host, DNS upstream (B28.200) ----
+# Runs after Phase 15 (the 'e2e' tenant key and the osb-stub upstream). The
+# service is published as shop.e2e.local (the route's Host and the SNI its cert
+# is served for) while Envoy forwards to the stub by its Service DNS name — a
+# hostname upstream, so the control plane renders a STRICT_DNS cluster.
+OSB_HTTPS_SERVICE="e2e-shop"
+OSB_PUBLIC_HOST="shop.e2e.local"
+OSB_DNS_UPSTREAM="echo.osb-stub.svc.cluster.local"
+
+# envoy_update_rejected <edge-proxy-pod> — the sum of every xDS update_rejected
+# counter (CDS, EDS, LDS, RDS, SDS) on that Envoy: config pushes it refused.
+# Echoes "?" when the admin stats could not be read, never a silent 0.
+envoy_update_rejected() {
+  local pod="$1" pf out
+  kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$pod" 19003:9901 >/dev/null 2>&1 &
+  pf=$!
+  sleep 5
+  out="$(curl -s --max-time 8 'http://127.0.0.1:19003/stats?filter=update_rejected$' 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  has "$out" "cluster_manager.cds.update_rejected" || { echo "?"; return; }
+  printf '%s\n' "$out" | awk -F': ' '{s += $2} END {print s + 0}'
+}
+
+# rejected_by_pod — "<pod>=<update_rejected>" for every edge-proxy, one line.
+rejected_by_pod() {
+  local pod line=""
+  for pod in $(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[*].metadata.name}'); do
+    line+="$pod=$(envoy_update_rejected "$pod") "
+  done
+  printf '%s' "$line"
+}
+
+phase21_osb_https_public_host() {
+  local port node ip tmp pgpod c64 k64 r out before after
+  port="$(k -n "$INFRA_NS" get deploy -l app.kubernetes.io/instance=edge-osb,component=worker \
+    -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="SHARED_HTTPS_PORT")].value}')"
+  [ -n "$port" ] || die "PHASE21: the edge-osb worker has no SHARED_HTTPS_PORT"
+  section "PHASE 21 — an OSB HTTPS service: public host $OSB_PUBLIC_HOST, DNS upstream $OSB_DNS_UPSTREAM, shared port :$port"
+  node="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].spec.nodeName}')"
+  ip="$(k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  [ -n "$ip" ] || die "PHASE21: no edge-proxy node IP"
+  k apply -f "$LOCAL_DIR/manifests/osb-stub.yaml" >/dev/null
+  wait_rollout deploy/echo osb-stub 120s
+
+  section "seed the public host's cert (OSB only ever references it by name)"
+  tmp="$(mktemp -d)"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$OSB_PUBLIC_HOST" \
+    -keyout "$tmp/k" -out "$tmp/c" >/dev/null 2>&1 || die "openssl could not mint $OSB_PUBLIC_HOST's cert"
+  c64="$(base64 < "$tmp/c" | tr -d '\n')"; k64="$(base64 < "$tmp/k" | tr -d '\n')"
+  rm -rf "$tmp"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q -c "
+INSERT INTO secrets (id,name,cert_pem,key_pem,kind)
+VALUES ('e2e-shop-cert','e2e-shop-cert',convert_from(decode('$c64','base64'),'UTF8'),convert_from(decode('$k64','base64'),'UTF8'),'tls_certificate')
+ON CONFLICT (name) DO UPDATE SET cert_pem=EXCLUDED.cert_pem,key_pem=EXCLUDED.key_pem,updated_at=now();" >/dev/null
+  ok "secret e2e-shop-cert (CN=$OSB_PUBLIC_HOST)"
+
+  r="$(osb_call DELETE "/v1/services/$OSB_HTTPS_SERVICE")"
+  if [ "${r%% *}" = 202 ]; then
+    log "removing a leftover '$OSB_HTTPS_SERVICE' from a prior run"
+    osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  fi
+
+  section "RED — before provisioning, $OSB_PUBLIC_HOST:$port is not served"
+  out="$(SNI_PORT="$port" sni_get "$ip" "$OSB_PUBLIC_HOST")"
+  echo "  $OSB_PUBLIC_HOST:$port -> $(printf '%s\n' "$out" | tail -1)"
+  ! has "$out" "OSB-PROVISIONED-BACKEND" && ! has "$out" "CN=$OSB_PUBLIC_HOST" \
+    || die "PHASE21 FAIL: $OSB_PUBLIC_HOST was served before the broker provisioned it — the proof would be vacuous"
+  ok "RED proven — no cert, no body"
+
+  before="$(rejected_by_pod)"
+  echo "  update_rejected before: $before"
+  has "$before" "=?" && die "PHASE21: could not read update_rejected from every edge-proxy ($before)"
+
+  section "POST /v1/services — HTTPS, public_host $OSB_PUBLIC_HOST, host $OSB_DNS_UPSTREAM"
+  r="$(osb_call POST /v1/services \
+    "{\"name\":\"$OSB_HTTPS_SERVICE\",\"team\":\"$OSB_TEAM\",\"host\":\"$OSB_DNS_UPSTREAM\",\"port\":5678,\"public_host\":\"$OSB_PUBLIC_HOST\",\"protocol\":\"HTTPS\",\"tls_secret_name\":\"e2e-shop-cert\",\"auth_policy\":\"none\"}")"
+  echo "  POST /v1/services -> HTTP ${r%% *}  ${r#* }"
+  [ "${r%% *}" = 202 ] || die "PHASE21 FAIL: provision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+
+  section "GREEN — $OSB_PUBLIC_HOST:$port serves its own cert and the stub body"
+  local i=0
+  while :; do
+    out="$(SNI_PORT="$port" sni_get "$ip" "$OSB_PUBLIC_HOST")"
+    has "$out" "OSB-PROVISIONED-BACKEND" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out" | tail -15; die "PHASE21 FAIL: $OSB_PUBLIC_HOST:$port never served the stub"; }
+    sleep 2
+  done
+  echo "  $OSB_PUBLIC_HOST:$port -> $(printf '%s\n' "$out" | grep -m1 -i 'subject:' | sed 's/^[* ]*//')  body: OSB-PROVISIONED-BACKEND"
+  has "$out" "CN=$OSB_PUBLIC_HOST" || { printf '%s\n' "$out" | tail -15; die "PHASE21 FAIL: $OSB_PUBLIC_HOST was not served its own cert"; }
+
+  local ctype
+  ctype="$(envoy_config_dump "$(ep_pod)" | jq -r --arg n "osb-${OSB_TEAM}-${OSB_HTTPS_SERVICE}" \
+    '.configs[]? | .dynamic_active_clusters[]? | select(.cluster.name == $n) | .cluster.type' 2>/dev/null || true)"
+  echo "  Envoy cluster osb-${OSB_TEAM}-${OSB_HTTPS_SERVICE}: type ${ctype:-<absent>}"
+  [ "$ctype" = STRICT_DNS ] || die "PHASE21 FAIL: the DNS upstream is not a STRICT_DNS cluster (got '${ctype:-<absent>}')"
+
+  after="$(rejected_by_pod)"
+  echo "  update_rejected after:  $after"
+  [ "$after" = "$before" ] || die "PHASE21 FAIL: an Envoy refused the config this service produced (before: $before, after: $after)"
+  ok "GREEN — CN=$OSB_PUBLIC_HOST + OSB-PROVISIONED-BACKEND via a STRICT_DNS upstream; no Envoy refused an update"
+
+  section "DELETE /v1/services/$OSB_HTTPS_SERVICE — deprovision"
+  r="$(osb_call DELETE "/v1/services/$OSB_HTTPS_SERVICE")"
+  [ "${r%% *}" = 202 ] || die "PHASE21 FAIL: deprovision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  i=0
+  while :; do
+    out="$(SNI_PORT="$port" sni_get "$ip" "$OSB_PUBLIC_HOST")"
+    ! has "$out" "OSB-PROVISIONED-BACKEND" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || die "PHASE21 FAIL: $OSB_PUBLIC_HOST still served after deprovision"
+    sleep 2
+  done
+  ok "PHASE 21 — an OSB HTTPS service with a public host and a DNS upstream served, then deprovisioned"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1754,7 +1875,8 @@ main() {
   phase18_scim_oidc
   phase19_confidential
   phase20_sni_certs
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs."
+  phase21_osb_https_public_host
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

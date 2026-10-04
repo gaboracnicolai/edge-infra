@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +56,10 @@ class Settings(BaseSettings):
     # PROVISION_RETENTION_DAYS=0 to disable.
     provision_retention_days: int = 30
     provision_sweep_interval_s: float = 3600.0
+
+    # Port of the shared HTTPS listener every OSB HTTPS service lands on. Set it
+    # when :443 on the edge nodes already belongs to another gateway or ingress.
+    shared_https_port: int = Field(default=443, ge=1, le=65535)
 
     listen_addr: str = "0.0.0.0"  # noqa: S104 — broker binds in-cluster
     listen_port: int = 8080
