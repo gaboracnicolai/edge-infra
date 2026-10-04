@@ -168,7 +168,12 @@ verify_phase2() {
 # layer, so issuer/ratelimit/secrets/migrate are cheap after `server`. Rust
 # (auth-service) builds IN-container (BUILD_MODE=local) so the binary is linux/*,
 # not the host's darwin/arm64.
-phase3_images() {
+#
+# IMAGE_SOURCE=registry (make release-e2e) builds nothing: it pulls the eight
+# images the charts pin — deploy/hack/release-pin.sh --list, one tag for all —
+# and loads those under the same local names, so every later phase runs the
+# released images instead of the working tree.
+build_local_images() {
   section "PHASE 3 — build local images (tag ':$IMAGE_TAG') + load into kind"
 
   section "control-plane Go binaries (server, issuer, ratelimit, secrets, migrate, attest)"
@@ -186,6 +191,32 @@ phase3_images() {
   section "auth-service (Rust, built in-container so the binary is linux)"
   docker build -f "$REPO_ROOT/auth-service/Dockerfile" \
     --build-arg BUILD_MODE=local -t "auth-service:$IMAGE_TAG" "$REPO_ROOT/auth-service"
+}
+
+pull_release_images() {
+  section "PHASE 3 — pull the release-pinned images (no build) + load into kind as ':$IMAGE_TAG'"
+  local refs ref r name
+  refs="$(bash "$REPO_ROOT/deploy/hack/release-pin.sh" --list)" \
+    || die "the charts do not pin one release tag — run deploy/hack/release-pin.sh <tag> first"
+  for name in edge-control-plane edge-issuer edge-ratelimit edge-secrets edge-migrate \
+              edge-attest edge-osb auth-service; do
+    ref=""
+    while IFS= read -r r; do
+      case "$r" in */"$name":*) ref="$r" ;; esac
+    done <<<"$refs"
+    [ -n "$ref" ] || die "no chart pins $name — the release would not run it"
+    docker pull "$ref" || die "cannot pull $ref — is it pushed, and are you logged in to its registry?"
+    docker tag "$ref" "$name:$IMAGE_TAG"
+    ok "$name:$IMAGE_TAG <- $ref"
+  done
+}
+
+phase3_images() {
+  case "$IMAGE_SOURCE" in
+    build)    build_local_images ;;
+    registry) pull_release_images ;;
+    *) die "IMAGE_SOURCE is '$IMAGE_SOURCE' — build (the default) or registry" ;;
+  esac
 
   section "pulling public images (envoy, busybox)"
   docker pull "$ENVOY_IMAGE"

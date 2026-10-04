@@ -7,6 +7,11 @@ name: Kind Rollback
 # served before the enable. The real-cluster rollback is
 # docs/ext-authz-cutover-and-rollback.md §2; this keeps it honest.
 on:
+  # Nightly on main too: what drifts without a commit (a base image, a fetched
+  # manifest, a registry tag) shows up the next morning. internal/ciguard
+  # fails if a workflow has no schedule (B28.199).
+  schedule:
+    - cron: '17 3 * * *'
   push:
     branches: [main]
     paths:
@@ -52,7 +57,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: kind-rollback-${{ github.ref }}
+  group: kind-rollback-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

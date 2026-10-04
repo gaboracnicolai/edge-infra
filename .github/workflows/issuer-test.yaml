@@ -4,6 +4,11 @@ name: Issuer Test
 # store tests skip when ISSUER_TEST_DATABASE_URL is unset, so this is the job
 # that actually exercises them.
 on:
+  # Nightly on main too: what drifts without a commit (a base image, a fetched
+  # manifest, a registry tag) shows up the next morning. internal/ciguard
+  # fails if a workflow has no schedule (B28.199).
+  schedule:
+    - cron: '17 3 * * *'
   push:
     paths:
       - 'internal/issuer/**'
