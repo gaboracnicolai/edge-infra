@@ -6,10 +6,14 @@ import (
 	"time"
 
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	cachetypes "github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 
 	"github.com/edge-infra/control-plane/internal/store"
@@ -213,6 +217,50 @@ func TestBuildListeners_PerSNI_HasTLSInspector(t *testing.T) {
 	}
 	if l.ListenerFilters[0].GetTypedConfig() == nil {
 		t.Error("tls_inspector must carry a typed_config (Envoy rejects an untyped listener filter)")
+	}
+}
+
+// SNI BINDS THE HOST: each SNI chain reads a route config holding only its own
+// host, so a caller who handshakes as b.example (no client cert) and sends
+// Host: a.example finds no route — it cannot reach a's mtls route, whose
+// ext_authz is disabled because the client cert IS its auth.
+func TestBuildListeners_PerSNI_HostBoundToSNI(t *testing.T) {
+	gw := store.Gateway{ID: "https", Name: "osb-shared-https", Port: 443, Protocol: "HTTPS"}
+	routes := []store.Route{
+		{Name: "osb-a", GatewayID: "https", ClusterName: "osb-a", Hosts: []string{"a.example"}, PathPrefix: "/", TLSSecret: "sec-a", ClientCASecret: "ca-a", AuthPolicy: "mtls"},
+		{Name: "osb-b", GatewayID: "https", ClusterName: "osb-b", Hosts: []string{"b.example"}, PathPrefix: "/", TLSSecret: "sec-b", AuthPolicy: "none"},
+	}
+	ls := BuildListeners([]store.Gateway{gw}, routes, RateLimitOptions{}, ExtAuthzOptions{}, RateLimitServiceOptions{})
+	rcs := BuildRouteConfigs([]store.Gateway{gw}, routes, RateLimitServiceOptions{})
+
+	domainsByRC := map[string][]string{}
+	for _, res := range rcs {
+		rc := res.(*routev3.RouteConfiguration)
+		for _, vh := range rc.GetVirtualHosts() {
+			domainsByRC[rc.GetName()] = append(domainsByRC[rc.GetName()], vh.GetDomains()...)
+		}
+	}
+	for _, fc := range listenerFrom(t, ls[0]).FilterChains {
+		host := fc.GetFilterChainMatch().GetServerNames()[0]
+		var hcm hcmv3.HttpConnectionManager
+		if err := fc.Filters[0].GetTypedConfig().UnmarshalTo(&hcm); err != nil {
+			t.Fatalf("unmarshal hcm: %v", err)
+		}
+		rcName := hcm.GetRds().GetRouteConfigName()
+		if got := domainsByRC[rcName]; !slices.Equal(got, []string{host}) {
+			t.Errorf("SNI %s reads route config %q with domains %v; want only [%s]", host, rcName, got, host)
+		}
+	}
+
+	snap, err := cachev3.NewSnapshot("v", map[resourcev3.Type][]cachetypes.Resource{
+		resourcev3.ListenerType: ls,
+		resourcev3.RouteType:    rcs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snap.Consistent(); err != nil {
+		t.Errorf("every SNI chain's route config must be emitted, and no other: %v", err)
 	}
 }
 

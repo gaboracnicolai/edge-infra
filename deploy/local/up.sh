@@ -1614,12 +1614,13 @@ phase19_confidential() {
 # ---- Phase 20 — one HTTPS port, a cert per host (SNI via tls_inspector) -------
 SNI_PORT="${SNI_PORT:-9443}"
 
-# sni_get <node-ip> <host> — HTTPS to that node's shared SNI port with SNI and
-# Host <host>, from inside the kind network; curl -v output, then "curl-exit=N".
+# sni_get <node-ip> <host> [host-header] — HTTPS to that node's shared SNI port
+# with SNI <host> (and Host <host> unless overridden), from inside the kind
+# network; curl -v output, then "curl-exit=N".
 sni_get() {
   local out rc=0
   out="$(docker exec "${CLUSTER_NAME}-control-plane" curl -skv --max-time 6 \
-    --resolve "$2:$SNI_PORT:$1" "https://$2:$SNI_PORT/" 2>&1)" || rc=$?
+    --resolve "$2:$SNI_PORT:$1" -H "Host: ${3:-$2}" "https://$2:$SNI_PORT/" 2>&1)" || rc=$?
   printf '%s\ncurl-exit=%s\n' "$out" "$rc"
 }
 
@@ -1673,6 +1674,17 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
     has "$out" "$own" || die "PHASE20 FAIL: sni-$h.local did not reach $own"
   done
   ok "sni-a.local -> CN=sni-a.local + TENANT-A-BACKEND; sni-b.local -> CN=sni-b.local + TENANT-B-BACKEND, one port"
+
+  section "the Host is bound to the SNI: handshake as sni-b.local, ask for Host sni-a.local -> not tenant-a"
+  # No route matches, so Envoy answers itself: 404, or 401 from the global
+  # ext_authz (on since Phase 12) — anything but a 200 from tenant-a's backend.
+  local status
+  out="$(sni_get "$ip" sni-b.local sni-a.local)"
+  status="$(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' || true)"
+  echo "  SNI sni-b.local, Host sni-a.local -> ${status:-<no HTTP answer>}"
+  has "$out" "curl-exit=0" && [ -n "$status" ] && ! has "$status" " 200" && ! has "$out" "TENANT-A-BACKEND" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE20 FAIL: a request on sni-b.local's chain reached sni-a.local's route (or got no HTTP answer)"; }
+  ok "a Host from another SNI finds no route — one host's chain cannot reach another host's route"
 
   section "an SNI no route names fails the TLS handshake (no cert, no body)"
   out="$(sni_get "$ip" unknown.local)"

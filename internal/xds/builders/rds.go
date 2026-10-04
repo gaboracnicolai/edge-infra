@@ -1,6 +1,7 @@
 package builders
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,10 +26,32 @@ func BuildRouteConfigs(gateways []store.Gateway, routes []store.Route, rls RateL
 
 	out := make([]types.Resource, 0, len(gateways))
 	for _, g := range gateways {
+		// An SNI gateway's chains each read their own host's route config, and only
+		// those: Consistent() refuses a route config no listener references.
+		if hosts, _ := sniHosts(g, byGateway[g.ID]); len(hosts) > 0 {
+			for _, h := range hosts {
+				out = append(out, &routev3.RouteConfiguration{
+					Name:         SNIRouteConfigName(g.Name, h),
+					VirtualHosts: virtualHostsFor(g, routesForHost(byGateway[g.ID], h), rls),
+				})
+			}
+			continue
+		}
 		out = append(out, &routev3.RouteConfiguration{
 			Name:         RouteConfigName(g.Name),
 			VirtualHosts: virtualHostsFor(g, byGateway[g.ID], rls),
 		})
+	}
+	return out
+}
+
+// routesForHost returns the routes that list host among their hosts.
+func routesForHost(routes []store.Route, host string) []store.Route {
+	var out []store.Route
+	for _, r := range routes {
+		if slices.Contains(r.Hosts, host) {
+			out = append(out, r)
+		}
 	}
 	return out
 }

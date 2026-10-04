@@ -21,6 +21,13 @@ func RouteConfigName(gatewayName string) string {
 	return gatewayName + "_routes"
 }
 
+// SNIRouteConfigName names the route config one SNI filter chain of an HTTPS
+// gateway reads: only that host's routes, so a request's Host cannot reach a
+// route behind a different SNI (and a different client-cert requirement).
+func SNIRouteConfigName(gatewayName, host string) string {
+	return gatewayName + "_routes_sni_" + host
+}
+
 func mustAny(msg proto.Message) *anypb.Any {
 	a, err := anypb.New(msg)
 	if err != nil {
