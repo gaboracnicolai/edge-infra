@@ -41,6 +41,9 @@ type Server struct {
 	// throttle gates repeated failed logins per (client IP + account) before the
 	// expensive argon2 verify runs.
 	throttle *Throttle
+	// scim and sso are nil unless enabled (EnableSCIM / EnableSSO).
+	scim *scimHandler
+	sso  *ssoHandler
 }
 
 // NewServer constructs the HTTP server.
@@ -51,6 +54,23 @@ func NewServer(store LoginStore, minter *Minter, keys *KeySet, log *slog.Logger)
 	return &Server{store: store, minter: minter, keys: keys, log: log, dummyHash: dummy, throttle: throttle}
 }
 
+// EnableSCIM serves SCIM 2.0 user provisioning under /scim/v2, for callers
+// presenting token as a bearer token.
+func (s *Server) EnableSCIM(store SCIMStore, token string) {
+	s.scim = &scimHandler{store: store, token: []byte(token), log: s.log}
+}
+
+// EnableSSO serves sign-in through the customer's OIDC identity provider
+// under /sso.
+func (s *Server) EnableSSO(cfg SSOConfig, store SSOStore) error {
+	h, err := newSSOHandler(cfg, store, s.minter, s.log)
+	if err != nil {
+		return err
+	}
+	s.sso = h
+	return nil
+}
+
 // Routes returns the mux. Method-qualified patterns require Go 1.22+.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
@@ -58,6 +78,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	if s.scim != nil {
+		s.scim.routes(mux)
+	}
+	if s.sso != nil {
+		s.sso.routes(mux)
+	}
 	return mux
 }
 
@@ -109,7 +135,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Fail closed: a disabled account or any password mismatch is denied with
 	// the same generic message, so the response never reveals which check
 	// failed.
-	if login.Disabled {
+	// A SCIM-provisioned user has no password (''): it signs in through OIDC
+	// only. Burn the same verify time so the response does not reveal that.
+	if login.PasswordHash == "" {
+		_, _ = VerifyPassword(s.dummyHash, req.Password)
+	}
+	if login.Disabled || login.PasswordHash == "" {
 		s.throttle.Fail(key)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return

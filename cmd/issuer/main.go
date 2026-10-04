@@ -75,6 +75,16 @@ func runServe(log *slog.Logger) error {
 	}
 	minter := issuer.NewMinter(keys, cfg.IssuerURL, cfg.Audience, cfg.TokenTTL)
 	srv := issuer.NewServer(store, minter, keys, log)
+	if cfg.SCIMToken != "" {
+		srv.EnableSCIM(store, cfg.SCIMToken)
+		log.Info("SCIM provisioning enabled at /scim/v2")
+	}
+	if cfg.SSO != nil {
+		if err := srv.EnableSSO(*cfg.SSO, store); err != nil {
+			return err
+		}
+		log.Info("OIDC sign-in enabled at /sso/login", "idp", cfg.SSO.Issuer)
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,

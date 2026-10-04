@@ -28,6 +28,8 @@
 #  14  fail-static guard counters exported as metrics (live, red-first)
 #  15  OSB broker answers; a service it provisions is served through Envoy
 #  16  two nodes serve two tenants; each node's SDS holds only its own key (XDS-1)
+#  17  the charts' NetworkPolicies refuse a pod outside the allowed flows (red-first)
+#  18  a user created through SCIM signs in through OIDC (Dex as the IdP)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -294,10 +296,17 @@ phase5_secrets() {
     --from-literal=ALLOW_UNTENANTED="true"
 
   # edge-issuer: its own DB + iss/aud (self-migrated by the chart's migrate Job).
+  # SCIM + OIDC sign-in are on from the start: the IdP (Dex, Phase 18) is
+  # discovered on first sign-in, so the issuer boots without it.
   apply_secret "$INFRA_NS" generic issuer-secrets \
     --from-literal=ISSUER_URL="$ISSUER_URL" \
     --from-literal=ISSUER_AUDIENCE="$AUD" \
-    --from-literal=ISSUER_DATABASE_URL="$ISSUER_DSN"
+    --from-literal=ISSUER_DATABASE_URL="$ISSUER_DSN" \
+    --from-literal=ISSUER_SCIM_TOKEN="$SCIM_TOKEN" \
+    --from-literal=ISSUER_OIDC_ISSUER="https://dex.${INFRA_NS}.svc.cluster.local:5556/dex" \
+    --from-literal=ISSUER_OIDC_CLIENT_ID="edge-issuer" \
+    --from-literal=ISSUER_OIDC_CLIENT_SECRET="local-dev-dex-client-secret" \
+    --from-literal=ISSUER_OIDC_REDIRECT_URL="${ISSUER_URL}/sso/callback"
   apply_secret "$INFRA_NS" generic issuer-signing-keys \
     --from-file=k1.pem="$PKI/k1.pem"
 
@@ -400,6 +409,13 @@ diag_fail() {  # <release> <ns> — dump why a chart didn't come up, then stop.
 
 phase7_deploy() {
   section "PHASE 7 — deploy charts (dev overlays, extAuthz OFF)"
+  # The local overlays switch the charts' NetworkPolicies on with the gateway
+  # (hostNetwork edge-proxy) allowed from 172.16.0.0/12. A node outside it
+  # would be cut off from the control-plane, so stop here rather than later.
+  local nip
+  for nip in $(k get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' | grep -E '^[0-9.]+$'); do
+    in_gateway_cidr "$nip" || die "node IP $nip is outside 172.16.0.0/12, the gateway CIDR in deploy/local/values — set networkPolicy.gatewayCIDRs to this cluster's node network"
+  done
   # Order encodes dependencies: control-plane (xDS) first; issuer before
   # auth-service (which fetches the issuer JWKS at startup); proxy after the
   # control-plane is serving xDS.
@@ -1310,6 +1326,166 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   ok "PHASE 16 — per-node SDS scoping proven on two nodes, through a reconnect"
 }
 
+# ---- Phase 17 — the charts' NetworkPolicies refuse a pod outside the flows ----
+# reach <ns> <deploy> <host> <port> — "connected" when a TCP connection from that
+# workload opens (whatever the protocol says after), "dropped" when it never
+# does, "error" when the probe itself could not run.
+reach() {
+  local t
+  t="$(k -n "$1" exec "deploy/$2" -- curl -sk --connect-timeout 4 -m 6 -o /dev/null -w '%{time_connect}' "https://$3:$4/" 2>/dev/null || true)"
+  reach_verdict "$t"
+}
+# reach_from_node <node> <ip> <port> — the same probe from a kind node, i.e. from
+# the node network the hostNetwork gateway sends from.
+reach_from_node() {
+  local t
+  t="$(docker exec "$1" curl -sk --connect-timeout 4 -m 6 -o /dev/null -w '%{time_connect}' "https://$2:$3/" 2>/dev/null || true)"
+  reach_verdict "$t"
+}
+reach_verdict() {
+  if [ -z "$1" ]; then echo error
+  elif awk -v t="$1" 'BEGIN { exit !(t + 0 > 0) }'; then echo connected
+  else echo dropped; fi
+}
+reach_is() { local want="$1"; shift; [ "$(reach "$@")" = "$want" ]; }
+
+phase17_network_policy() {
+  section "PHASE 17 — the charts' NetworkPolicies: a pod outside the allowed flows is refused (red-first)"
+  k -n "$INFRA_NS" get networkpolicy
+  wait_rollout deploy/attacker sec3-attacker 60s
+  local atk_ip; atk_ip="$(k -n sec3-attacker get pod -l app=attacker -o jsonpath='{.items[0].status.podIP}')"
+  log "attacker pod $atk_ip (namespace sec3-attacker — no chart allows it)"
+  local AS="auth-service.${INFRA_NS}.svc.cluster.local"
+
+  # RED first: auth-service's policy switched off, the attacker reaches ext_authz.
+  section "RED — auth-service NetworkPolicy OFF: the attacker reaches ext_authz :50051"
+  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
+    --set networkPolicy.enabled=false --wait --timeout 120s >/dev/null
+  k -n "$INFRA_NS" get networkpolicy auth-service >/dev/null 2>&1 && die "RED setup: auth-service NetworkPolicy still present"
+  retry 15 2 reach_is connected sec3-attacker attacker "$AS" 50051 \
+    || die "RED baseline broken: the attacker cannot reach auth-service:50051 even with no policy"
+  ok "RED — no policy: attacker($atk_ip) -> auth-service:50051 connected"
+
+  section "GREEN — auth-service NetworkPolicy back ON: the same connection is dropped"
+  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
+    --set networkPolicy.enabled=true --wait --timeout 120s >/dev/null
+  retry 15 2 reach_is dropped sec3-attacker attacker "$AS" 50051 \
+    || die "GREEN FAIL: auth-service:50051 still reachable from the attacker with the chart's policy on"
+  ok "GREEN — chart policy on: attacker($atk_ip) -> auth-service:50051 dropped"
+
+  # Every chart port, two sources each: the attacker (refused) and a node, the
+  # gateway's own source (allowed) — so a drop is the policy, not a dead pod.
+  section "every chart's port: attacker dropped, gateway (node network) allowed"
+  local node="${CLUSTER_NAME}-worker2" t svc port ip eps r
+  for t in auth-service:50051:gw edge-control-plane:18000:gw edge-issuer:8081:gw \
+           edge-osb:8080:gw edge-ratelimit:8082:gw edge-secrets:8082:none; do
+    svc="${t%%:*}"; port="$(printf '%s' "$t" | cut -d: -f2)"
+    eps="$(k -n "$INFRA_NS" get endpoints "$svc" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
+    if [ -z "$eps" ]; then warn "$svc has no ready endpoints — skipped (a refused connection would prove nothing)"; continue; fi
+    r="$(reach sec3-attacker attacker "$svc.${INFRA_NS}.svc.cluster.local" "$port")"
+    echo "  attacker -> $svc:$port  =>  $r"
+    [ "$r" = dropped ] || die "$svc:$port NOT refused to a pod outside the allowed flows ($r)"
+    if [ "${t##*:}" = gw ]; then
+      ip="$(k -n "$INFRA_NS" get svc "$svc" -o jsonpath='{.spec.clusterIP}')"
+      r="$(reach_from_node "$node" "$ip" "$port")"
+      echo "  node $node -> $svc:$port  =>  $r"
+      [ "$r" = connected ] || die "$svc:$port refused to the gateway's node network ($r) — the policy blocks an allowed flow"
+    fi
+  done
+  ok "PHASE 17 — every chart refuses a pod outside its allowed flows; the gateway's flows stay open"
+}
+
+# ---- Phase 18 — a user created through SCIM signs in through OIDC -------------
+ISSUER_HTTPS="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"
+SSO_EMAIL="sso-user@corp.local"   # Dex's static user (manifests/dex.yaml)
+SSO_PASS="password"
+
+# scim <method> <path> [json] — the IdP's SCIM client, from the minter pod.
+# Prints the body, then a last line HTTP=<code>.
+scim() {
+  if [ -n "${3:-}" ]; then
+    k -n tenant-secure exec minter -- curl -sk --max-time 10 -X "$1" "$ISSUER_HTTPS/scim/v2$2" \
+      -H "Authorization: Bearer $SCIM_TOKEN" -H 'Content-Type: application/scim+json' -d "$3" -w '\nHTTP=%{http_code}'
+  else
+    k -n tenant-secure exec minter -- curl -sk --max-time 10 -X "$1" "$ISSUER_HTTPS/scim/v2$2" \
+      -H "Authorization: Bearer $SCIM_TOKEN" -w '\nHTTP=%{http_code}'
+  fi
+}
+
+# sso_sign_in — a browser's OIDC sign-in, from the minter pod: /sso/login on the
+# issuer -> Dex's login form; post Dex the user's password -> Dex redirects to
+# the issuer's /sso/callback, which answers. Body, then HTTP=<code>.
+sso_sign_in() {
+  k -n tenant-secure exec minter -- sh -c '
+    J=/tmp/sso-jar; rm -f "$J"
+    form="$(curl -sk --max-time 10 -L -c "$J" -b "$J" -o /dev/null -w "%{url_effective}" "$1/sso/login")"
+    curl -sk --max-time 10 -L -c "$J" -b "$J" -w "\nHTTP=%{http_code}" \
+      --data-urlencode "login=$2" --data-urlencode "password=$3" "$form"
+  ' sh "$ISSUER_HTTPS" "$SSO_EMAIL" "$SSO_PASS"
+}
+
+http_of() { printf '%s' "${1##*HTTP=}"; }
+body_of() { printf '%s' "${1%HTTP=*}"; }
+
+phase18_scim_oidc() {
+  section "PHASE 18 — a user created through SCIM signs in through OIDC (Dex stands in for the customer's IdP)"
+  if docker pull "$DEX_IMAGE" >/dev/null 2>&1; then kind load docker-image --name "$CLUSTER_NAME" "$DEX_IMAGE" >/dev/null 2>&1 || true; fi
+  k apply -f "$LOCAL_DIR/manifests/dex.yaml"
+  k -n "$INFRA_NS" wait --for=condition=Ready certificate/dex-cert --timeout=120s >/dev/null
+  wait_rollout deploy/dex "$INFRA_NS" 180s
+  k -n tenant-secure wait --for=condition=Ready pod/minter --timeout=60s >/dev/null
+
+  section "reset — delete $SSO_EMAIL if an earlier run left it"
+  local out filter id
+  filter="$(jq -rn --arg f "userName eq \"$SSO_EMAIL\"" '$f|@uri')"
+  out="$(scim GET "/Users?filter=$filter")"
+  [ "$(http_of "$out")" = 200 ] || die "SCIM list refused: $out"
+  for id in $(body_of "$out" | jq -r '.Resources[]?.id'); do
+    [ "$(http_of "$(scim DELETE "/Users/$id")")" = 204 ] || die "could not delete leftover user $id"
+    log "deleted leftover $id"
+  done
+
+  section "RED — before SCIM provisions $SSO_EMAIL, Dex signs them in and the issuer refuses"
+  out="$(sso_sign_in)"
+  echo "  sign-in -> HTTP $(http_of "$out")  $(body_of "$out" | tr -d '\n')"
+  [ "$(http_of "$out")" = 403 ] || die "RED FAIL: an IdP user SCIM never created got HTTP $(http_of "$out")"
+  has "$(body_of "$out")" "not provisioned" || die "RED FAIL: refused for the wrong reason: $out"
+  ok "RED — the IdP vouched for $SSO_EMAIL, and the issuer refused: not provisioned"
+
+  section "SCIM — the IdP creates $SSO_EMAIL (POST /scim/v2/Users)"
+  out="$(scim POST /Users "{\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:User\"],\"userName\":\"$SSO_EMAIL\",\"name\":{\"givenName\":\"SSO\",\"familyName\":\"User\"},\"externalId\":\"dex-08a8684b\",\"active\":true}")"
+  [ "$(http_of "$out")" = 201 ] || die "SCIM create failed: $out"
+  id="$(body_of "$out" | jq -r .id)"
+  [ "$(body_of "$out" | jq -r '.active')" = true ] || die "SCIM create: user not active: $out"
+  ok "SCIM created $SSO_EMAIL as user $id"
+
+  section "GREEN — the same Dex sign-in now yields a gateway token, and the gateway serves the SCIM user"
+  out="$(sso_sign_in)"
+  [ "$(http_of "$out")" = 200 ] || die "GREEN FAIL: provisioned user's OIDC sign-in got HTTP $(http_of "$out"): $(body_of "$out")"
+  local TOK c b low
+  TOK="$(body_of "$out" | jq -r '.access_token // empty')"
+  [ -n "$TOK" ] || die "GREEN FAIL: sign-in answered 200 without an access_token: $out"
+  c="$(gw_code secure.local -H "Authorization: Bearer $TOK")"
+  b="$(gw_body secure.local -H "Authorization: Bearer $TOK")"
+  low="$(printf '%s' "$b" | tr 'A-Z' 'a-z')"
+  printf '%s\n' "$b" | grep -iE 'X-User-Id|X-User-Email' | sed 's/^/    /'
+  [ "$c" = 200 ] || die "GREEN FAIL: the gateway refused the SSO token (HTTP $c)"
+  has "$low" "x-user-email: $SSO_EMAIL" || die "GREEN FAIL: whoami did not see x-user-email $SSO_EMAIL"
+  has "$low" "x-user-id: $id" || die "GREEN FAIL: whoami did not see x-user-id $id (the SCIM user)"
+  ok "GREEN — signed in through OIDC; secure.local served to x-user-email=$SSO_EMAIL x-user-id=$id"
+
+  section "SCIM deprovision — PATCH active=false, and the next Dex sign-in is refused"
+  out="$(scim PATCH "/Users/$id" '{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"active","value":false}]}')"
+  [ "$(http_of "$out")" = 200 ] && [ "$(body_of "$out" | jq -r .active)" = false ] || die "SCIM deactivate failed: $out"
+  out="$(sso_sign_in)"
+  echo "  sign-in -> HTTP $(http_of "$out")  $(body_of "$out" | tr -d '\n')"
+  [ "$(http_of "$out")" = 403 ] || die "deprovisioned user's sign-in got HTTP $(http_of "$out") (expected 403)"
+  ok "deactivated by SCIM -> sign-in refused"
+
+  [ "$(http_of "$(scim DELETE "/Users/$id")")" = 204 ] || die "SCIM delete failed"
+  ok "PHASE 18 — SCIM-provisioned user signed in through OIDC and reached the gateway; unprovisioned and deprovisioned were refused"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -1335,7 +1511,9 @@ main() {
   phase14_failstatic_metrics
   phase15_osb_broker
   phase16_sds_scope
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS."
+  phase17_network_policy
+  phase18_scim_oidc
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

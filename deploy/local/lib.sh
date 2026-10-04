@@ -39,6 +39,10 @@ ATTACKER_IMAGE="${ATTACKER_IMAGE:-curlimages/curl:8.11.1}"
 # Header-reflecting backend for the ext_authz proof (Phase 12): whoami echoes the
 # request headers so the auth-service's injected identity headers are visible.
 WHOAMI_IMAGE="${WHOAMI_IMAGE:-traefik/whoami:v1.10.4}"
+DEX_IMAGE="${DEX_IMAGE:-ghcr.io/dexidp/dex:v2.41.1}"
+
+# SCIM bearer token the local issuer accepts (Phase 5 secret, Phase 18 client).
+SCIM_TOKEN="local-dev-scim-token-0123456789abcdef"
 
 # ---- logging -----------------------------------------------------------------
 if [ -t 1 ]; then
@@ -82,6 +86,10 @@ has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 # network is always a /16 (e.g. 172.19.0.0/16); the trailing "." in the glob
 # stops 172.190.x from matching 172.19. No external tools.
 in_cidr16() { case "$2" in "$1".*) return 0 ;; *) return 1 ;; esac; }
+
+# in_gateway_cidr <ip> — inside 172.16.0.0/12, the gateway CIDR the local chart
+# overlays allow through the charts' NetworkPolicies (B27.33).
+in_gateway_cidr() { case "$1" in 172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;; *) return 1 ;; esac; }
 
 # attacker_get <ip> <port> — curl from the SEC-3 attacker pod (pod-network).
 # Echoes "code=<http_code> <body>". A Calico drop => curl -m times out => the

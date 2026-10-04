@@ -71,6 +71,20 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: ISSUER_DATABASE_URL
+            # SCIM provisioning and OIDC sign-in: each is switched on by its keys
+            # in config.existingSecret; an absent key leaves the feature off.
+            {{- range $k := list "ISSUER_SCIM_TOKEN" "ISSUER_OIDC_ISSUER" "ISSUER_OIDC_CLIENT_ID" "ISSUER_OIDC_CLIENT_SECRET" "ISSUER_OIDC_REDIRECT_URL" }}
+            - name: {{ $k }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.config.existingSecret }}
+                  key: {{ $k }}
+                  optional: true
+            {{- end }}
+            {{- with .Values.sso.caFile }}
+            - name: ISSUER_OIDC_CA_FILE
+              value: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             - name: signing-keys
               mountPath: {{ .Values.signingKeys.mountPath }}

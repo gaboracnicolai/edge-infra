@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/envoyproxy/go-control-plane v0.13.4
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4
 	github.com/go-logr/logr v1.4.3
@@ -12,6 +13,7 @@ require (
 	github.com/redis/go-redis/v9 v9.20.0
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/crypto v0.32.0
+	golang.org/x/oauth2 v0.24.0
 	google.golang.org/grpc v1.70.0
 	google.golang.org/protobuf v1.36.4
 	k8s.io/api v0.30.5
@@ -31,6 +33,7 @@ require (
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.0.5 // indirect
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.3 // indirect
@@ -64,7 +67,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/net v0.34.0 // indirect
-	golang.org/x/oauth2 v0.24.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/term v0.28.0 // indirect

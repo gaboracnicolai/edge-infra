@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny ingress (B27.33): when networkPolicy.enabled, the pods below
+# accept only the flows listed; everything else is dropped by Calico (or any
+# CNI that enforces NetworkPolicy). Kubelet probes still pass — traffic from a
+# pod's own node is never blocked.
+{{- if not .Values.networkPolicy.gatewayCIDRs }}
+{{- fail "networkPolicy.gatewayCIDRs is required when networkPolicy.enabled: the CIDR(s) of the nodes running edge-proxy (Envoy runs hostNetwork, so its traffic carries the node IP)" }}
+{{- end }}
+# The rate-limit service (gRPC) from the gateway only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "edge-ratelimit.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-ratelimit.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "edge-ratelimit.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.gatewayCIDRs }}
+        - ipBlock: { cidr: {{ . | quote }} }
+        {{- end }}
+        {{- with .Values.networkPolicy.gatewayNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: grpc }
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

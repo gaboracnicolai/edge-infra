@@ -18,3 +18,11 @@ worker:
 # refuses plaintext NATS once NATS_TLS_CA is set). DB_SSL_MODE=disable is instead
 # supplied via the edge-osb-secrets envFrom.
 tls: null
+
+# NetworkPolicy ON locally (B27.33), so every phase runs under the charts'
+# default-deny. 172.16.0.0/12 holds the kind node network (the hostNetwork
+# edge-proxy's source) and excludes the 192.168.0.0/16 pod CIDR; Phase 7 checks
+# every node IP falls inside it.
+networkPolicy:
+  enabled: true
+  gatewayCIDRs: ["172.16.0.0/12"]

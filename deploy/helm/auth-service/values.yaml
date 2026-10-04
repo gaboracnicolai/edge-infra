@@ -39,3 +39,21 @@ podAnnotations:
 
 nameOverride: ""
 fullnameOverride: ""
+
+# NetworkPolicy (B27.33): default-deny ingress to this chart's pods, allowing
+# only the flows in templates/networkpolicy.yaml. Enforced by Calico (or any
+# CNI that enforces NetworkPolicy). OFF in the base values, like extAuthz:
+# ArgoCD syncs base values, and switching it on without the right gatewayCIDRs
+# cuts the gateway off. Switch it on in an env overlay, with that cluster's CIDRs.
+networkPolicy:
+  enabled: false
+  # CIDR(s) of the nodes running edge-proxy. Envoy runs hostNetwork, so its
+  # traffic carries the NODE IP, which no pod or namespace selector matches.
+  # Required when enabled — the chart refuses to render without it.
+  gatewayCIDRs: []
+  # Pods in this namespace count as the gateway too.
+  gatewayNamespace: edge
+  # More ingress rules, appended as written, e.g. Prometheus on the metrics port:
+  #   - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]
+  #     ports: [{port: metrics}]
+  extraIngress: []
