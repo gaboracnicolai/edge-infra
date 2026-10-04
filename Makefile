@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins test-integration argocd-apply argocd-diff docker-build-local kind-e2e kind-cutover kind-rollback
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -74,6 +74,13 @@ test-integration:
 # What each step proves: docs/self-host-claims.md.
 kind-e2e:
 	bash deploy/local/e2e.sh
+
+# kind-e2e on the RELEASE instead of the working tree: nothing is built; every
+# first-party image is pulled from the registry at the one tag the charts pin
+# (bash deploy/hack/release-pin.sh <tag> first). Same tools and host ports as
+# kind-e2e, plus a login to the registry for its private packages.
+release-e2e:
+	IMAGE_SOURCE=registry bash deploy/local/e2e.sh
 
 # The CFG-1 launch-day cutover rehearsed in order on a throwaway kind cluster:
 # main as committed (the image pin serves nothing) -> image bump -> auth-service

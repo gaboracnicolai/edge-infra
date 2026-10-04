@@ -5,6 +5,11 @@ name: Deploy Test
 # no cluster. Closes the gap where deploy/** changes ran no CI, so a revert of
 # xds.tls.enabled back to plaintext would otherwise pass CI silently.
 on:
+  # Nightly on main too: what drifts without a commit (a base image, a fetched
+  # manifest, a registry tag) shows up the next morning. internal/ciguard
+  # fails if a workflow has no schedule (B28.199).
+  schedule:
+    - cron: '17 3 * * *'
   push:
     paths:
       - 'deploy/**'

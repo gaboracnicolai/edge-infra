@@ -6,6 +6,11 @@ name: Kind E2E
 # deleted. Runs when a chart, its dev overlay, or the harness itself changes.
 # What each step proves: docs/self-host-claims.md.
 on:
+  # Nightly on main too: what drifts without a commit (a base image, a fetched
+  # manifest, a registry tag) shows up the next morning. internal/ciguard
+  # fails if a workflow has no schedule (B28.199).
+  schedule:
+    - cron: '17 3 * * *'
   push:
     branches: [main]
     paths:
@@ -51,7 +56,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: kind-e2e-${{ github.ref }}
+  group: kind-e2e-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

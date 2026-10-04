@@ -14,6 +14,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-edge-local}"
 KUBE_CONTEXT="kind-${CLUSTER_NAME}"
 INFRA_NS="${INFRA_NS:-infra}"                 # all edge-infra services live here
 IMAGE_TAG="${IMAGE_TAG:-local}"               # local image tag the charts point at
+IMAGE_SOURCE="${IMAGE_SOURCE:-build}"         # build | registry (the release-pinned images; up.sh Phase 3)
 
 # Pinned dependency versions (fetched at run time, like any kind bootstrap).
 # up.sh fails loudly if a URL is unreachable rather than standing up half a stack.

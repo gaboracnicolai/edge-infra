@@ -4,6 +4,11 @@ name: Policy Test
 # cluster needed. This proves the gateway-only guarantee (LoadBalancer /
 # NodePort backend Services are denied) before it ever reaches a cluster.
 on:
+  # Nightly on main too: what drifts without a commit (a base image, a fetched
+  # manifest, a registry tag) shows up the next morning. internal/ciguard
+  # fails if a workflow has no schedule (B28.199).
+  schedule:
+    - cron: '17 3 * * *'
   push:
     paths:
       - 'k8s/policies/**'

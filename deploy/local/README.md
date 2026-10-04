@@ -8,6 +8,7 @@ security proofs build on.
 ```
 git clone … && cd edge-infra
 make kind-e2e             # ONE command: create cluster, run every phase, delete cluster
+make release-e2e          # the same, on the registry images the charts pin (nothing built)
 make kind-cutover         # the CFG-1 launch-day cutover, in order, on its own cluster
 make kind-rollback        # the ext_authz rollback, from the cutover state, on its own cluster
 deploy/local/up.sh        # stand everything up (idempotent, re-runnable)
@@ -19,6 +20,13 @@ deploy/local/down.sh      # tear the cluster down
 for debugging). CI runs it on every change to a chart, the dev overlays, `k8s/` or this
 directory (`.github/workflows/kind-e2e.yaml`). Which self-host page claim each phase proves:
 [docs/self-host-claims.md](../../docs/self-host-claims.md).
+
+`make release-e2e` runs the same phases on a release instead of the working tree: it builds
+nothing, and pulls every first-party image at the one tag the charts pin — so pin them first,
+`bash deploy/hack/release-pin.sh <tag>` (and `docker login ghcr.io`: two of the eight packages
+are private). `.github/workflows/release.yaml` does exactly that every night: it builds and
+pushes all eight images at main's HEAD, pins every chart to that SHA, runs `release-e2e`, and
+uploads the pinned charts as the run's `edge-charts-<sha>` artifact.
 
 `make kind-cutover` (`deploy/local/cutover.sh`) rehearses the launch-day order on its own
 cluster (`edge-cutover`): main as committed (the control-plane image pin, which serves

@@ -13,6 +13,11 @@ name: OSB Test
 # the fast pytest gate harmlessly also runs on internal/store|secrets/** changes
 # (the mock suite is DB-free and unaffected).
 on:
+  # Nightly on main too: what drifts without a commit (a base image, a fetched
+  # manifest, a registry tag) shows up the next morning. internal/ciguard
+  # fails if a workflow has no schedule (B28.199).
+  schedule:
+    - cron: '17 3 * * *'
   push:
     paths:
       - 'osb/**'

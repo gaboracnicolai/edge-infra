@@ -335,17 +335,39 @@ func collectBuildInputs(t *testing.T, root string, tracked []string, builds []do
 	return out
 }
 
-// workflowFile is the slice of a workflow this guard reads.
+// workflowFile is the slice of a workflow the guards in this package read.
 type workflowFile struct {
-	On map[string]*struct {
-		Paths       []string `yaml:"paths"`
-		PathsIgnore []string `yaml:"paths-ignore"`
-	} `yaml:"on"`
+	On   map[string]*workflowTrigger `yaml:"on"`
 	Jobs map[string]struct {
 		Steps []struct {
 			Run string `yaml:"run"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
+}
+
+// workflowTrigger is one `on:` event: a mapping for push / pull_request, and for
+// `schedule:` a list of `- cron:` entries.
+type workflowTrigger struct {
+	Paths       []string `yaml:"paths"`
+	PathsIgnore []string `yaml:"paths-ignore"`
+	Crons       []string `yaml:"-"`
+}
+
+func (w *workflowTrigger) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.SequenceNode {
+		var entries []struct {
+			Cron string `yaml:"cron"`
+		}
+		if err := n.Decode(&entries); err != nil {
+			return err
+		}
+		for _, e := range entries {
+			w.Crons = append(w.Crons, e.Cron)
+		}
+		return nil
+	}
+	type plain workflowTrigger
+	return n.Decode((*plain)(w))
 }
 
 // ghGlob compiles a GitHub Actions path filter: `**` crosses '/', `*` does not.
