@@ -11,7 +11,7 @@ image:
 migrate:
   image:
     repository: ghcr.io/gaboracnicolai/edge-migrate
-    tag: "latest"  # pin to the SHA you pushed
+    tag: "ad3eed7c31f72c3f7892cf9ce1270bacd7a9f13e"  # pin to the SHA you pushed
     pullPolicy: IfNotPresent
   resources: {}
 

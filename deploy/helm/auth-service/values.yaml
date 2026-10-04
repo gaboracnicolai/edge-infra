@@ -78,7 +78,7 @@ confidential:
   attestation:
     image:
       repository: ghcr.io/gaboracnicolai/edge-attest
-      tag: "latest"  # pin to the SHA you pushed
+      tag: "ad3eed7c31f72c3f7892cf9ce1270bacd7a9f13e"  # pin to the SHA you pushed
       pullPolicy: IfNotPresent
     # The attester's evidence endpoint; the gate adds ?runtime_data=<nonce>. The
     # default is the Confidential Containers attestation agent inside the guest.

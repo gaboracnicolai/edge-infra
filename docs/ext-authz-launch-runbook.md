@@ -106,7 +106,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://launch-canary.<domain>/        
 **Do:** open a PR to `values-control-plane.yaml` with the following, and do not touch `extAuthz`:
 ```yaml
 image:   {tag: "<SHA>"}
-migrate: {image: {tag: "<SHA>"}}   # the base pins the migrator hook to "latest"
+migrate: {image: {tag: "<SHA>"}}   # the base pins the migrator hook to an older build
 adminApi: {existingSecret: edge-cp-admin}
 ```
 Merge it and wait for ArgoCD to sync.
