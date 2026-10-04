@@ -37,7 +37,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-const envoyImage = "envoyproxy/envoy:v1.30.0"
+const envoyImage = "envoyproxy/envoy:v1.39.2@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85"
 
 func TestXDSRealEnvoyTLSVersion(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {

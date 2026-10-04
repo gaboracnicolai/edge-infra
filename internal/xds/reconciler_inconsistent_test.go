@@ -94,9 +94,10 @@ func TestReconcile_CatchUpFansOutLastGoodNotBlocked(t *testing.T) {
 	// A NEW proxy connects after the block.
 	const late = "late-after-block"
 	respCh := make(chan cachev3.Response, 1)
-	cancel := cache.CreateWatch(
+	cancel, err := cache.CreateWatch(
 		&cachev3.Request{Node: &corev3.Node{Id: late}, TypeUrl: resourcev3.ClusterType},
-		streamv3.NewStreamState(true, nil), respCh)
+		streamv3.NewSotwSubscription(nil, true), respCh)
+	require.NoError(t, err)
 	defer cancel()
 
 	// Config returns to the healthy set (unchanged hash → fast path → catch-up).

@@ -28,7 +28,7 @@ KYVERNO_VERSION="${KYVERNO_VERSION:-v1.16.0}"
 
 # Public images the stack pulls (pinned to the chart defaults). Loaded into the
 # cluster in Phase 3 to avoid docker-hub pull limits at pod-creation time.
-ENVOY_IMAGE="${ENVOY_IMAGE:-envoyproxy/envoy:v1.30.0@sha256:d7d501253a93f0b5fce8e0d3a24f3bef67372c50ed7ea922279c72fc1200be58}"
+ENVOY_IMAGE="${ENVOY_IMAGE:-envoyproxy/envoy:v1.39.2@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85}"
 BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}"
 # Trivial echo backend for the two tenants (Phase 8). Kept in sync with
 # deploy/local/manifests/tenants.yaml.
