@@ -826,9 +826,15 @@ phase12_extauthz_cutover() {
   # ================= THE FLIP ==========
   section "THE FLIP — ext_authz ON (live)"
   helm_set_extauthz true
-  local i=0
-  while [ "$i" -lt 25 ]; do has "$(envoy_config_dump "$(ep_pod)")" secure.local && break; i=$((i + 1)); sleep 2; done
-  has "$(envoy_config_dump "$(ep_pod)")" secure.local || die "FLIP FAIL: secure.local not published after enabling ext_authz"
+  # Wait until it is published AND gated on the gateway that serves :443 (no
+  # token => 401), and assert on that same result: edge-proxy has just rolled, so
+  # a second, separate dump can land on the other pod before its snapshot does.
+  local i=0 flipped=0
+  while [ "$i" -lt 25 ]; do
+    if has "$(envoy_config_dump "$(ep_pod)")" secure.local && [ "$(gw_code secure.local)" = 401 ]; then flipped=1; break; fi
+    i=$((i + 1)); sleep 2
+  done
+  [ "$flipped" = 1 ] || die "FLIP FAIL: secure.local not published (and gated, 401 without a token) after enabling ext_authz"
   ok "FLIP done — ext_authz ON; secure.local published (now gated by ext_authz)"
 
   # ================= PROPERTY 1 — valid JWT -> 200 + trusted injection (red-first) ==========
