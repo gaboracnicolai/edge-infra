@@ -1,25 +1,28 @@
 # Multi-stage build for the self-service broker (FastAPI API + NATS worker).
 # Build from the repo root so the osb/ directory is in context.
 
-FROM python:3.12-slim AS deps
+FROM python:3.12.15-slim-trixie@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d AS deps
 WORKDIR /app
-COPY osb/pyproject.toml ./
-# Editable install needs the listed py-modules to exist, even as stubs, so
-# setuptools can build egg-info. Real sources land in the runtime stage.
-RUN for m in config models db broker main worker webhook metrics; do \
-        : > "$m.py"; \
-    done \
- && pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir -e ".[dev]" \
- && pip install --no-cache-dir gunicorn
+# Exactly the packages, versions and hashes in requirements.lock (make -f
+# osb/Makefile lock): pip refuses anything the lock does not name, and any
+# download whose hash differs from the one locked.
+COPY osb/requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 
-FROM python:3.12-slim
+FROM python:3.12.15-slim-trixie@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 WORKDIR /app
 COPY --from=deps /usr/local/lib/python3.12 /usr/local/lib/python3.12
 COPY --from=deps /usr/local/bin/uvicorn   /usr/local/bin/uvicorn
-COPY --from=deps /usr/local/bin/gunicorn  /usr/local/bin/gunicorn
+# CVE-2026-103111 (pcre2, HIGH) is fixed in Debian's libpcre2-8-0
+# 10.46-1~deb13u3, newer than the pinned base carries. Drop this once a base
+# digest bump brings it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
+ && rm -rf /var/lib/apt/lists/*
 COPY osb/ .
+# The broker's modules are plain files in /app, importable from any directory.
+ENV PYTHONPATH=/app
 RUN useradd -r -u 1001 appuser
 USER appuser
 EXPOSE 8080

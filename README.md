@@ -37,7 +37,8 @@ confidential-node option is in
 [docs/self-host-confidential-compute.md](docs/self-host-confidential-compute.md).
 Every image is signed and carries an SBOM and SLSA provenance. To check all three before you install,
 run `make verify-images TAG=<release>` or see
-[docs/self-host-supply-chain.md](docs/self-host-supply-chain.md).
+[docs/self-host-supply-chain.md](docs/self-host-supply-chain.md). Nothing is signed if trivy finds a
+fixable HIGH or CRITICAL vulnerability in it (`make scan-images TAG=<release>`).
 
 If you are here to run it on a real cluster, read [§ Taking it past kind](#taking-it-past-kind)
 first. Several things that look ready are not.

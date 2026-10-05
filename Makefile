@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -67,6 +67,13 @@ verify-image-pins:
 verify-images:
 	@test -n "$(TAG)" || { echo "usage: make verify-images TAG=<release or sha>"; exit 2; }
 	bash deploy/hack/supply-chain.sh verify $(TAG)
+
+# Before you install: no image the charts pull at :$(TAG) carries a known HIGH or
+# CRITICAL vulnerability that has a fix. Needs trivy
+# (bash deploy/hack/image-scan.sh install <dir> fetches the pinned one).
+scan-images:
+	@test -n "$(TAG)" || { echo "usage: make scan-images TAG=<release or sha>"; exit 2; }
+	bash deploy/hack/image-scan.sh scan $(TAG)
 
 # A v<SemVer> git tag packages every chart at that version: the release version
 # script and its packaged-chart check, on a throwaway tag. Needs helm.

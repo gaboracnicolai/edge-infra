@@ -8,7 +8,7 @@
 #   docker build --target migrate    -t edge-migrate       .
 #   docker build --target attest     -t edge-attest        .
 
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 WORKDIR /app
 
 ARG TARGETOS=linux
@@ -33,28 +33,28 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -o /bin/attest ./cmd/attest
 
 
-FROM gcr.io/distroless/static:nonroot AS server
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS server
 COPY --from=builder /bin/server /server
 USER nonroot:nonroot
 EXPOSE 18000 2112
 ENTRYPOINT ["/server"]
 
 
-FROM gcr.io/distroless/static:nonroot AS issuer
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS issuer
 COPY --from=builder /bin/issuer /issuer
 USER nonroot:nonroot
 EXPOSE 8081
 ENTRYPOINT ["/issuer"]
 
 
-FROM gcr.io/distroless/static:nonroot AS ratelimit
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS ratelimit
 COPY --from=builder /bin/ratelimit /ratelimit
 USER nonroot:nonroot
 EXPOSE 8082 8083
 ENTRYPOINT ["/ratelimit"]
 
 
-FROM gcr.io/distroless/static:nonroot AS secrets
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS secrets
 COPY --from=builder /bin/secrets /secrets
 USER nonroot:nonroot
 EXPOSE 8082
@@ -63,7 +63,7 @@ ENTRYPOINT ["/secrets"]
 
 # Applies both migration sets (control-plane + OSB) to the shared DB. Run as a
 # Helm pre-install/pre-upgrade hook Job, or standalone: DATABASE_URL=... /migrate
-FROM gcr.io/distroless/static:nonroot AS migrate
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS migrate
 COPY --from=builder /bin/migrate /migrate
 USER nonroot:nonroot
 ENTRYPOINT ["/migrate"]
@@ -72,7 +72,7 @@ ENTRYPOINT ["/migrate"]
 # The confidential-compute attestation gate (B27.34): an init container that
 # refuses to let the workload start without a verified report. `attest
 # mock-attester` is a stand-in TEE for the kind e2e only.
-FROM gcr.io/distroless/static:nonroot AS attest
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS attest
 COPY --from=builder /bin/attest /attest
 USER nonroot:nonroot
 ENTRYPOINT ["/attest"]
