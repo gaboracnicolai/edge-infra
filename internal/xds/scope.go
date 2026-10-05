@@ -189,7 +189,7 @@ func (r *Reconciler) snapshotForNode(p *publication, node string) (*cachev3.Snap
 	}
 
 	return cachev3.NewSnapshot(p.version, map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: builders.BuildListeners(gateways, routes, r.rateLimit, r.extAuthz, r.rls),
+		resourcev3.ListenerType: builders.BuildListenersWithTelemetry(gateways, routes, r.rateLimit, r.extAuthz, r.rls, r.telemetry),
 		resourcev3.RouteType:    builders.BuildRouteConfigs(gateways, routes, r.rls),
 		resourcev3.ClusterType:  p.resources[resourcev3.ClusterType],
 		resourcev3.EndpointType: p.resources[resourcev3.EndpointType],

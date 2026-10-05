@@ -45,3 +45,17 @@ Phase 21 provisions an HTTPS service through the OSB broker with a public host
 the broker's configurable shared HTTPS port (`:10443` here, `sharedHttpsPort`):
 the host is served its own cert and the stub's body, Envoy holds the upstream as
 a STRICT_DNS cluster, and no edge-proxy's `update_rejected` counter moves.
+
+Phase 24 runs access logs and tracing. Every listener writes a JSON access line
+per request to the edge-proxy's stdout (`request_id`, `trace_id`, status, route,
+upstream, duration, and the path without its query string), and every response
+carries the `x-request-id` it was logged under. With `telemetry.otel.enabled` on
+the control-plane chart, every listener also sends that record and an
+OpenTelemetry span to a collector over OTLP/gRPC. The run reads Envoy's
+config_dump on every edge-proxy to check that each connection manager has both
+access logs and the tracer. It then curls through :443 and finds the
+`x-request-id` curl received in the collector, both as an access-log record and
+as a span tagged `guid:x-request-id`. Before the switch, the same request is in
+the stdout log and not in the collector. One limit: Envoy's own `http.url` span
+tag includes the query string, so strip it in the collector if your clients put
+credentials in URLs.

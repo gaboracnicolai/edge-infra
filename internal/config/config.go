@@ -64,6 +64,16 @@ type Config struct {
 	RateLimitServiceCAFile   string
 	RateLimitServiceCertFile string
 	RateLimitServiceKeyFile  string
+
+	// Gateway telemetry (Envoy → OpenTelemetry collector over OTLP/gRPC): every
+	// listener's access log and trace spans. Opt-in; the stdout access log every
+	// listener writes needs none of it. FAIL-OPEN: a missing collector loses
+	// telemetry, never a request.
+	TelemetryEnabled       bool
+	TelemetryAddress       string  // collector DNS name
+	TelemetryPort          uint32  // OTLP/gRPC port
+	TelemetryServiceName   string  // service.name on spans and log records
+	TelemetrySamplePercent float64 // share of requests traced, 0–100
 }
 
 func FromEnv() (*Config, error) {
@@ -116,6 +126,19 @@ func FromEnv() (*Config, error) {
 	c.RateLimitServiceCAFile = os.Getenv("RLS_CA_FILE")
 	c.RateLimitServiceCertFile = os.Getenv("RLS_CERT_FILE")
 	c.RateLimitServiceKeyFile = os.Getenv("RLS_KEY_FILE")
+
+	c.TelemetryEnabled = getenvBool("GW_OTEL_ENABLED", false)
+	c.TelemetryAddress = getenv("GW_OTEL_COLLECTOR_ADDRESS", "otel-collector.monitoring.svc.cluster.local")
+	c.TelemetryPort = getenvU32("GW_OTEL_COLLECTOR_PORT", 4317)
+	c.TelemetryServiceName = getenv("GW_OTEL_SERVICE_NAME", "edge-proxy")
+	c.TelemetrySamplePercent = 100
+	if v := os.Getenv("GW_TRACE_SAMPLE_PERCENT"); v != "" {
+		p, err := strconv.ParseFloat(v, 64)
+		if err != nil || p < 0 || p > 100 {
+			return nil, fmt.Errorf("GW_TRACE_SAMPLE_PERCENT: want a number from 0 to 100, got %q", v)
+		}
+		c.TelemetrySamplePercent = p
+	}
 
 	return c, nil
 }

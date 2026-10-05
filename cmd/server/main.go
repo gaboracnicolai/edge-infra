@@ -104,6 +104,13 @@ func run(log *slog.Logger) error {
 		CertFile: cfg.RateLimitServiceCertFile,
 		KeyFile:  cfg.RateLimitServiceKeyFile,
 	})
+	reconciler.WithTelemetry(builders.TelemetryOptions{
+		Enabled:       cfg.TelemetryEnabled,
+		Address:       cfg.TelemetryAddress,
+		Port:          cfg.TelemetryPort,
+		ServiceName:   cfg.TelemetryServiceName,
+		SamplePercent: cfg.TelemetrySamplePercent,
+	})
 
 	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
 	if cfg.RedisAddr != "" {
