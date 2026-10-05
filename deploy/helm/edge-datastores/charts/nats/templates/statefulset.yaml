@@ -1,4 +1,25 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nats.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nats.labels" . | nindent 4 }}
+data:
+  # JetStream on (edge-osb's broker and worker need it); every client must
+  # present the token. Monitoring answers on localhost only — the probes run
+  # inside the pod — so no other pod can read /connz or /subsz.
+  nats.conf: |
+    port: 4222
+    http: "127.0.0.1:8222"
+    jetstream {
+      store_dir: "/data/jetstream"
+    }
+    authorization {
+      token: $NATS_TOKEN
+    }
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "nats.fullname" . }}
@@ -50,9 +71,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          # JetStream on (edge-osb's broker and worker need it); every client
-          # must present the token.
-          args: ["-js", "-sd", "/data/jetstream", "-m", "8222", "--auth", "$(NATS_TOKEN)"]
+          args: ["--config", "/etc/nats/conf/nats.conf"]
           env:
             - name: NATS_TOKEN
               valueFrom:
@@ -62,18 +81,14 @@ spec:
           ports:
             - name: client
               containerPort: 4222
-            - name: monitor
-              containerPort: 8222
           readinessProbe:
-            httpGet:
-              path: /healthz?js-enabled-only=true
-              port: monitor
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: monitor
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
@@ -81,11 +96,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-      {{- if not .Values.persistence.enabled }}
+            - name: config
+              mountPath: /etc/nats/conf
       volumes:
+        - name: config
+          configMap:
+            name: {{ include "nats.fullname" . }}-config
+        {{- if not .Values.persistence.enabled }}
         - name: data
           emptyDir: {}
-      {{- end }}
+        {{- end }}
   {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
