@@ -97,11 +97,18 @@ impl Authorization for AuthService {
     ) -> Result<Response<CheckResponse>, Status> {
         let req = request.into_inner();
 
+        // agent: a keyless egress destination (edge-egress, B28.224). The agent
+        // proves who it is with its workload token and every credential it sent
+        // is removed before the request leaves.
+        let (method, host, path) = request_line(&req);
+        if auth_policy(&req) == Some("agent") {
+            return Ok(Response::new(self.check_agent(&req, method, host, path)));
+        }
+
         // jwt_or_mtls: if this route allows mTLS and Envoy forwarded a verified
         // client cert (source.certificate, populated by include_peer_certificate),
         // authorize on the cert alone — injecting a TRANSPORT marker, never a user
         // identity. A cert-less caller falls through to the JWT path below.
-        let (method, host, path) = request_line(&req);
         if let Some(subject) = mtls_cert_subject(&req) {
             let vouch = Vouch {
                 sub: &subject,
@@ -134,54 +141,14 @@ impl Authorization for AuthService {
             None => return Ok(Response::new(self.denied("missing authorization header"))),
         };
 
-        let token = match auth_header
-            .strip_prefix("Bearer ")
-            .or_else(|| auth_header.strip_prefix("bearer "))
-        {
-            Some(t) => t,
-            None => return Ok(Response::new(self.denied("Bearer scheme required"))),
+        let Some(token) = bearer(auth_header) else {
+            return Ok(Response::new(self.denied("Bearer scheme required")));
         };
 
-        let timer = self.metrics.jwt_validation.start_timer();
-
-        let kid = match decode_header(token) {
-            Ok(h) => match h.kid {
-                Some(k) => k,
-                None => {
-                    drop(timer);
-                    return Ok(Response::new(self.denied("JWT missing kid")));
-                }
-            },
-            Err(_) => {
-                drop(timer);
-                return Ok(Response::new(self.denied("malformed JWT")));
-            }
+        let claims = match self.verify_jwt(token) {
+            Ok(claims) => claims,
+            Err(msg) => return Ok(Response::new(self.denied(&msg))),
         };
-
-        // Route on the unverified `iss`; decode() below re-checks it against
-        // that issuer's validation once the signature verifies.
-        let Some(idp) = unverified_issuer(token).and_then(|iss| self.issuers.get(&iss)) else {
-            drop(timer);
-            return Ok(Response::new(self.denied("untrusted issuer")));
-        };
-
-        let key = match idp.jwks.get_key(&kid) {
-            Some(k) => k,
-            None => {
-                drop(timer);
-                return Ok(Response::new(self.denied("unknown kid")));
-            }
-        };
-
-        let claims = match decode::<Claims>(token, &key, &idp.validation) {
-            Ok(data) => data.claims,
-            Err(err) => {
-                drop(timer);
-                return Ok(Response::new(self.denied(&format!("invalid JWT: {err}"))));
-            }
-        };
-
-        timer.observe_duration();
 
         let teams = claims.teams.clone().unwrap_or_default().join(",");
         let email = claims.email.clone().unwrap_or_default();
@@ -250,6 +217,104 @@ impl Authorization for AuthService {
 }
 
 impl AuthService {
+    /// Verify a bearer JWT against the issuer it names. The error is the
+    /// reason given to the caller.
+    fn verify_jwt(&self, token: &str) -> Result<Claims, String> {
+        let timer = self.metrics.jwt_validation.start_timer();
+        let kid = match decode_header(token) {
+            Ok(h) => h.kid.ok_or("JWT missing kid")?,
+            Err(_) => return Err("malformed JWT".into()),
+        };
+        // Route on the unverified `iss`; decode() below re-checks it against
+        // that issuer's validation once the signature verifies.
+        let idp = unverified_issuer(token)
+            .and_then(|iss| self.issuers.get(&iss))
+            .ok_or("untrusted issuer")?;
+        let key = idp.jwks.get_key(&kid).ok_or("unknown kid")?;
+        let claims = decode::<Claims>(token, &key, &idp.validation)
+            .map_err(|err| format!("invalid JWT: {err}"))?
+            .claims;
+        timer.observe_duration();
+        Ok(claims)
+    }
+
+    /// Authorize an agent calling a keyless destination through edge-egress.
+    /// Its identity is the workload token in Proxy-Authorization (a projected
+    /// ServiceAccount token, verified like any JWT). Every credential the agent
+    /// sent — headers and URL parameters, the workload token included — is
+    /// removed, and the signed transit assertion is the only proof of who is
+    /// calling that leaves the cluster.
+    fn check_agent(&self, req: &CheckRequest, method: &str, host: &str, path: &str) -> CheckResponse {
+        let Some(headers) = req.get_client_headers() else {
+            return self.agent_denied("client headers missing");
+        };
+        let Some(token) = headers.get("proxy-authorization").and_then(|v| bearer(v)) else {
+            return self.agent_denied(
+                "this destination is keyless: send the agent's workload token as Proxy-Authorization: Bearer <token>",
+            );
+        };
+        let claims = match self.verify_jwt(token) {
+            Ok(claims) => claims,
+            Err(msg) => return self.agent_denied(&msg),
+        };
+
+        // The assertion names the request as it leaves, so a URL credential
+        // never travels inside it either.
+        let (params, sent_path) = strip_credential_params(path);
+        let vouch = Vouch {
+            sub: &claims.sub,
+            amr: "agent",
+            idp: Some(&claims.iss),
+            method,
+            host,
+            path: &sent_path,
+            ..Default::default()
+        };
+        let Ok(assertion) = self.transit.sign(&vouch) else {
+            return self.agent_denied("transit assertion unavailable");
+        };
+
+        let mut builder = OkHttpResponseBuilder::new();
+        let mut names: Vec<&String> = headers.keys().filter(|n| is_credential_header(n)).collect();
+        names.sort();
+        for name in names {
+            builder.remove_header(name.as_str());
+        }
+        for name in params {
+            builder.remove_query_parameter(name);
+        }
+        builder.add_header(
+            transit::HEADER,
+            assertion,
+            Some(HeaderAppendAction::OverwriteIfExistsOrAdd),
+            false,
+        );
+        let mut response = CheckResponse::with_status(Status::ok("ok"));
+        response.set_http_response(builder);
+        self.metrics
+            .auth_requests
+            .with_label_values(&["ok_agent"])
+            .inc();
+        response
+    }
+
+    /// A 407 for an agent on a keyless destination: it reached a proxy that
+    /// wants the agent's own token, not the provider's.
+    fn agent_denied(&self, msg: &str) -> CheckResponse {
+        self.metrics
+            .auth_requests
+            .with_label_values(&["denied"])
+            .inc();
+        let mut builder = DeniedHttpResponseBuilder::new();
+        builder
+            .set_http_status(HttpStatusCode::ProxyAuthenticationRequired)
+            .add_header("proxy-authenticate", "Bearer realm=\"edge-egress\"", None, false)
+            .set_body(format!("edge-egress: {msg}\n"));
+        let mut response = CheckResponse::with_status(Status::unauthenticated(msg));
+        response.set_http_response(builder);
+        response
+    }
+
     /// Build a 401-with-body deny response and bump the denied counter.
     fn denied(&self, msg: &str) -> CheckResponse {
         self.metrics
@@ -301,6 +366,101 @@ fn mtls_headers(cert_subject: &str, assertion: String) -> Vec<(&'static str, Str
         ("x-client-cert-subject", cert_subject.to_string()),
         (transit::HEADER, assertion),
     ]
+}
+
+/// The token in a `Bearer <token>` header value.
+fn bearer(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+}
+
+/// The route's auth_policy context extension, when it set one.
+fn auth_policy(req: &CheckRequest) -> Option<&str> {
+    req.attributes
+        .as_ref()?
+        .context_extensions
+        .get("auth_policy")
+        .map(String::as_str)
+}
+
+/// Whether a header or URL parameter name carries a credential, by the names
+/// providers and agents put keys, tokens and secrets under: Authorization,
+/// x-api-key, api-key, x-goog-api-key, Ocp-Apim-Subscription-Key, cookies,
+/// ?key=, ?access_token= and the like. `_` and `-` are treated alike.
+fn is_credential_name(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "key",
+        "sig",
+    ];
+    const PARTS: &[&str] = &[
+        "api-key",
+        "apikey",
+        "access-key",
+        "subscription-key",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "signature",
+        "x-auth",
+    ];
+    let n = name.to_ascii_lowercase().replace('_', "-");
+    EXACT.contains(&n.as_str()) || PARTS.iter().any(|p| n.contains(p))
+}
+
+/// A header the agent may not send on: a credential, or an identity header
+/// only the gateway sets (x-user-*, x-client-cert-subject). The transit header
+/// is never one: the gateway overwrites whatever value a client put there.
+fn is_credential_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n == transit::HEADER {
+        return false;
+    }
+    n.starts_with("x-user-") || n == "x-client-cert-subject" || is_credential_name(&n)
+}
+
+/// The credential URL parameters in `path`, and the path as Envoy sends it on
+/// once they are removed. Envoy rebuilds the query from what is left, ordered
+/// by name, so the path is rebuilt the same way; with nothing to remove it is
+/// returned as it came.
+fn strip_credential_params(path: &str) -> (Vec<String>, String) {
+    let Some((base, query)) = path.split_once('?') else {
+        return (Vec::new(), path.to_string());
+    };
+    let mut removed: Vec<String> = Vec::new();
+    let mut kept: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for param in query.split('&') {
+        let (name, value) = param.split_once('=').unwrap_or((param, ""));
+        // Judged by the name the provider will decode (%6Bey is key); removed
+        // by the name Envoy sees.
+        let decoded = percent_encoding::percent_decode_str(name).decode_utf8_lossy();
+        if is_credential_name(&decoded) {
+            if !removed.iter().any(|r| r == name) {
+                removed.push(name.to_string());
+            }
+        } else {
+            kept.entry(name).or_default().push(value);
+        }
+    }
+    if removed.is_empty() {
+        return (removed, path.to_string());
+    }
+    let mut sent = base.to_string();
+    let mut delim = '?';
+    for (name, values) in kept {
+        for value in values {
+            sent.push(delim);
+            sent.push_str(name);
+            sent.push('=');
+            sent.push_str(value);
+            delim = '&';
+        }
+    }
+    (removed, sent)
 }
 
 /// The `iss` a token claims, read WITHOUT verifying it — only to pick which
@@ -438,6 +598,51 @@ aMVnTHM8GoM=\n\
     fn cert_without_jwt_or_mtls_context_is_ignored() {
         assert!(mtls_cert_subject(&req_with(Some("jwt"), Some(TEST_CERT_PEM))).is_none());
         assert!(mtls_cert_subject(&req_with(None, Some(TEST_CERT_PEM))).is_none());
+    }
+
+    // Keyless egress: what an agent might carry a key in is a credential; what
+    // a model call needs to work is not.
+    #[test]
+    fn credential_names_cover_provider_keys_and_spare_the_request() {
+        for name in [
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "api-key",
+            "x-goog-api-key",
+            "ocp-apim-subscription-key",
+            "cookie",
+            "x-amz-security-token",
+            "x-user-id",
+            "x-client-cert-subject",
+        ] {
+            assert!(is_credential_header(name), "{name} must be stripped");
+        }
+        for name in [
+            "content-type",
+            "accept",
+            "user-agent",
+            "openai-organization",
+            "anthropic-version",
+            "x-gateway-auth",
+        ] {
+            assert!(!is_credential_header(name), "{name} must be kept");
+        }
+    }
+
+    // A key in the URL is removed, and the path the assertion names is the one
+    // Envoy sends on: the rest of the query, ordered by name.
+    #[test]
+    fn credential_params_are_removed_and_the_rest_reordered_as_envoy_does() {
+        let (removed, sent) = strip_credential_params("/v1/models?z=1&key=sk-planted&a=2&access_token=t");
+        assert_eq!(removed, ["key", "access_token"]);
+        assert_eq!(sent, "/v1/models?a=2&z=1");
+        let (removed, sent) = strip_credential_params("/v1/models?%6Bey=sk-planted");
+        assert_eq!(removed, ["%6Bey"], "an encoded name is still a key");
+        assert_eq!(sent, "/v1/models");
+        let (removed, sent) = strip_credential_params("/v1/models?z=1&a=2");
+        assert!(removed.is_empty());
+        assert_eq!(sent, "/v1/models?z=1&a=2", "a query with no credential is left as it came");
     }
 
     // The subject parser extracts the DN from a URL-encoded PEM (as Envoy sends).

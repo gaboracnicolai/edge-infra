@@ -42,7 +42,8 @@ pub struct TransitClaims {
     pub iss: String,
     /// The identity it vouches for: the JWT `sub`, or the client cert subject.
     pub sub: String,
-    /// How `sub` was authenticated: `jwt` or `mtls`.
+    /// How `sub` was authenticated: `jwt`, `mtls`, or `agent` — a workload
+    /// token on a keyless edge-egress destination, `sub` its ServiceAccount.
     pub amr: String,
     /// The identity provider (`iss` of the JWT) that vouched for `sub`. With
     /// several trusted issuers, a backend keys identity on (idp, sub).

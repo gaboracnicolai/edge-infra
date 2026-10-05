@@ -45,7 +45,7 @@ async fn main() -> Result<(), AppError> {
     let metrics = Metrics::new()?;
     let mut issuers = HashMap::new();
     for idp in cfg.issuers() {
-        let jwks = JwksCache::new(&idp.jwks_url, cfg.jwks_ca_file.as_deref()).await?;
+        let jwks = JwksCache::new(&idp.jwks_url, idp.ca_file.as_deref()).await?;
         Arc::clone(&jwks).start_refresh(
             idp.jwks_url.clone(),
             cfg.jwks_refresh_s,

@@ -2513,7 +2513,7 @@ INSERT INTO egress_destinations (id, name, host, port, ca_secret_name) VALUES
   ('mock-llm', 'mock-llm', '$MOCK_HOST', 443, 'mock-provider-ca'),
   ('impostor', 'impostor', '$IMPOSTOR_HOST', 443, 'mock-provider-ca')
 ON CONFLICT (name) DO UPDATE SET host=EXCLUDED.host, port=EXCLUDED.port,
-  ca_secret_name=EXCLUDED.ca_secret_name, updated_at=now();
+  ca_secret_name=EXCLUDED.ca_secret_name, keyless=false, updated_at=now();
 SQL
   ok "egress_destinations: mock-llm ($MOCK_HOST) and impostor ($IMPOSTOR_HOST), both verified against mock-provider-ca"
 
@@ -2662,6 +2662,163 @@ phase29_egress_lockdown() {
   ok "PHASE 29 — in a namespace labelled talyvor.io/agents=true the agent's direct call is dropped, the same call through edge-egress is served, and the lockdown cannot be deleted away"
 }
 
+# ---- Phase 30 — keyless agents (B28.224) -------------------------------------
+# A keyless egress destination takes no credential from the agent. edge-egress
+# sends its plain-HTTP requests to the auth-service in agent mode: the agent
+# proves who it is with its ServiceAccount token (projected for audience
+# edge-egress) in Proxy-Authorization, every credential it sent is removed, and
+# a signed transit assertion (x-gateway-auth) is added for Lens to accept.
+# CONNECT to a keyless host is refused, and the agent sits in Phase 29's locked
+# namespace, so the gateway's plain-HTTP path is the only way out for its key.
+KEYLESS_AUD="edge-egress"
+
+# keyless_curl <with-token|no-token> [curl args...] — curl from agent-keyless with
+# the key planted in it ($OPENAI_API_KEY, read in the pod) as Authorization,
+# x-api-key and api-key. with-token adds its workload token as
+# Proxy-Authorization. Echoes curl's verbose output and "curl-exit=<rc>".
+keyless_curl() {
+  local out rc=0
+  out="$(k -n "$LOCKED_NS" exec agent-keyless -- sh -c '
+    mode=$1; shift
+    if [ "$mode" = with-token ]; then
+      set -- --proxy-header "Proxy-Authorization: Bearer $(cat /var/run/secrets/talyvor/token)" "$@"
+    fi
+    exec curl -sv --max-time 8 -H "Authorization: Bearer $OPENAI_API_KEY" \
+      -H "x-api-key: $OPENAI_API_KEY" -H "api-key: $OPENAI_API_KEY" "$@"' _ "$@" 2>&1)" || rc=$?
+  printf '%s\ncurl-exit=%s\n' "$out" "$rc"
+}
+
+# provider_echo — what the provider received, from keyless_curl's output: the
+# mock echoes the request it was sent; curl's own lines (> < * { }) are dropped.
+provider_echo() {
+  printf '%s\n' "$1" | tr -d '\r' | grep -v -e '^[<>*{}] ' -e '^[<>*]$' -e '^curl-exit='
+}
+
+phase30_keyless_agents() {
+  section "PHASE 30 — keyless agents: a key planted in the agent never reaches the provider"
+  local out echo i iss issuers pgpod planted sa_sub ga ah ap as claims jwks pf tdir
+
+  section "auth-service trusts the cluster's ServiceAccount issuer for audience $KEYLESS_AUD"
+  # The issuer's public keys are readable without a token, as any OIDC
+  # provider's are.
+  k create clusterrolebinding edge-sa-issuer-discovery --clusterrole=system:service-account-issuer-discovery \
+    --group=system:unauthenticated --dry-run=client -o yaml | k apply -f - >/dev/null
+  iss="$(k get --raw /.well-known/openid-configuration | jq -r .issuer)"
+  [ -n "$iss" ] && [ "$iss" != null ] || die "PHASE30: the API server publishes no ServiceAccount issuer"
+  issuers="$(jq -cn --arg iss "$iss" --arg aud "$KEYLESS_AUD" '[{issuer: $iss, audience: $aud,
+    jwks_url: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks",
+    ca_file: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"}]')"
+  k -n "$INFRA_NS" patch secret auth-service-secrets --type merge \
+    -p "$(jq -cn --arg v "$issuers" '{stringData: {JWT_ISSUERS: $v}}')" >/dev/null
+  k -n "$INFRA_NS" rollout restart deploy/auth-service >/dev/null
+  k -n "$INFRA_NS" rollout status deploy/auth-service --timeout=180s >/dev/null \
+    || { k -n "$INFRA_NS" logs deploy/auth-service --tail=30 || true; die "PHASE30: auth-service did not come back trusting $iss"; }
+  ok "auth-service trusts $iss (audience $KEYLESS_AUD)"
+
+  section "agent-keyless in $LOCKED_NS: a key planted in its environment, its ServiceAccount token projected"
+  planted="sk-planted-$(openssl rand -hex 12)"
+  sa_sub="system:serviceaccount:$LOCKED_NS:agent-keyless"
+  k -n "$LOCKED_NS" get networkpolicy agent-egress-lockdown >/dev/null 2>&1 \
+    || die "PHASE30: $LOCKED_NS is not locked down — run phase29_egress_lockdown first"
+  k -n "$LOCKED_NS" delete pod agent-keyless --ignore-not-found --wait=true >/dev/null
+  sed -e "s|__CURL__|$ATTACKER_IMAGE|" -e "s|__PLANTED__|$planted|" "$LOCAL_DIR/manifests/agent-keyless.yaml" \
+    | k apply -f - >/dev/null
+  k -n "$LOCKED_NS" wait --for=condition=Ready pod/agent-keyless --timeout=180s >/dev/null \
+    || die "PHASE30: agent-keyless did not become Ready"
+  ok "agent-keyless running as $sa_sub, OPENAI_API_KEY=${planted:0:14}…"
+
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q >/dev/null \
+    <<<"UPDATE egress_destinations SET keyless = false, updated_at = now() WHERE name = 'mock-llm';"
+
+  section "CONTROL — while mock-llm is not keyless, the planted key reaches the provider through edge-egress"
+  i=0
+  while :; do
+    out="$(keyless_curl no-token -x "$EGRESS_PROXY" "http://$MOCK_HOST/v1/models?key=$planted")"
+    echo="$(provider_echo "$out")"
+    has "$echo" "Name: mock-llm" && has "$echo" "Authorization: Bearer $planted" && has "$echo" "key=$planted" && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { printf '%s\n' "$out" | tail -25; die "PHASE30: the provider's echo never showed the planted key, so its absence later would prove nothing"; }
+    sleep 2
+  done
+  ok "mock-llm (not keyless) echoed Authorization: Bearer ${planted:0:14}… and key=${planted:0:14}… — the provider sees what the agent sends"
+
+  section "mock-llm marked keyless"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q >/dev/null \
+    <<<"UPDATE egress_destinations SET keyless = true, updated_at = now() WHERE name = 'mock-llm';"
+
+  section "RED — the planted key alone, no workload token: 407 from edge-egress, the provider never reached"
+  i=0
+  while :; do
+    out="$(keyless_curl no-token -x "$EGRESS_PROXY" "http://$MOCK_HOST/v1/models")"
+    has "$out" "< HTTP/1.1 407" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out" | tail -25; die "PHASE30 FAIL: mock-llm never became keyless on edge-egress"; }
+    sleep 2
+  done
+  has "$out" "Proxy-Authorization: Bearer" && ! has "$(provider_echo "$out")" "Name: mock-llm" \
+    || { printf '%s\n' "$out" | tail -25; die "PHASE30 FAIL: the 407 did not come from edge-egress"; }
+  ok "keyless mock-llm without a workload token: $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //') — $(provider_echo "$out" | head -1)"
+
+  section "GREEN — with its workload token: served, and nothing the agent sent as a key reaches the provider"
+  # key= and its percent-encoded twin %6Bey=, which a provider decodes to key.
+  out="$(keyless_curl with-token -x "$EGRESS_PROXY" "http://$MOCK_HOST/v1/models?z=1&key=$planted&a=2&%6Bey=$planted")"
+  echo="$(provider_echo "$out")"
+  has "$out" "< HTTP/1.1 200" && has "$echo" "Name: mock-llm" \
+    || { printf '%s\n' "$out" | tail -25; die "PHASE30 FAIL: the keyless agent was not served through edge-egress"; }
+  echo "  the provider received:"
+  printf '%s\n' "$echo" | grep -E '^(GET |Authorization|Proxy-Authorization|X-Api-Key|Api-Key|X-Gateway-Auth)' | cut -c1-90 | sed 's/^/    /'
+  ! has "$echo" "$planted" \
+    || die "PHASE30 FAIL: the key planted in the agent reached the provider"
+  ! has "$echo" "Authorization:" && ! has "$echo" "X-Api-Key:" && ! has "$echo" "Api-Key:" \
+    || die "PHASE30 FAIL: a credential header reached the provider (the workload token included)"
+  has "$echo" "GET /v1/models?a=2&z=1 HTTP/1.1" \
+    || die "PHASE30 FAIL: the provider did not receive the URL without its key="
+
+  section "GREEN — the provider received the gateway's signed assertion for $sa_sub instead"
+  ga="$(printf '%s\n' "$echo" | awk -F': ' 'tolower($1)=="x-gateway-auth"{print $2; exit}')"
+  IFS=. read -r ah ap as <<<"$ga"
+  [ -n "$as" ] || die "PHASE30 FAIL: no signed x-gateway-auth assertion reached the provider"
+  claims="$(b64url_d "$ap")"
+  printf '%s' "$claims" | jq -e --arg sub "$sa_sub" --arg iss "$iss" --arg htu "$MOCK_HOST/v1/models?a=2&z=1" \
+    '.sub == $sub and .amr == "agent" and .idp == $iss and .htm == "GET" and .htu == $htu and (.exp - .iat) <= 60' >/dev/null \
+    || die "PHASE30 FAIL: the assertion does not name this agent and this request: $claims"
+  kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward deploy/auth-service 19091:9090 >/dev/null 2>&1 &
+  pf=$!; sleep 4
+  jwks="$(curl -s --max-time 6 http://127.0.0.1:19091/.well-known/transit-jwks.json 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true; wait "$pf" 2>/dev/null || true
+  [ "$(printf '%s' "$jwks" | jq -r '.keys[0].kid')" = "$(b64url_d "$ah" | jq -r .kid)" ] \
+    || die "PHASE30 FAIL: /.well-known/transit-jwks.json does not publish the assertion's kid (got: ${jwks:-nothing})"
+  tdir="$(mktemp -d)"
+  { printf '\060\052\060\005\006\003\053\145\160\003\041\000'; b64url_d "$(printf '%s' "$jwks" | jq -r '.keys[0].x')"; } > "$tdir/pub.der"
+  openssl pkey -pubin -inform DER -in "$tdir/pub.der" -out "$tdir/pub.pem" 2>/dev/null
+  printf '%s' "$ah.$ap" > "$tdir/msg"; b64url_d "$as" > "$tdir/sig"
+  openssl pkeyutl -verify -pubin -inkey "$tdir/pub.pem" -rawin -in "$tdir/msg" -sigfile "$tdir/sig" >/dev/null 2>&1 \
+    || die "PHASE30 FAIL: the assertion does not verify against the published transit key"
+  rm -rf "$tdir"
+  echo "  x-gateway-auth claims: $(printf '%s' "$claims" | jq -c '{sub,amr,idp,htm,htu,ttl:(.exp-.iat)}')"
+  ok "200; the provider got no Authorization, X-Api-Key, Api-Key or key=, and an EdDSA assertion for $sa_sub that verifies with the published key"
+
+  section "RED — CONNECT to the keyless host: 403, a tunnel would carry the key past the gateway"
+  out="$(keyless_curl with-token -x "$EGRESS_PROXY" "https://$MOCK_HOST/v1/models")"
+  has "$out" "CONNECT tunnel failed, response 403" \
+    || { printf '%s\n' "$out" | tail -25; die "PHASE30 FAIL: CONNECT to a keyless host was not refused"; }
+  ok "CONNECT $MOCK_HOST:443 from agent-keyless: 403"
+
+  section "RED — the direct path: dropped by $LOCKED_NS's lockdown"
+  i=0
+  while :; do
+    out="$(keyless_curl no-token -k "https://$MOCK_HOST/v1/models")"
+    has "$out" "curl-exit=28" && ! has "$out" "< HTTP/" && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { printf '%s\n' "$out" | tail -25; die "PHASE30 FAIL: agent-keyless reached the provider directly"; }
+    sleep 2
+  done
+  ok "agent-keyless -> $MOCK_HOST directly: no answer, timed out (curl-exit=28)"
+
+  ok "PHASE 30 — keyless agents: the key planted in agent-keyless never reached the provider (stripped through edge-egress, CONNECT 403, direct dropped), and the provider got the gateway's signed assertion for $sa_sub instead"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2700,7 +2857,8 @@ main() {
   phase27_agent_svids
   phase28_egress_gateway
   phase29_egress_lockdown
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno."
+  phase30_keyless_agents
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

@@ -78,3 +78,14 @@ namespace calls it directly and is served. Once the namespace is labelled
 NetworkPolicy into it, the same direct call times out, and the same call through
 `edge-egress` is served. Deleted, the NetworkPolicy is written back by Kyverno
 and the direct call is dropped again.
+
+Phase 30 makes the mock provider keyless
+([agent-egress.md](agent-egress.md#keyless-agents)). An agent in the locked
+namespace has a provider key planted in its environment and sends it as
+`Authorization`, `x-api-key`, `api-key` and `?key=`. Before the destination is
+keyless the provider echoes the key back. Once it is keyless, the key alone gets
+407 from `edge-egress`; with the agent's ServiceAccount token as
+`Proxy-Authorization` the call is served, the provider's echo holds no key and
+no token, and it holds an `x-gateway-auth` assertion naming the agent's
+ServiceAccount that verifies against auth-service's published transit key.
+CONNECT to the keyless host gets 403, and the direct call is dropped.

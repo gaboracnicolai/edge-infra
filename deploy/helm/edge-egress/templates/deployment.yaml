@@ -88,6 +88,11 @@ spec:
               mountPath: {{ .Values.xds.tls.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.extAuthz.clientTLS.enabled }}
+            - name: authz-client-tls
+              mountPath: {{ .Values.extAuthz.clientTLS.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: bootstrap-src
           configMap:
@@ -98,4 +103,9 @@ spec:
         - name: xds-client-tls
           secret:
             secretName: {{ .Values.xds.tls.existingSecret }}
+        {{- end }}
+        {{- if .Values.extAuthz.clientTLS.enabled }}
+        - name: authz-client-tls
+          secret:
+            secretName: {{ .Values.extAuthz.clientTLS.existingSecret }}
         {{- end }}
