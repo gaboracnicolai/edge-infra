@@ -397,8 +397,8 @@ jobs:
           set -uo pipefail
           docker build -q --build-arg BASE="$O/edge-osb@${{ needs.osb.outputs.edge-osb }}" \
             -t edge-osb:planted test/image-scan/planted || exit 1
-          out="$(bash deploy/hack/image-scan.sh scan edge-osb:planted 2>&1)"
-          rc=$?
+          rc=0
+          out="$(bash deploy/hack/image-scan.sh scan edge-osb:planted 2>&1)" || rc=$?
           echo "$out"
           if [ "$rc" = 0 ]; then
             echo "the scan passed an image carrying CVE-2020-14343"
