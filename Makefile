@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -60,6 +60,13 @@ verify-xds-mtls:
 # :latest or no tag. Pin images to the SHA you pushed, as the server does.
 verify-image-pins:
 	bash deploy/hack/verify-image-pins.sh
+
+# Before you install: every image the charts pull at :$(TAG) (a release such as
+# 1.2.3, or a commit sha) carries a cosign signature, an SPDX SBOM and SLSA
+# provenance, all made by this repo's images.yaml. Needs cosign and jq.
+verify-images:
+	@test -n "$(TAG)" || { echo "usage: make verify-images TAG=<release or sha>"; exit 2; }
+	bash deploy/hack/supply-chain.sh verify $(TAG)
 
 # A v<SemVer> git tag packages every chart at that version: the release version
 # script and its packaged-chart check, on a throwaway tag. Needs helm.
