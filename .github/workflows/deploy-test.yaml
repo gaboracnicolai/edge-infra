@@ -55,3 +55,5 @@ jobs:
             exit 1
           fi
           echo "verify-image-pins refused :latest"
+      - name: A release tag is the packaged chart version
+        run: make release-version-test

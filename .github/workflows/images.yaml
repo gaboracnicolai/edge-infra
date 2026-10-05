@@ -17,6 +17,7 @@ on:
       - 'osb/**'
       - 'auth-service/src/**'
       - 'auth-service/Cargo.*'
+      - 'deploy/hack/release-version.sh'
       - '.github/workflows/images.yaml'
   pull_request:
     branches: [main]
@@ -27,6 +28,7 @@ on:
       - 'osb/**'
       - 'auth-service/src/**'
       - 'auth-service/Cargo.*'
+      - 'deploy/hack/release-version.sh'
       - '.github/workflows/images.yaml'
   workflow_dispatch:
 
@@ -35,11 +37,35 @@ env:
   OWNER: ${{ github.repository_owner }}
 
 jobs:
+  # The version every image below is stamped with (deploy/hack/release-version.sh):
+  # X.Y.Z on a vX.Y.Z tag, where each image is also pushed as :X.Y.Z next to
+  # :<sha>, else 0.0.0-g<sha12>. The stamp is the OCI labels .version, .revision
+  # and .source, which release.yaml checks on the pulled images.
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: v
+        run: |
+          set -euo pipefail
+          bash deploy/hack/release-version.sh "$GITHUB_REF" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+
   control-plane:
+    needs: version
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      STAMP: |
+        org.opencontainers.image.version=${{ needs.version.outputs.version }}
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -58,6 +84,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-control-plane:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-control-plane:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-control-plane:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -70,6 +98,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-issuer:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-issuer:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-issuer:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -82,6 +112,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-ratelimit:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-ratelimit:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-ratelimit:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -94,6 +126,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-secrets:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-secrets:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-secrets:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -106,6 +140,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-migrate:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-migrate:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-migrate:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -118,14 +154,22 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-attest:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-attest:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-attest:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   osb:
+    needs: version
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      STAMP: |
+        org.opencontainers.image.version=${{ needs.version.outputs.version }}
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -144,14 +188,22 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/edge-osb:${{ github.sha }}
             ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/edge-osb:latest', env.OWNER) || '' }}
+            ${{ needs.version.outputs.release && format('ghcr.io/{0}/edge-osb:{1}', env.OWNER, needs.version.outputs.release) || '' }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   auth-service:
+    needs: version
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      STAMP: |
+        org.opencontainers.image.version=${{ needs.version.outputs.version }}
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
     strategy:
       fail-fast: false
       matrix:
@@ -216,6 +268,7 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-${{ matrix.arch }}
+          labels: ${{ env.STAMP }}
           cache-from: type=gha,scope=auth-service-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=auth-service-${{ matrix.arch }}
 
@@ -226,16 +279,19 @@ jobs:
       - name: Build and push arm64 (cross-compiled, no emulation)
         if: matrix.arch == 'arm64'
         run: |
+          stamp=()
+          while IFS= read -r l; do if [ -n "$l" ]; then stamp+=(--label "$l"); fi; done <<<"$STAMP"
           docker buildx build \
             --platform linux/arm64 \
             --build-arg BUILD_MODE=ci \
+            "${stamp[@]}" \
             -f auth-service/Dockerfile \
             -t ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-arm64 \
             --push \
             auth-service/
 
   auth-service-merge:
-    needs: auth-service
+    needs: [version, auth-service]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -252,5 +308,6 @@ jobs:
           docker buildx imagetools create \
             --tag ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }} \
             ${{ github.event_name != 'pull_request' && format('--tag ghcr.io/{0}/auth-service:latest', env.OWNER) || '' }} \
+            ${{ needs.version.outputs.release && format('--tag ghcr.io/{0}/auth-service:{1}', env.OWNER, needs.version.outputs.release) || '' }} \
             ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-amd64 \
             ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-arm64

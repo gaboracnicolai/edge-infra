@@ -26,7 +26,15 @@ nothing, and pulls every first-party image at the one tag the charts pin — so 
 `bash deploy/hack/release-pin.sh <tag>` (and `docker login ghcr.io`: two of the eight packages
 are private). `.github/workflows/release.yaml` does exactly that every night: it builds and
 pushes all eight images at main's HEAD, pins every chart to that SHA, runs `release-e2e`, and
-uploads the pinned charts as the run's `edge-charts-<sha>` artifact.
+uploads the pinned charts, versioned `0.0.0-g<sha12>`, as the run's `edge-charts-<version>`
+artifact.
+
+A release is a SemVer git tag: `git tag v1.2.3 && git push origin v1.2.3`. The same workflow
+then also pushes every image as `:1.2.3` (next to `:<sha>`), pins the charts to `:1.2.3`, checks
+that each pulled image carries the labels `org.opencontainers.image.version=1.2.3` and
+`.revision=<sha>`, packages every chart as version 1.2.3, fails unless the packaged version
+equals the tag (`deploy/hack/release-version.sh --check`), and attaches the charts to the GitHub
+release `v1.2.3`. `make release-version-test` checks the tag-to-version mapping without a tag.
 
 `make kind-cutover` (`deploy/local/cutover.sh`) rehearses the launch-day order on its own
 cluster (`edge-cutover`): main as committed (the control-plane image pin, which serves
