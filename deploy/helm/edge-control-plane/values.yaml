@@ -50,17 +50,22 @@ rateLimit:
 # Gateway ext_authz (Envoy → auth-service gRPC). FAIL-CLOSED: if the
 # auth-service is unreachable Envoy denies.
 #
-# BASE DEFAULT STAYS OFF (enabled: false). Do NOT flip this to true here: ArgoCD
-# auto-syncs base values (selfHeal, targetRevision: HEAD), so an enabled:true in
-# BASE = the prod cutover happens on merge — flipping auth ON before the operator
-# has verified the auth front is reachable = gateway deny-all. The cert paths below
-# are pre-wired but INERT while disabled (the reconciler only reads them when
-# enabled). The flip is a deliberate LAUNCH-DAY step, applied via an env overlay
-# (deploy/envs/prod/<region>/values-control-plane.yaml: extAuthz.enabled: true) or
-# a manual `helm --set` against a cluster confirmed ready — never a merge-time
-# side effect.
+# ON BY DEFAULT (B28.206), because off cannot publish: an OSB service defaults to
+# auth_policy='jwt', and the reconciler refuses to build ANY snapshot while a
+# route wants auth and ext_authz is off (CFG-1) — so with this off, the first
+# normally-provisioned service froze the whole gateway. On, the same service is
+# gated (401 without a token, 200 with one) and nothing else changes:
+# auth_policy='none' routes are per-route Disabled and never call the
+# auth-service, so they serve even while it is down; only jwt routes deny then.
+#
+# Needs, on the same install: the auth-service and edge-issuer charts (the
+# auth-service fetches the issuer's JWKS before it listens) and the
+# envoy-authz-client-tls-secret that edge-proxy mounts (k8s/certs/
+# envoy-authz-client-cert.yaml; edge-proxy extAuthz.clientTLS.enabled is on by
+# default). A cluster that turns this off again with a jwt route present freezes
+# on last-good — docs/ext-authz-cutover-and-rollback.md.
 extAuthz:
-  enabled: false
+  enabled: true
   address: auth-service.infra.svc.cluster.local
   port: 50051
   # Upstream mTLS cert paths AS MOUNTED ON THE ENVOY (edge-proxy) POD — the proxy

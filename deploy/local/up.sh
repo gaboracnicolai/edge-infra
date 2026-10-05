@@ -18,9 +18,12 @@
 #   4  data-plane PKI (cert-manager Certificates)
 #   5  admin PKI (bootstrap-pki.sh) + app secrets
 #   6  migrate the shared DB (control-plane + OSB schemas)
-#   7  deploy all charts with dev overlays, extAuthz OFF
+#   7  deploy all charts with dev overlays, extAuthz at its chart default (ON)
 #   8  seed two tenant backends + a gateway/route per tenant
 #   9  prove routable: a request per tenant through the node :443 hostPort
+#  25  fresh install: an OSB service with the default jwt auth answers 401
+#      without a token and 200 with one (runs right after 9, before phase 12
+#      ever touches ext_authz)
 #  10  SEC-3 Property 1 — Kyverno admission rejects open rules (red-first)
 #  11  SEC-3 Property 2 — Calico drops the bypass hop, gateway stays allowed
 #  12  CFG-1 flip + ext_authz LIVE — four properties, red-first, one at a time
@@ -414,7 +417,7 @@ verify_phase6() {
   ok "Phase 6 verified (control-plane + OSB schema present)"
 }
 
-# ---- Phase 7 — deploy all charts (extAuthz OFF) -----------------------------
+# ---- Phase 7 — deploy all charts (extAuthz ON, the chart default) -----------
 # helm_install <release> <namespace> — chart default values.yaml is implicit;
 # layer the dev overlay then the local overlay (each if present). --wait blocks
 # until Ready so the next chart's dependency is satisfied.
@@ -451,7 +454,7 @@ diag_fail() {  # <release> <ns> — dump why a chart didn't come up, then stop.
 }
 
 phase7_deploy() {
-  section "PHASE 7 — deploy charts (dev overlays, extAuthz OFF)"
+  section "PHASE 7 — deploy charts (dev overlays, extAuthz ON — the chart default)"
   # The local overlays switch the charts' NetworkPolicies on with the gateway
   # (hostNetwork edge-proxy) allowed from 172.16.0.0/12. A node outside it
   # would be cut off from the control-plane, so stop here rather than later.
@@ -526,9 +529,10 @@ phase8_seed() {
   # This is the missing route source. Direct SQL (a tiny seed helper) mirrors
   # translator.apply_create's columns but: (1) a plaintext-HTTP listener on :443
   # to match the node hostPort, (2) upstream DECOUPLED from the match host (echo
-  # ClusterIP), and (3) auth_policy='none' — MANDATORY, since the xDS reconciler
-  # is fail-closed and withholds the WHOLE snapshot if any route wants auth while
-  # ext_authz is off.
+  # ClusterIP), and (3) auth_policy='none' — these are the unauthenticated
+  # baseline every later phase probes without a token, and they must keep
+  # serving when phase 12 switches ext_authz off (the reconciler withholds the
+  # WHOLE snapshot if any route wants auth while ext_authz is off).
   k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -f - <<SQL
 BEGIN;
 INSERT INTO gateways (id, name, port, protocol, node_selector)
@@ -587,7 +591,7 @@ verify_phase8() {
 # ---- Phase 9 — prove routable ------------------------------------------------
 phase9_prove() {
   local hp="${GATEWAY_HOST_PORT:-443}"
-  section "PHASE 9 — PROVE ROUTABLE (each tenant via node :$hp hostPort, ext_authz OFF)"
+  section "PHASE 9 — PROVE ROUTABLE (each tenant via node :$hp hostPort, auth_policy=none)"
   local i=0 ca cb a b cn
   # Retry briefly: the :443 listener may land a beat after the clusters.
   while [ "$i" -lt 10 ]; do
@@ -606,7 +610,7 @@ phase9_prove() {
   { [ "$ca" = 200 ] && has "$a" TENANT-A-BACKEND; } || pass=0
   { [ "$cb" = 200 ] && has "$b" TENANT-B-BACKEND; } || pass=0
   [ "$pass" = 1 ] || die "ROUTABLE PROOF FAILED — see the responses above"
-  ok "ROUTABLE: tenant-a.local & tenant-b.local each return 200 from their OWN backend, ext_authz OFF"
+  ok "ROUTABLE: tenant-a.local & tenant-b.local each return 200 from their OWN backend, no token"
 }
 
 # ---- Phase 10 — SEC-3 Property 1: Kyverno admission (red-first) --------------
@@ -788,11 +792,12 @@ NP
 }
 
 # ---- Phase 12 — CFG-1 flip + ext_authz LIVE (four properties, red-first) -----
-# helm_set_extauthz <true|false> — flip ext_authz LIVE via --set (the committed
-# local overlay stays enabled:false — base-off + deliberate flip, the real launch
-# model). helm only rolls the control-plane when the value actually changes.
+# helm_set_extauthz <true|false> — flip ext_authz LIVE via --set. The chart
+# default is on (phase 7 installs it so); phase 12 switches it off to prove the
+# CFG-1 guard, then back on. helm only rolls the control-plane when the value
+# actually changes.
 helm_set_extauthz() {
-  section "helm: ext_authz enabled=$1 (LIVE --set flip; overlay stays off)"
+  section "helm: ext_authz enabled=$1 (LIVE --set flip)"
   h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
     -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
     -f "$LOCAL_DIR/values/values-control-plane.yaml" \
@@ -1162,6 +1167,18 @@ OSB_KEY="${OSB_KEY:-local-e2e-osb-tenant-key-0123456789}"
 OSB_TEAM="e2e"
 OSB_SERVICE="e2e-stub"
 
+# osb_register_tenant — the 'e2e' tenant API key, stored as its SHA-256 (as in
+# prod, never in the clear). Idempotent.
+osb_register_tenant() {
+  section "register the 'e2e' tenant API key (stored as its SHA-256, never in the clear)"
+  local pgpod kh
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  kh="$(printf '%s' "$OSB_KEY" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -c \
+    "INSERT INTO tenant_api_keys (key_hash, team) VALUES ('$kh', '$OSB_TEAM') ON CONFLICT (key_hash) DO UPDATE SET team = EXCLUDED.team;" >/dev/null
+  ok "tenant key registered for team '$OSB_TEAM'"
+}
+
 # osb_call <METHOD> <path> [json-body] — call the broker API (plain HTTP in the
 # cluster) through a short-lived port-forward, as the 'e2e' tenant. Echoes
 # "<http_code> <body>"; the code is 000 if the broker never answered.
@@ -1202,20 +1219,14 @@ osb_wait_completed() {
   die "PHASE15 FAIL: request $rid never completed (last status '${st:-<none>}', last answer: $r)"
 }
 
-# gw80_code / gw80_body <host> — a request through the gateway's shared HTTP
-# listener (node :80), where OSB-provisioned HTTP services land.
-gw80_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H "Host: $1" http://127.0.0.1:80/ 2>/dev/null || true; }
-gw80_body() { curl -s --max-time 6 -H "Host: $1" http://127.0.0.1:80/ 2>/dev/null || true; }
+# gw80_code / gw80_body <host> [curl args...] — a request through the gateway's
+# shared HTTP listener (node :80), where OSB-provisioned HTTP services land.
+gw80_code() { local host="$1"; shift; curl -s -o /dev/null -w '%{http_code}' --max-time 6 -H "Host: $host" "$@" http://127.0.0.1:80/ 2>/dev/null || true; }
+gw80_body() { local host="$1"; shift; curl -s --max-time 6 -H "Host: $host" "$@" http://127.0.0.1:80/ 2>/dev/null || true; }
 
 phase15_osb_broker() {
   section "PHASE 15 — the OSB broker answers; a service it provisions is served through Envoy"
-  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
-
-  section "register the 'e2e' tenant API key (stored as its SHA-256, never in the clear)"
-  local kh; kh="$(printf '%s' "$OSB_KEY" | openssl dgst -sha256 -r | cut -d' ' -f1)"
-  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -c \
-    "INSERT INTO tenant_api_keys (key_hash, team) VALUES ('$kh', '$OSB_TEAM') ON CONFLICT (key_hash) DO UPDATE SET team = EXCLUDED.team;" >/dev/null
-  ok "tenant key registered for team '$OSB_TEAM'"
+  osb_register_tenant
 
   section "deploy the stub upstream (osb-stub/echo -> OSB-PROVISIONED-BACKEND)"
   k apply -f "$LOCAL_DIR/manifests/osb-stub.yaml"
@@ -2084,6 +2095,107 @@ phase24_telemetry() {
   ok "PHASE 24 — the OTel collector shows x-request-id $rid as an access-log record and a trace span"
 }
 
+# ---- Phase 25 — fresh install: the default jwt auth gates an OSB service (B28.206)
+# Runs right after phase 9, on the charts exactly as phase 7 installed them —
+# nothing has switched ext_authz yet. A service provisioned WITHOUT naming an
+# auth_policy gets the default, 'jwt'. While ext_authz was off by default, that
+# one route made the control-plane refuse every snapshot (CFG-1), so the first
+# normally-provisioned service froze the gateway. Now it is published and gated.
+OSB_JWT_SERVICE="e2e-jwt"
+
+phase25_default_jwt_osb() {
+  section "PHASE 25 — fresh install: an OSB service with the default jwt auth → 401 without a token, 200 with one"
+  local UMAIL="dev@edge.local" UPASS="devpassword-abc12345"
+  local ISS="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"
+  local pgpod; pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+
+  section "the control-plane runs ext_authz on, as installed (no --set, no overlay)"
+  local ea
+  ea="$(k -n "$INFRA_NS" get deploy edge-control-plane \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="EXT_AUTHZ_ENABLED")].value}')"
+  [ "$ea" = true ] || die "PHASE25 FAIL: the installed control-plane has EXT_AUTHZ_ENABLED='$ea', want true (the chart default)"
+  ok "EXT_AUTHZ_ENABLED=true on the installed control-plane"
+
+  osb_register_tenant
+  k apply -f "$LOCAL_DIR/manifests/osb-stub.yaml"
+  wait_rollout deploy/echo osb-stub 120s
+  local sip; sip="$(k -n osb-stub get svc echo -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$sip" ] || die "osb-stub echo ClusterIP unresolved"
+
+  # Clean slate for re-runs: a prior run may have left the service provisioned.
+  local r; r="$(osb_call DELETE "/v1/services/$OSB_JWT_SERVICE")"
+  if [ "${r%% *}" = 202 ]; then
+    log "removing a leftover '$OSB_JWT_SERVICE' from a prior run"
+    osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  fi
+
+  section "POST /v1/services — provision '$OSB_JWT_SERVICE' WITHOUT an auth_policy (the default is jwt)"
+  r="$(osb_call POST /v1/services \
+    "{\"name\":\"$OSB_JWT_SERVICE\",\"team\":\"$OSB_TEAM\",\"host\":\"$sip\",\"port\":5678,\"protocol\":\"HTTP\"}")"
+  echo "  POST /v1/services -> HTTP ${r%% *}  ${r#* }"
+  [ "${r%% *}" = 202 ] || die "PHASE25 FAIL: provision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  local ap
+  ap="$(k exec -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -tAc \
+    "select auth_policy from routes where name='osb-${OSB_TEAM}-${OSB_JWT_SERVICE}' and deleted_at is null;" | tr -d '[:space:]')"
+  [ "$ap" = jwt ] || die "PHASE25 FAIL: the provisioned route has auth_policy='$ap', want the default 'jwt'"
+  ok "route osb-${OSB_TEAM}-${OSB_JWT_SERVICE} stored with auth_policy=jwt"
+
+  section "no token → 401: the service is published AND gated"
+  local i=0 c0=""
+  while [ "$i" -lt 30 ]; do
+    c0="$(gw80_code "$sip")"
+    [ "$c0" = 401 ] && break
+    i=$((i + 1)); sleep 2
+  done
+  echo "  :80 Host $sip, no Authorization -> HTTP $c0"
+  [ "$c0" = 401 ] || die "PHASE25 FAIL: no-token request got $c0, want 401 (not published, or not gated)"
+  local cg; cg="$(gw80_code "$sip" -H 'Authorization: Bearer not-a-jwt')"
+  echo "  :80 Host $sip, garbage token    -> HTTP $cg"
+  [ "$cg" = 401 ] || die "PHASE25 FAIL: garbage-token request got $cg, want 401"
+  ok "401 without a valid token"
+
+  section "a JWT from the issuer → 200 from the provisioned backend"
+  local img
+  for img in "$ATTACKER_IMAGE" "$WHOAMI_IMAGE"; do   # the minter pod's image, and whoami beside it
+    if docker pull "$img" >/dev/null 2>&1; then kind load docker-image --name "$CLUSTER_NAME" "$img" >/dev/null 2>&1 || true; fi
+  done
+  k apply -f "$LOCAL_DIR/manifests/secure-backend.yaml" >/dev/null   # the in-cluster minter pod
+  k -n tenant-secure wait --for=condition=Ready pod/minter --timeout=120s >/dev/null
+  k -n "$INFRA_NS" exec deploy/edge-issuer -- /issuer adduser --email "$UMAIL" --password "$UPASS" --team eng >/dev/null 2>&1 \
+    && log "created issuer user $UMAIL" || log "issuer user $UMAIL already exists (adduser idempotent)"
+  local TOK="" mi=0
+  while [ "$mi" -lt 10 ]; do
+    TOK="$(k -n tenant-secure exec minter -- curl -sk --max-time 6 -X POST "$ISS/login" \
+      -H 'Content-Type: application/json' -d "{\"email\":\"$UMAIL\",\"password\":\"$UPASS\"}" 2>/dev/null \
+      | jq -r '.access_token // empty' 2>/dev/null || true)"
+    [ -n "$TOK" ] && break
+    mi=$((mi + 1)); sleep 2
+  done
+  [ -n "$TOK" ] || die "PHASE25 FAIL: could not mint a JWT via POST /login"
+  local c1="" b1="" j=0
+  while [ "$j" -lt 15 ]; do
+    c1="$(gw80_code "$sip" -H "Authorization: Bearer $TOK")"
+    [ "$c1" = 200 ] && break
+    j=$((j + 1)); sleep 2
+  done
+  b1="$(gw80_body "$sip" -H "Authorization: Bearer $TOK")"
+  echo "  :80 Host $sip, Bearer <minted JWT> -> HTTP $c1  body: $(printf '%s' "$b1" | tr -d '\n')"
+  { [ "$c1" = 200 ] && has "$b1" OSB-PROVISIONED-BACKEND; } \
+    || die "PHASE25 FAIL: a valid JWT did not reach the provisioned backend (HTTP $c1)"
+  ok "200 OSB-PROVISIONED-BACKEND with a valid token"
+
+  local ca; ca="$(gw_code tenant-a.local)"
+  [ "$ca" = 200 ] || die "PHASE25 FAIL: tenant-a.local (auth_policy=none, no token) got $ca with the jwt service present — the gateway froze"
+  ok "tenant-a.local (auth_policy=none) still 200 without a token — nothing froze"
+
+  section "deprovision '$OSB_JWT_SERVICE' (phase 12 switches ext_authz off, which a jwt route would freeze)"
+  r="$(osb_call DELETE "/v1/services/$OSB_JWT_SERVICE")"
+  [ "${r%% *}" = 202 ] || die "PHASE25 FAIL: deprovision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  ok "Phase 25 verified — on a fresh install an OSB service with jwt auth answers 401 without a token and 200 with one"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2102,6 +2214,7 @@ main() {
   phase8_seed
   verify_phase8
   phase9_prove
+  phase25_default_jwt_osb   # the defaults alone, before phase 12 flips anything
   phase10_sec3_admission
   phase11_sec3_dataplane
   phase12_extauthz_cutover

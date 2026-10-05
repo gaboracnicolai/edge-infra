@@ -2,8 +2,8 @@
 
 Reproducible, scripted standup of the **full edge-infra stack** on a local
 [kind](https://kind.sigs.k8s.io/) cluster, ending at a **routable gateway serving
-two tenant backends** with `ext_authz` **OFF**. This is the infra foundation the
-security proofs build on.
+two tenant backends** with `ext_authz` **ON** (the chart default). This is the
+infra foundation the security proofs build on.
 
 ```
 git clone … && cd edge-infra
@@ -88,9 +88,10 @@ release is cleared before re-install.
 | 4 | **Data-plane PKI** | Applies `k8s/certs/*` in order (selfsigned root → `edge-internal-ca` ClusterIssuer → 7 leaves); waits for the 7 tls secrets. |
 | 5 | **Admin PKI + secrets** | Runs `scripts/bootstrap-pki.sh` (admin CA, custodian cert, KEK) + issuer RSA signing key, and creates every app secret (DSNs `sslmode=disable`). |
 | 6 | **Migrate** | Runs `edge-migrate` as a Job against the shared DB (both schema sets, idempotent). |
-| 7 | **Deploy** | `helm upgrade --install` for all 7 charts with dev + local overlays, `--wait`, **extAuthz OFF**. Envoy connects to the control-plane over mTLS xDS. |
+| 7 | **Deploy** | `helm upgrade --install` for all 7 charts with dev + local overlays, `--wait`, **extAuthz ON** (the chart default; the local overlay does not set it). Envoy connects to the control-plane over mTLS xDS. |
 | 8 | **Seed** | Two tenant backends + the missing route source: a gateway on **:443** and a host-route per tenant (via direct SQL). |
 | 9 | **Prove** | A request per tenant through the node **:443** hostPort → 200 from the correct backend. |
+| 25 | **Default jwt service** (runs right after 9) | On the charts exactly as installed — nothing has switched ext_authz yet — the OSB broker provisions a service **without** naming an `auth_policy`, so it gets the default `jwt`. It is published and gated on :80: **401** with no token or a garbage one, **200** `OSB-PROVISIONED-BACKEND` with a JWT minted by the issuer, and tenant-a (`none`) still 200. Then deprovisioned, because phase 12 switches ext_authz off. |
 | 10 | **SEC-3 Property 1** (admission) | Applies the Kyverno guardrails (Enforce), then proves red-first: a NetworkPolicy allowing from an empty podSelector `{}` is **DENIED**; a NodePort backend Service is **DENIED**. |
 | 11 | **SEC-3 Property 2** (data-plane) | A pod-network attacker (IP outside NODE_CIDR) reaches each backend's ClusterIP with no policy (RED), then — after the resolved backend policy — is **dropped** while the node-`:443` gateway path stays **200** (two separate assertions). |
 | 12 | **CFG-1 flip + ext_authz LIVE** | Four properties, red-first: (P4) the CFG-1 guard refuses a jwt route while ext_authz is OFF; then the live flip; (P1) a real minted JWT → 200 + trusted identity-header injection (forged headers overwritten); (P2) no/invalid JWT → 401; (P3) auth-service down → fail-closed 403. |
@@ -126,8 +127,10 @@ The charts target a GitOps (ArgoCD) deploy; a few things need dev-overlay **valu
 - **edge-osb TLS off**: the chart forces `verify-full` Postgres TLS + mutual NATS
   TLS whenever `tls` is set; the dev datastores are plaintext. `tls: null` removes
   the block; `DB_SSL_MODE=disable` comes via the secret.
-- **auth_policy=none on seeded routes**: the xDS reconciler is **fail-closed** — it
-  withholds the entire snapshot if any route wants auth while `ext_authz` is off.
+- **auth_policy=none on seeded routes**: they are the no-token baseline every phase
+  probes, and they must keep serving while phase 12 has `ext_authz` off — the xDS
+  reconciler is **fail-closed** and withholds the entire snapshot if any route
+  wants auth while `ext_authz` is off.
 - **:443 plaintext**: the seed gateway is protocol HTTP on port 443 (no TLS
   termination) so the routing proof is a clean plaintext request to the hostPort.
 - **Calico `CrossSubnet`** (SEC-3): with the manifest default `ipipMode=Always`,
@@ -200,8 +203,8 @@ backend on the echo port is allowed.
 
 ### ext_authz cutover (phase 12) — four properties, red-first, one at a time
 
-`ext_authz` is **base-off + deliberate live flip** (the committed overlay stays
-`enabled:false`; the flip is `helm --set`). Before flipping, a **deny-all-trap
+`ext_authz` is **on by default** (phase 7 installs it so). Phase 12 switches it
+**off** with `helm --set` to prove the guard, then flips it back on. Before flipping, a **deny-all-trap
 gate**: auth-service Ready (⇒ JWKS-at-boot succeeded) AND edge-proxy actually has
 `/etc/authz-client-tls/ca.crt` mounted (no caFile ⇒ the ext_authz cluster renders
 plaintext ⇒ the fail-closed auth-service rejects it ⇒ deny-all). Flip only if both

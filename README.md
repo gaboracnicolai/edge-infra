@@ -44,7 +44,7 @@ first. Several things that look ready are not.
 | | |
 |---|---|
 | Deployed | **Only on kind**, in a cluster `make kind-e2e` creates and deletes. No real cluster, no ArgoCD instance in the serving path. |
-| `ext_authz` (gateway authentication) | Built. **On** in the kind run (Phase 12 switches it on live). **Off** in base and all four overlays. |
+| `ext_authz` (gateway authentication) | Built. **On by default** in the `edge-control-plane` chart, so in base and all four overlays, and in the kind run from install (Phase 25 proves a default `jwt` OSB service answers 401 / 200; Phase 12 switches it off and on live). |
 | Identity-keyed rate limiting (RLS) | Built. **Off** everywhere — though the `edge-ratelimit` chart *would* deploy (2 replicas + Redis in prod overlays), the control plane never routes to it. |
 | Admin READ API | Built. **Off everywhere** — `adminApi.existingSecret` is unset in dev, staging, and both prod regions, so the listener never starts and the Service exposes no port. |
 | Local rate limiting | Built and **on** by default. |
@@ -64,44 +64,35 @@ arming**. Every item claimed done has its code present; some are better than cla
 admin exposure is fully fixed — admin on `127.0.0.1:9901`, a dedicated `/ready` listener, probes and
 scrape repointed — even though the PR that raised it was closed unfixed).
 
-**But for this repository, arming is the entire remaining distance.** The three headline security
-controls — gateway authentication, identity-keyed rate limiting, and the admin API — are all shipped
-**off**. A green register describes merged code, not controls in force. Read it that way.
-
-To this repo's credit, the off-state is deliberate and documented rather than hidden:
-`deploy/helm/edge-control-plane/values.yaml:53-59` explicitly warns against flipping `extAuthz` in
-base because ArgoCD auto-syncs. That is honest inertness. It is still inertness.
+**But for this repository, arming is most of the remaining distance.** Of the three headline
+security controls, gateway authentication (`ext_authz`) is now **on by default**; identity-keyed rate
+limiting and the admin API are still shipped **off**. A green register describes merged code, not
+controls in force. Read it that way.
 
 ---
 
-## ⚠ The first thing that will burn you: the defaults contradict each other
+## The defaults publish safely now (B28.206)
 
-Three individually-defensible decisions compose into a system that publishes nothing:
+Three decisions used to compose into a system that published nothing:
 
 - `auth_policy` defaults to **`'jwt'`** — deliberately, so a route can only become unauthenticated
   via an explicit `'none'` (`migrations/0004_auth_policy.sql:9`, `osb/models.py:46`).
-- `ext_authz` is **off** in every environment (`values.yaml:62-63`; no overlay sets it).
+- `ext_authz` was **off** in every environment.
 - The reconciler **refuses to publish any snapshot** when a route wants auth while ext_authz is off
-  (`internal/xds/reconciler.go:261-267`) — correct on its own: an identity-bearing listener must
+  (`internal/xds/reconciler.go`, CFG-1) — correct on its own: an identity-bearing listener must
   never serve open.
 
-Compose them: **a normally-provisioned service makes the control plane publish nothing at all.**
-Envoy holds its last-good snapshot, or on first boot has none.
+So the first normally-provisioned service froze the whole gateway. `ext_authz` is now **on by
+default** (`deploy/helm/edge-control-plane/values.yaml`, `extAuthz.enabled: true`), so the guard
+does not fire: a `jwt` service is published and gated, answering 401 without a token and 200 with
+one, and `none` routes keep serving without a token, even while the auth-service is down. `make
+kind-e2e` Phase 25 provisions such a service through the OSB broker on the fresh install and checks
+exactly that.
 
-This is not theoretical. The local standup works around it by seeding routes with `auth_policy='none'`
-and marking it **"MANDATORY"** (`deploy/local/up.sh:460-464`, `deploy/local/README.md:90-91`). **That
-workaround exists only in the local scripts** — nothing in the OSB provisioning path, the charts, or
-the prod overlays applies it.
-
-Nothing here has been changed to "fix" this, because every available fix moves a default that governs
-a security control, and nothing outside kind runs it yet. It is flagged, not fixed. Whoever takes it
-past kind must decide deliberately:
-
-- keep `'jwt'` as the default and arm `ext_authz` **first**, so the guard never fires; **or**
-- add an explicit "serve open" kill-switch the reconciler honours ahead of the fail-close, so the
-  open state is a deliberate, logged choice rather than an accident of defaults.
-
-The same contradiction is what makes rollback a fleet-wide database mutation — see
+What on-by-default needs on the same install: the `auth-service` and `edge-issuer` charts, and the
+`envoy-authz-client-tls-secret` that `edge-proxy` mounts (`k8s/certs/envoy-authz-client-cert.yaml`).
+Turning ext_authz **off** again while a `jwt` route exists still freezes the fleet on last-good —
+that is the guard working, and it is why rollback is a database mutation; see
 [docs/ext-authz-cutover-and-rollback.md](docs/ext-authz-cutover-and-rollback.md).
 
 ---
@@ -118,7 +109,8 @@ Ordered, because the order matters:
 2. **Enable the Admin READ API** (`adminApi.existingSecret`). It is off everywhere, so today there is
    no way to observe what the control plane actually believes. Turning auth on with no observability
    is not a cutover.
-3. **Decide the `auth_policy` question** above, before provisioning anything.
+3. **Install the auth-service, the issuer and the ext_authz client certificate** before
+   provisioning anything — ext_authz is on by default, so `jwt` routes deny until they are up.
 4. **Then** work the cutover prereqs and rollback in
    [docs/ext-authz-cutover-and-rollback.md](docs/ext-authz-cutover-and-rollback.md).
 
