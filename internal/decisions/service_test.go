@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func entry(status uint32, reason, agent, path string, flags *accesslogdatav3.Res
 
 // Every entry edge-egress sends under the decision log's name becomes a record
 // naming the Envoy, the agent and the decision, in the order sent; entries
-// under any other log name are not recorded.
+// under any other log name, or from any other Envoy, are not recorded.
 func TestService_RecordsEgressDecisions(t *testing.T) {
 	sa := "system:serviceaccount:agents:billing-bot"
 	stream := &fakeStream{msgs: []*accesslogv3.StreamAccessLogsMessage{
@@ -93,7 +94,7 @@ func TestService_RecordsEgressDecisions(t *testing.T) {
 		},
 	}}
 	out := &fakeAppender{}
-	require.NoError(t, NewService(out, slog.New(slog.DiscardHandler)).StreamAccessLogs(stream))
+	require.NoError(t, NewService(out, isEgress, slog.New(slog.DiscardHandler)).StreamAccessLogs(stream))
 
 	require.Len(t, out.batches, 2)
 	got := append(out.batches[0], out.batches[1]...)
@@ -115,6 +116,17 @@ func TestService_RecordsEgressDecisions(t *testing.T) {
 		}},
 	}}}
 	out = &fakeAppender{}
-	require.NoError(t, NewService(out, slog.New(slog.DiscardHandler)).StreamAccessLogs(other))
+	require.NoError(t, NewService(out, isEgress, slog.New(slog.DiscardHandler)).StreamAccessLogs(other))
 	assert.Empty(t, out.batches)
+
+	proxy := &fakeStream{msgs: []*accesslogv3.StreamAccessLogsMessage{{
+		Identifier: &accesslogv3.StreamAccessLogsMessage_Identifier{Node: &corev3.Node{Id: "edge-proxy"}, LogName: LogName},
+		LogEntries: &accesslogv3.StreamAccessLogsMessage_HttpLogs{HttpLogs: &accesslogv3.StreamAccessLogsMessage_HTTPAccessLogEntries{
+			LogEntry: []*accesslogdatav3.HTTPAccessLogEntry{entry(200, "via_upstream", "", "/", nil)},
+		}},
+	}}}
+	require.NoError(t, NewService(out, isEgress, slog.New(slog.DiscardHandler)).StreamAccessLogs(proxy))
+	assert.Empty(t, out.batches, "only edge-egress Envoys' decisions are recorded")
 }
+
+func isEgress(node string) bool { return strings.HasPrefix(node, "edge-egress/") }

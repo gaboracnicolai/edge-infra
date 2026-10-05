@@ -19,16 +19,19 @@ type Appender interface {
 }
 
 // Service receives edge-egress's decisions: it implements Envoy's
-// AccessLogService, and appends every HTTP entry sent under LogName.
+// AccessLogService, and appends every HTTP entry sent under LogName by a node
+// accepted names.
 type Service struct {
 	accesslogv3.UnimplementedAccessLogServiceServer
-	out Appender
-	log *slog.Logger
+	out      Appender
+	accepted func(node string) bool
+	log      *slog.Logger
 }
 
-// NewService returns a receiver that appends to out.
-func NewService(out Appender, log *slog.Logger) *Service {
-	return &Service{out: out, log: log}
+// NewService returns a receiver that appends to out what the nodes accepted
+// names send (xds.IsEgressNode: edge-egress Envoys).
+func NewService(out Appender, accepted func(node string) bool, log *slog.Logger) *Service {
+	return &Service{out: out, accepted: accepted, log: log}
 }
 
 // StreamAccessLogs appends each batch an Envoy sends, in the order it sends
@@ -48,7 +51,7 @@ func (s *Service) StreamAccessLogs(stream accesslogv3.AccessLogService_StreamAcc
 		if id := msg.GetIdentifier(); id != nil {
 			node, logName = id.GetNode().GetId(), id.GetLogName()
 		}
-		if logName != LogName {
+		if logName != LogName || !s.accepted(node) {
 			continue
 		}
 		entries := msg.GetHttpLogs().GetLogEntry()

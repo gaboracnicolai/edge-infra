@@ -140,6 +140,8 @@ func TestBuildEgress_AgentRateLimitAndDecisionLog(t *testing.T) {
 	}
 	assert.Equal(t, []string{extAuthzFilterName, localRateLimitFilterName, "envoy.filters.http.router"}, names,
 		"the limit is counted after ext_authz names the agent")
+	assert.True(t, hcm.GetUseRemoteAddress().GetValue(), "the client is the connection's peer, not X-Forwarded-For")
+	assert.True(t, hcm.GetSkipXffAppend(), "nothing about the agent is added on the way out")
 
 	rl := &lrlv3.LocalRateLimit{}
 	require.NoError(t, hcm.GetHttpFilters()[1].GetTypedConfig().UnmarshalTo(rl))

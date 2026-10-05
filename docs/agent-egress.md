@@ -207,9 +207,9 @@ Every request counts against two buckets, and gets `429` when either is empty:
 
 - **the agent's**: the ServiceAccount it proved with its token on a keyless
   destination. All of an agent's pods share it.
-- **its pod's**: the address the request came from. This is what limits an agent
-  on a destination that is not keyless, and on CONNECT, where it proves no
-  identity.
+- **its pod's**: the address its connection comes from, never one it claims in
+  `X-Forwarded-For`. This is what limits an agent on a destination that is not
+  keyless, and on CONNECT, where it proves no identity.
 
 Each bucket holds the limit and is refilled to it once a minute. A refused
 request gets `Retry-After: 60` and `X-RateLimit-Limit`, `X-RateLimit-Remaining`

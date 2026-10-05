@@ -189,7 +189,12 @@ func egressListener(opts EgressOptions, authz bool, ea ExtAuthzOptions, tel Tele
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
 			IdleTimeout: durationpb.New(connectionIdleTimeout),
 		},
-		HttpFilters: filters,
+		// The client is the address the connection comes from, never one the
+		// agent claims in X-Forwarded-For: the rate limit keys on it and the
+		// logs record it. Nothing is appended to X-Forwarded-For on the way out.
+		UseRemoteAddress: wrapperspb.Bool(true),
+		SkipXffAppend:    true,
+		HttpFilters:      filters,
 	}
 	observeConnectionManager(hcm, EgressListenerName, tel, egressLogFields...)
 	if opts.DecisionLog {
@@ -358,7 +363,12 @@ func egressRouteConfig(dests []store.EgressDestination, extAuthzEnabled, authz b
 			}
 		}
 	}
-	return &routev3.RouteConfiguration{Name: EgressRouteConfigName, VirtualHosts: vhs}
+	return &routev3.RouteConfiguration{
+		Name:         EgressRouteConfigName,
+		VirtualHosts: vhs,
+		// What use_remote_address makes Envoy add about the agent stays here.
+		RequestHeadersToRemove: []string{"x-envoy-external-address", "x-envoy-internal"},
+	}
 }
 
 func directResponse(status uint32, body string) *routev3.Route_DirectResponse {

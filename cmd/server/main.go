@@ -154,8 +154,14 @@ func run(log *slog.Logger) error {
 	xdsSrv := serverv3.NewServer(rootCtx, cache, callbacks)
 	grpcSrv := newGRPCServer(tlsCreds)
 	registerXDS(grpcSrv, xdsSrv)
-	// edge-egress's decision log (B28.228) arrives on the same mTLS listener.
-	accesslogservice.RegisterAccessLogServiceServer(grpcSrv, decisions.NewService(pgStore, log))
+	// edge-egress's decision log (B28.228) arrives on the same listener, from
+	// Envoys holding an xDS client certificate. Without TLS anyone who can reach
+	// the port could write to it, so it is not served at all.
+	if tlsCreds != nil {
+		accesslogservice.RegisterAccessLogServiceServer(grpcSrv, decisions.NewService(pgStore, xds.IsEgressNode, log))
+	} else {
+		log.Warn("decision log NOT served: it needs xDS TLS")
+	}
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
