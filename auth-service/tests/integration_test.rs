@@ -591,6 +591,13 @@ async fn test_okta_and_service_account_tokens_both_accepted() {
     let headers = check_token(&svc, &person).await.expect("Okta token must be accepted");
     assert_eq!(header_value(&headers, "x-user-id"), Some("ada@example.com"));
     assert_eq!(header_value(&headers, "x-auth-iss"), Some(OKTA_ISSUER));
+    // The signed assertion names the provider, so a backend can key the
+    // identity on (idp, sub) and two providers' "ada" never collide.
+    let assertion = header_value(&headers, "x-gateway-auth").expect("transit assertion");
+    let vouched = backend_verifier(&svc)
+        .verify(assertion, "GET", "example.com", "/")
+        .expect("assertion verifies");
+    assert_eq!(vouched.idp.as_deref(), Some(OKTA_ISSUER));
 
     let agent = sign_jwt(&cluster.private_pem, "sa-kid", &service_account_claims());
     let headers = check_token(&svc, &agent)

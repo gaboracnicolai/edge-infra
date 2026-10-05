@@ -188,6 +188,7 @@ impl Authorization for AuthService {
         let vouch = Vouch {
             sub: &claims.sub,
             amr: "jwt",
+            idp: Some(&claims.iss),
             email: claims.email.as_deref(),
             teams: claims.teams.as_deref(),
             method,

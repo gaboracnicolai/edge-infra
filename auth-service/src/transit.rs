@@ -44,6 +44,10 @@ pub struct TransitClaims {
     pub sub: String,
     /// How `sub` was authenticated: `jwt` or `mtls`.
     pub amr: String,
+    /// The identity provider (`iss` of the JWT) that vouched for `sub`. With
+    /// several trusted issuers, a backend keys identity on (idp, sub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idp: Option<String>,
     /// Verified email, when the JWT carried one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -67,6 +71,7 @@ pub struct TransitClaims {
 pub struct Vouch<'a> {
     pub sub: &'a str,
     pub amr: &'a str,
+    pub idp: Option<&'a str>,
     pub email: Option<&'a str>,
     pub teams: Option<&'a [String]>,
     pub method: &'a str,
@@ -161,6 +166,7 @@ impl TransitSigner {
             iss: self.issuer.clone(),
             sub: vouch.sub.to_string(),
             amr: vouch.amr.to_string(),
+            idp: vouch.idp.map(str::to_string),
             email: vouch.email.filter(|e| !e.is_empty()).map(str::to_string),
             teams: vouch
                 .teams
