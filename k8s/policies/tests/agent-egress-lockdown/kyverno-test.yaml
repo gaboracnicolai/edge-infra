@@ -1,0 +1,17 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: agent-egress-lockdown
+policies:
+  - ../../agent-egress-lockdown.yaml
+resources:
+  - resources.yaml
+results:
+  # A namespace labelled talyvor.io/agents=true gets the egress lockdown.
+  - policy: agent-egress-lockdown
+    rule: default-deny-egress
+    kind: Namespace
+    result: pass
+    resources:
+      - agents-team
+    generatedResource: generated.yaml

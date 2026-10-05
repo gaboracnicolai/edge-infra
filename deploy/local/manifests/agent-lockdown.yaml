@@ -1,0 +1,22 @@
+# Phase 29 — an agent in a namespace of its own, which up.sh then labels
+# talyvor.io/agents=true so that k8s/policies/agent-egress-lockdown.yaml locks
+# its egress. It trusts the mock provider's CA (the mock-provider-ca configmap,
+# copied in by up.sh) for its own TLS through a CONNECT tunnel.
+# The image is substituted by up.sh (__CURL__).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-locked
+  namespace: agents-locked
+  labels: {app: agent}
+spec:
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+  containers:
+    - name: agent
+      image: __CURL__
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: provider-ca, mountPath: /etc/mock-provider-ca, readOnly: true}
+  volumes:
+    - name: provider-ca
+      configMap: {name: mock-provider-ca}

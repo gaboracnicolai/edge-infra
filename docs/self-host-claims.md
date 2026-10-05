@@ -69,3 +69,12 @@ HTTP that `edge-egress` sends on over TLS it verifies against the provider's CA.
 A host that is not in `egress_destinations` gets 403, CONNECT included, and a
 listed host whose certificate does not name it gets 503 while Envoy's
 `ssl.fail_verify_san` counter rises.
+
+Phase 29 locks an agent namespace to `edge-egress`
+([agent-egress.md](agent-egress.md#locking-agents-in)). The mock provider's own
+NetworkPolicy is removed first, so it answers any pod. An agent in a new
+namespace calls it directly and is served. Once the namespace is labelled
+`talyvor.io/agents=true`, Kyverno writes the `agent-egress-lockdown`
+NetworkPolicy into it, the same direct call times out, and the same call through
+`edge-egress` is served. Deleted, the NetworkPolicy is written back by Kyverno
+and the direct call is dropped again.

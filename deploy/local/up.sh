@@ -45,6 +45,9 @@
 #      over SDS, a pod without one is refused at the TLS handshake
 #  28  edge-egress: an agent reaches a mock TLS provider only through it —
 #      direct dropped, CONNECT and proxied HTTP served, unlisted hosts 403
+#  29  egress lockdown: Kyverno default-denies egress in a namespace labelled
+#      talyvor.io/agents=true — the direct call dropped, the same call through
+#      edge-egress served, the deleted policy written back
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -2555,6 +2558,110 @@ SQL
   ok "PHASE 28 — an agent reaches the mock TLS provider only through edge-egress: direct dropped, CONNECT and plain HTTP through the gateway served, unlisted hosts 403, a misnamed certificate refused"
 }
 
+# ---- Phase 29 — agent egress lockdown (B28.223) ------------------------------
+# k8s/policies/agent-egress-lockdown.yaml: Kyverno writes a NetworkPolicy into
+# every namespace labelled talyvor.io/agents=true that lets its pods reach
+# cluster DNS and edge-egress:3128, nothing else. In Phase 28 the mock provider
+# protected itself; a real provider is on the internet and answers anyone, so
+# this phase first opens the mock provider to every pod. The only thing left
+# between the agent and the provider is then the lockdown.
+LOCKED_NS="agents-locked"
+
+# locked_curl [curl args...] — curl from the agent-locked pod. Echoes curl's
+# verbose output and "curl-exit=<rc>".
+locked_curl() {
+  local out rc=0
+  out="$(k -n "$LOCKED_NS" exec agent-locked -- curl -sv --max-time 8 "$@" 2>&1)" || rc=$?
+  printf '%s\ncurl-exit=%s\n' "$out" "$rc"
+}
+
+# locked_direct_dropped — the agent's direct call to the provider, retried until
+# it times out with no HTTP answer (Calico programs a new policy within seconds).
+locked_direct_dropped() {
+  local out i=0
+  while :; do
+    out="$(locked_curl --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+    has "$out" "curl-exit=28" && ! has "$out" "< HTTP/" && return 0
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { printf '%s\n' "$out" | tail -15; return 1; }
+    sleep 2
+  done
+}
+
+phase29_egress_lockdown() {
+  section "PHASE 29 — egress lockdown: in an agent namespace, edge-egress is the only way out"
+  local out i ca uid
+
+  section "the mock provider opened to every pod, as a provider on the internet is"
+  k -n mock-provider delete networkpolicy default-deny-ingress allow-from-edge-egress --ignore-not-found >/dev/null
+  ok "mock-provider has no NetworkPolicy left"
+
+  section "the agent-egress-lockdown ClusterPolicy"
+  k apply -f "$REPO_ROOT/k8s/policies/agent-egress-lockdown.yaml" >/dev/null
+  k wait --for=condition=Ready clusterpolicy/agent-egress-lockdown --timeout=120s >/dev/null \
+    || die "PHASE29: the agent-egress-lockdown policy did not become Ready"
+  ok "clusterpolicy/agent-egress-lockdown Ready"
+
+  section "an agent in $LOCKED_NS, a namespace not yet labelled as holding agents"
+  # A re-run starts from an unlabelled namespace again.
+  k delete namespace "$LOCKED_NS" --ignore-not-found --wait=true --timeout=180s >/dev/null
+  ca="$(k -n agents get configmap mock-provider-ca -o jsonpath='{.data.ca\.crt}')"
+  [ -n "$ca" ] || die "PHASE29: no mock-provider-ca configmap in agents — run phase28_egress_gateway first"
+  k create namespace "$LOCKED_NS" >/dev/null
+  k -n "$LOCKED_NS" create configmap mock-provider-ca --from-literal=ca.crt="$ca" >/dev/null
+  sed "s|__CURL__|$ATTACKER_IMAGE|" "$LOCAL_DIR/manifests/agent-lockdown.yaml" | k apply -f - >/dev/null
+  k -n "$LOCKED_NS" wait --for=condition=Ready pod/agent-locked --timeout=180s >/dev/null \
+    || die "PHASE29: agent-locked did not become Ready"
+  ok "agent-locked running in $LOCKED_NS"
+
+  section "CONTROL — before the label, the agent's direct call to the provider is served"
+  i=0
+  while :; do
+    out="$(locked_curl --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+    has "$out" "Name: mock-llm" && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { printf '%s\n' "$out" | tail -15; die "PHASE29: the direct call never worked, so blocking it would prove nothing"; }
+    sleep 2
+  done
+  ok "agent-locked -> $MOCK_HOST directly: served (nothing else stands in the way)"
+
+  section "$LOCKED_NS labelled talyvor.io/agents=true: Kyverno writes the lockdown"
+  k label namespace "$LOCKED_NS" talyvor.io/agents=true --overwrite >/dev/null
+  i=0
+  until k -n "$LOCKED_NS" get networkpolicy agent-egress-lockdown >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || die "PHASE29 FAIL: Kyverno did not write agent-egress-lockdown into $LOCKED_NS"
+    sleep 2
+  done
+  ok "networkpolicy $LOCKED_NS/agent-egress-lockdown: egress to kube-dns:53 and edge/edge-egress:3128 only"
+
+  section "RED — the same direct call is now dropped"
+  locked_direct_dropped || die "PHASE29 FAIL: with the lockdown in place the agent still reached the provider directly"
+  ok "agent-locked -> $MOCK_HOST directly: no answer, timed out (curl-exit=28)"
+
+  section "GREEN — the same call through edge-egress is served"
+  out="$(locked_curl -x "$EGRESS_PROXY" --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+  has "$out" "Name: mock-llm" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE29 FAIL: the locked agent could not reach the provider through edge-egress"; }
+  ok "agent-locked -> edge-egress -> $MOCK_HOST: $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //'), Name: mock-llm"
+
+  section "the lockdown stays: deleted from the namespace, Kyverno writes it back"
+  uid="$(k -n "$LOCKED_NS" get networkpolicy agent-egress-lockdown -o jsonpath='{.metadata.uid}')"
+  k -n "$LOCKED_NS" delete networkpolicy agent-egress-lockdown >/dev/null
+  i=0
+  while :; do
+    out="$(k -n "$LOCKED_NS" get networkpolicy agent-egress-lockdown -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+    [ -n "$out" ] && [ "$out" != "$uid" ] && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || die "PHASE29 FAIL: the deleted lockdown was not written back"
+    sleep 2
+  done
+  locked_direct_dropped || die "PHASE29 FAIL: after the lockdown was written back the agent reached the provider directly"
+  ok "agent-egress-lockdown written back (uid $uid -> $out); the direct call is dropped again"
+
+  ok "PHASE 29 — in a namespace labelled talyvor.io/agents=true the agent's direct call is dropped, the same call through edge-egress is served, and the lockdown cannot be deleted away"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2592,7 +2699,8 @@ main() {
   phase24_telemetry
   phase27_agent_svids
   phase28_egress_gateway
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress."
+  phase29_egress_lockdown
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
