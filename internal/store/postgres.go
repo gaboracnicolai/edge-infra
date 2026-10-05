@@ -104,7 +104,7 @@ func (s *PostgresStore) Close() {
 
 // LoadSnapshot returns every active row across the configuration tables.
 //
-// All five reads run inside one REPEATABLE READ, read-only transaction so the
+// All six reads run inside one REPEATABLE READ, read-only transaction so the
 // result is a single point-in-time view. Without this the queries could land
 // on different pooled connections and straddle a concurrent write, assembling
 // a torn snapshot (e.g. a route whose gateway or cluster was just deleted)
@@ -134,6 +134,9 @@ func (s *PostgresStore) LoadSnapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	if snap.Secrets, err = loadSecrets(ctx, tx, s.kek); err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
+	}
+	if snap.EgressDestinations, err = loadEgressDestinations(ctx, tx); err != nil {
+		return nil, fmt.Errorf("load egress destinations: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -341,6 +344,30 @@ func loadEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func loadEgressDestinations(ctx context.Context, q querier) ([]EgressDestination, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, name, host, port, COALESCE(ca_secret_name, ''), connect_timeout_ms
+		FROM egress_destinations
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []EgressDestination
+	for rows.Next() {
+		var d EgressDestination
+		var ms int64
+		if err := rows.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.CASecret, &ms); err != nil {
+			return nil, err
+		}
+		d.ConnectTimeout = time.Duration(ms) * time.Millisecond
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }

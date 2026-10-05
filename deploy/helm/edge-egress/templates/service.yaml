@@ -1,0 +1,17 @@
+# The address agents use as their proxy (http_proxy / https_proxy).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "edge-egress.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-egress.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "edge-egress.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.proxy.port }}
+      targetPort: proxy
+      protocol: TCP

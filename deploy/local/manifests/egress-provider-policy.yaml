@@ -1,0 +1,28 @@
+# Phase 28 — only edge-egress may reach the mock provider: every other ingress to
+# its pods is dropped, so an agent's direct call never connects.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: mock-provider
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-edge-egress
+  namespace: mock-provider
+spec:
+  podSelector:
+    matchLabels: {app: llm}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: edge}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: edge-egress}
+      ports:
+        - {protocol: TCP, port: 8443}

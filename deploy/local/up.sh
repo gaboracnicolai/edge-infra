@@ -43,6 +43,8 @@
 #      admitted pinned to its digest (red-first, runs right after 10)
 #  27  csi-driver-spiffe issues agent pods their SVIDs; with the trust bundle
 #      over SDS, a pod without one is refused at the TLS handshake
+#  28  edge-egress: an agent reaches a mock TLS provider only through it —
+#      direct dropped, CONNECT and proxied HTTP served, unlisted hosts 403
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -2416,6 +2418,137 @@ SQL
   ok "PHASE 27 — csi-driver-spiffe issues agent SVIDs; with the trust bundle over SDS, a pod without one is refused at the TLS handshake"
 }
 
+# ---- Phase 28 — an egress gateway for agents (B28.222) ----------------------
+# edge-egress is an Envoy Deployment agents use as their proxy. It connects to
+# the control plane as node edge-egress/<pod> and receives only the egress
+# snapshot: one listener that reaches the hosts in egress_destinations — plain
+# HTTP sent on over TLS it verifies, CONNECT tunnelled with the agent's own TLS —
+# and answers 403 for every other host. The mock provider's NetworkPolicy admits
+# edge-egress alone, so an agent reaches it only through the gateway.
+EGRESS_PROXY="http://edge-egress.edge.svc.cluster.local:3128"
+MOCK_HOST="llm.mock-provider.svc.cluster.local"
+IMPOSTOR_HOST="impostor.mock-provider.svc.cluster.local"
+
+# agent_egress_curl [curl args...] — curl from the agent-egress pod. Echoes curl's
+# verbose output and "curl-exit=<rc>".
+agent_egress_curl() {
+  local out rc=0
+  out="$(k -n agents exec agent-egress -- curl -sv --max-time 8 "$@" 2>&1)" || rc=$?
+  printf '%s\ncurl-exit=%s\n' "$out" "$rc"
+}
+
+# egress_stat <stat> — the edge-egress Envoy's counter <stat>, read from its
+# localhost-only admin. Echoes "?" when it could not be read, never a silent 0.
+egress_stat() {
+  local pod pf out
+  pod="$(k -n edge get pod -l app.kubernetes.io/name=edge-egress -o jsonpath='{.items[0].metadata.name}')"
+  kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$pod" 19005:9901 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  out="$(curl -s --max-time 8 -G --data-urlencode "filter=^$1\$" http://127.0.0.1:19005/stats 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  has "$out" "$1: " || { echo "?"; return; }
+  printf '%s\n' "$out" | awk -F': ' '{print $2 + 0; exit}'
+}
+
+phase28_egress_gateway() {
+  section "PHASE 28 — the egress gateway: an agent reaches a mock TLS provider only through edge-egress"
+  local tmp pgpod code body out i before after
+  tmp="$(mktemp -d)"
+
+  section "a mock TLS provider at $MOCK_HOST, its certificate from a CA of its own"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=mock-provider-ca" \
+    -keyout "$tmp/ca.key" -out "$tmp/ca.crt" >/dev/null 2>&1 || die "openssl could not mint the provider CA"
+  openssl req -newkey rsa:2048 -nodes -subj "/CN=$MOCK_HOST" -keyout "$tmp/llm.key" -out "$tmp/llm.csr" >/dev/null 2>&1 \
+    || die "openssl could not mint the provider key"
+  printf 'subjectAltName=DNS:%s\n' "$MOCK_HOST" > "$tmp/san.cnf"
+  openssl x509 -req -in "$tmp/llm.csr" -CA "$tmp/ca.crt" -CAkey "$tmp/ca.key" -CAcreateserial -days 2 \
+    -extfile "$tmp/san.cnf" -out "$tmp/llm.crt" >/dev/null 2>&1 || die "openssl could not sign the provider cert"
+  k create namespace mock-provider --dry-run=client -o yaml | k apply -f - >/dev/null
+  k create namespace agents --dry-run=client -o yaml | k apply -f - >/dev/null
+  apply_secret mock-provider tls llm-tls --cert="$tmp/llm.crt" --key="$tmp/llm.key" >/dev/null
+  k -n agents create configmap mock-provider-ca --from-file=ca.crt="$tmp/ca.crt" --dry-run=client -o yaml | k apply -f - >/dev/null
+  sed -e "s|__WHOAMI__|$WHOAMI_IMAGE|" -e "s|__CURL__|$ATTACKER_IMAGE|" "$LOCAL_DIR/manifests/egress-provider.yaml" | k apply -f - >/dev/null
+  k -n mock-provider rollout status deploy/llm --timeout=180s >/dev/null || die "PHASE28: the mock provider did not start"
+  k -n agents wait --for=condition=Ready pod/agent-egress --timeout=180s >/dev/null || die "PHASE28: agent-egress did not become Ready"
+  ok "mock provider serving HTTPS as $MOCK_HOST; agent-egress trusts its CA"
+
+  section "CONTROL — before the provider's NetworkPolicy, the agent's direct call is served"
+  out="$(agent_egress_curl --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+  has "$out" "Name: mock-llm" || { printf '%s\n' "$out" | tail -15; die "PHASE28: the direct call never worked, so blocking it would prove nothing"; }
+  ok "agent-egress -> $MOCK_HOST directly: served (the path the policy is about to close is real)"
+
+  section "the provider admits edge-egress alone (NetworkPolicy); the direct call is now dropped"
+  k apply -f "$LOCAL_DIR/manifests/egress-provider-policy.yaml" >/dev/null
+  i=0
+  while :; do
+    out="$(agent_egress_curl --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+    has "$out" "curl-exit=28" && ! has "$out" "< HTTP/" && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { printf '%s\n' "$out" | tail -15; die "PHASE28 FAIL: the direct call was not dropped"; }
+    sleep 2
+  done
+  ok "agent-egress -> $MOCK_HOST directly: no answer, timed out (curl-exit=28)"
+
+  section "edge-egress: one Envoy, xDS node edge-egress/<pod>"
+  helm_install edge-egress edge || diag_fail edge-egress edge
+
+  section "the provider's CA through the custodian, and two egress_destinations rows"
+  body="$(jq -n --rawfile c "$tmp/ca.crt" '{kind: "validation_context", cert_pem: $c}')"
+  code="$(custodian_put mock-provider-ca "$body")"
+  [ "$code" = 200 ] || die "PHASE28: the custodian did not accept the provider CA (HTTP $code)"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q >/dev/null <<SQL
+INSERT INTO egress_destinations (id, name, host, port, ca_secret_name) VALUES
+  ('mock-llm', 'mock-llm', '$MOCK_HOST', 443, 'mock-provider-ca'),
+  ('impostor', 'impostor', '$IMPOSTOR_HOST', 443, 'mock-provider-ca')
+ON CONFLICT (name) DO UPDATE SET host=EXCLUDED.host, port=EXCLUDED.port,
+  ca_secret_name=EXCLUDED.ca_secret_name, updated_at=now();
+SQL
+  ok "egress_destinations: mock-llm ($MOCK_HOST) and impostor ($IMPOSTOR_HOST), both verified against mock-provider-ca"
+
+  section "GREEN — the same call through edge-egress (CONNECT, the agent's TLS end to end)"
+  i=0
+  while :; do
+    out="$(agent_egress_curl -x "$EGRESS_PROXY" --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+    has "$out" "Name: mock-llm" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out" | tail -15; die "PHASE28 FAIL: the agent never reached the provider through edge-egress"; }
+    sleep 2
+  done
+  ok "agent-egress -> edge-egress -> $MOCK_HOST: $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //'), Name: mock-llm"
+
+  section "GREEN — plain HTTP through edge-egress: edge-egress originates the TLS and verifies the provider"
+  out="$(agent_egress_curl -x "$EGRESS_PROXY" "http://$MOCK_HOST/")"
+  has "$out" "< HTTP/1.1 200" && has "$out" "Name: mock-llm" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE28 FAIL: plain HTTP through edge-egress did not reach the provider"; }
+  ok "agent-egress -> edge-egress (TLS to $MOCK_HOST) -> 200, Name: mock-llm"
+
+  section "RED — a host not in egress_destinations: 403 from edge-egress, CONNECT too"
+  out="$(agent_egress_curl -x "$EGRESS_PROXY" "http://example.com/")"
+  has "$out" "< HTTP/1.1 403" && has "$out" "edge-egress: destination not allowed" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE28 FAIL: an unlisted host was not refused by edge-egress"; }
+  out="$(agent_egress_curl -x "$EGRESS_PROXY" "https://example.com/")"
+  has "$out" "CONNECT tunnel failed, response 403" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE28 FAIL: CONNECT to an unlisted host was not refused"; }
+  ok "example.com through edge-egress: 403, and CONNECT example.com:443: 403"
+
+  section "RED — a listed host whose certificate does not name it: edge-egress refuses the upstream TLS"
+  before="$(egress_stat cluster.egress_impostor.ssl.fail_verify_san)"
+  out="$(agent_egress_curl -x "$EGRESS_PROXY" "http://$IMPOSTOR_HOST/")"
+  after="$(egress_stat cluster.egress_impostor.ssl.fail_verify_san)"
+  echo "  $IMPOSTOR_HOST -> $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //'); Envoy ssl.fail_verify_san $before -> $after"
+  has "$out" "< HTTP/1.1 503" && ! has "$out" "Name: mock-llm" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE28 FAIL: edge-egress served a host its certificate does not name"; }
+  [ "$before" != "?" ] && [ "$after" != "?" ] && [ "$after" -gt "$before" ] \
+    || die "PHASE28 FAIL: ssl.fail_verify_san did not rise ($before -> $after), so the certificate check was not what refused it"
+  ok "$IMPOSTOR_HOST: 503 — the provider's certificate does not name it, and edge-egress would not talk to it"
+
+  rm -rf "$tmp"
+  ok "PHASE 28 — an agent reaches the mock TLS provider only through edge-egress: direct dropped, CONNECT and plain HTTP through the gateway served, unlisted hosts 403, a misnamed certificate refused"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2452,7 +2585,8 @@ main() {
   phase23_connection_manager
   phase24_telemetry
   phase27_agent_svids
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake."
+  phase28_egress_gateway
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

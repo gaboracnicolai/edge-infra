@@ -1,0 +1,3 @@
+# Local overlay for edge-egress (Phase 28). One replica, so the Envoy whose
+# counters the phase reads is the one that served every request.
+replicaCount: 1

@@ -66,7 +66,7 @@ func (f *fakeDB) Close()                       {}
 
 // TestLoadSnapshot_ReadsInSingleTransaction pins the torn-read fix: every table
 // must be read from one REPEATABLE READ, read-only point-in-time, never from
-// five independent pooled connections.
+// six independent pooled connections.
 func TestLoadSnapshot_ReadsInSingleTransaction(t *testing.T) {
 	ftx := &fakeTx{}
 	fdb := &fakeDB{tx: ftx}
@@ -80,7 +80,7 @@ func TestLoadSnapshot_ReadsInSingleTransaction(t *testing.T) {
 		"reads must use a REPEATABLE READ point-in-time snapshot")
 	assert.Equal(t, pgx.ReadOnly, fdb.lastTxOptions.AccessMode)
 	assert.Equal(t, 0, fdb.directQueries, "no read may bypass the transaction via the pool")
-	assert.Equal(t, 5, ftx.queryCount,
-		"gateways, routes, clusters, endpoints, secrets must all read through the one tx")
+	assert.Equal(t, 6, ftx.queryCount,
+		"gateways, routes, clusters, endpoints, secrets, egress destinations must all read through the one tx")
 	assert.True(t, ftx.committed, "the read tx must be committed on success")
 }

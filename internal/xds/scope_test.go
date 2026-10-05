@@ -110,3 +110,35 @@ func TestReconcile_RepinningAGatewayBumpsTheVersion(t *testing.T) {
 	require.NotEqual(t, before, r.PublishedVersion())
 	require.Equal(t, []string{"tenant-a-cert"}, names(t, cache, "node-c", resourcev3.SecretType))
 }
+
+// An edge-egress node holds the egress listener and its clusters and nothing of
+// the gateways — no listener, no key — and a gateway node holds nothing of the
+// egress. Adding a destination publishes a new version to both.
+func TestReconcile_EgressNodeGetsOnlyTheEgressSnapshot(t *testing.T) {
+	cache := newCache()
+	fs := &fakeStore{snap: twoTenantSnapshot()}
+	r := NewReconciler(cache, fs, testNodeID, discardLogger())
+	egressNode := EgressNodePrefix + "edge-egress-0"
+	connect(t, cache, egressNode)
+	connect(t, cache, "node-a")
+	require.NoError(t, r.Reconcile(context.Background()))
+	before := r.PublishedVersion()
+	require.Equal(t, []string{"egress"}, names(t, cache, egressNode, resourcev3.ListenerType))
+	require.Empty(t, names(t, cache, egressNode, resourcev3.ClusterType))
+
+	withDest := twoTenantSnapshot()
+	withDest.EgressDestinations = []store.EgressDestination{{ID: "d1", Name: "mock-llm", Host: "llm.mock.test", Port: 443}}
+	fs.snap = withDest
+	require.NoError(t, r.Reconcile(context.Background()))
+
+	require.NotEqual(t, before, r.PublishedVersion())
+	require.Equal(t, []string{"egress"}, names(t, cache, egressNode, resourcev3.ListenerType))
+	require.Equal(t, []string{"egress_mock-llm", "egress_mock-llm_tunnel"}, names(t, cache, egressNode, resourcev3.ClusterType))
+	require.Empty(t, names(t, cache, egressNode, resourcev3.SecretType), "no gateway key reaches an egress node")
+	require.Equal(t, []string{"shared-http", "tenant-a-https"}, names(t, cache, "node-a", resourcev3.ListenerType))
+	require.Equal(t, []string{"c-a", "c-b"}, names(t, cache, "node-a", resourcev3.ClusterType))
+
+	snap, err := cache.GetSnapshot(egressNode)
+	require.NoError(t, err)
+	require.NoError(t, snapshotConsistencyError(snap.(*cachev3.Snapshot)))
+}

@@ -40,6 +40,7 @@ type Reconciler struct {
 	mtlsRoutesMissingClientCA atomic.Int64
 	rls                       builders.RateLimitServiceOptions
 	telemetry                 builders.TelemetryOptions
+	egress                    builders.EgressOptions
 
 	// allowEmpty disables the empty-collapse guard (EDGE_ALLOW_EMPTY_SNAPSHOT),
 	// permitting an intentional scale-to-zero / drain. Read once at construction.
@@ -104,6 +105,10 @@ func NewReconciler(c cachev3.SnapshotCache, s store.Store, nodeID string, log *s
 		triggerCh:  make(chan struct{}, 1),
 		allowEmpty: allowEmptySnapshot(),
 		nodeAcks:   make(map[string]string),
+		egress: builders.EgressOptions{
+			Port:         builders.DefaultEgressPort,
+			SystemCAFile: builders.DefaultEgressSystemCAFile,
+		},
 	}
 }
 
@@ -244,6 +249,13 @@ func (r *Reconciler) WithTelemetry(opts builders.TelemetryOptions) {
 	r.telemetry = opts
 }
 
+// WithEgress configures the listener edge-egress Envoys serve (B28.222). Must be
+// called before Run. Without it they listen on builders.DefaultEgressPort and
+// verify a destination with no CA of its own against the image's trust store.
+func (r *Reconciler) WithEgress(opts builders.EgressOptions) {
+	r.egress = opts
+}
+
 // TriggerNow requests an out-of-band reconcile. It is safe to call from any
 // goroutine and never blocks: if a trigger is already pending the call is a
 // no-op (coalescing semantics).
@@ -345,7 +357,11 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 		resourcev3.SecretType:   builders.BuildSecrets(domain.Secrets),
 	}
 
-	hash := hashWithPins(hashResources(resources), nodePins(domain.Gateways))
+	// What edge-egress nodes hold. It is folded into the hash, so a change to the
+	// destinations (or a CA bundle one names) publishes a new version even though
+	// no gateway resource changed.
+	egress := builders.BuildEgress(domain.EgressDestinations, domain.Secrets, r.egress, r.telemetry)
+	hash := hashWithEgress(hashWithPins(hashResources(resources), nodePins(domain.Gateways)), hashResources(egress))
 
 	// Fast path: local state confirms nothing has changed on this replica.
 	prev := r.localLast.Load()
@@ -453,7 +469,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 
 	// Each node gets its OWN snapshot: only the gateways whose node_selector
 	// selects it, and only the TLS secrets those reference (XDS-1).
-	pub := &publication{version: version, snap: snap, resources: resources, domain: domain}
+	pub := &publication{version: version, snap: snap, resources: resources, domain: domain, egress: egress}
 	nodes := r.targetNodes()
 	for _, n := range nodes {
 		nodeSnap, err := r.snapshotForNode(pub, n)

@@ -105,6 +105,7 @@ jobs:
               "migrations/0005_route_tls_secret.sql",
               "migrations/0006_secret_kind.sql",
               "migrations/0007_route_client_ca.sql",
+              "migrations/0009_egress_destinations.sql",
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
               "osb/migrations/0003_dead_letter.sql",

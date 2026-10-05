@@ -40,6 +40,7 @@ type publication struct {
 	snap      *cachev3.Snapshot
 	resources map[resourcev3.Type][]types.Resource
 	domain    *store.Snapshot
+	egress    map[resourcev3.Type][]types.Resource // what edge-egress nodes hold
 }
 
 // gatewayServesNode reports whether node is selected by g's node_selector. An
@@ -122,6 +123,12 @@ func nodePins(gateways []store.Gateway) string {
 	return strings.Join(pins, ";")
 }
 
+// hashWithEgress folds the egress resources' hash into the config hash.
+func hashWithEgress(hash, egressHash string) string {
+	sum := sha256.Sum256([]byte(hash + "|egress=" + egressHash))
+	return hex.EncodeToString(sum[:])
+}
+
 // hashWithPins folds the node pins into the resource hash. With no pins the hash
 // is returned unchanged, so an unpinned fleet keeps exactly the versions it had.
 func hashWithPins(hash, pins string) string {
@@ -146,11 +153,15 @@ func unservableSelectorKeys(gateways []store.Gateway) map[string][]string {
 	return out
 }
 
-// snapshotForNode returns the snapshot node must hold for publication p. With no
+// snapshotForNode returns the snapshot node must hold for publication p. An
+// edge-egress node holds the egress snapshot alone. For any other node, with no
 // pinned gateway it is the global snapshot itself; otherwise it holds only the
 // gateways selecting node, their routes, and the secrets those reference.
 // Clusters and endpoints carry no key material and are shared as built.
 func (r *Reconciler) snapshotForNode(p *publication, node string) (*cachev3.Snapshot, error) {
+	if IsEgressNode(node) {
+		return cachev3.NewSnapshot(p.version, p.egress)
+	}
 	if nodePins(p.domain.Gateways) == "" {
 		return p.snap, nil
 	}

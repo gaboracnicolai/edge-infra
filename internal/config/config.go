@@ -74,6 +74,11 @@ type Config struct {
 	TelemetryPort          uint32  // OTLP/gRPC port
 	TelemetryServiceName   string  // service.name on spans and log records
 	TelemetrySamplePercent float64 // share of requests traced, 0–100
+
+	// Egress gateway (B28.222): the proxy listener edge-egress Envoys serve to
+	// agents, reaching only the hosts in egress_destinations.
+	EgressPort         uint32 // EGRESS_LISTENER_PORT
+	EgressSystemCAFile string // EGRESS_SYSTEM_CA_FILE: trust store for a destination with no CA
 }
 
 func FromEnv() (*Config, error) {
@@ -139,6 +144,9 @@ func FromEnv() (*Config, error) {
 		}
 		c.TelemetrySamplePercent = p
 	}
+
+	c.EgressPort = getenvU32("EGRESS_LISTENER_PORT", 3128)
+	c.EgressSystemCAFile = getenv("EGRESS_SYSTEM_CA_FILE", "/etc/ssl/certs/ca-certificates.crt")
 
 	return c, nil
 }

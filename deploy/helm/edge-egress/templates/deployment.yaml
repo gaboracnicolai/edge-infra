@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge-egress.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-egress.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "edge-egress.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "edge-egress.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "edge-egress.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # The xDS node id is edge-egress/<pod name>: the control plane serves a
+        # node with that prefix the egress snapshot and nothing else.
+        - name: bootstrap
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662  # pinned digest
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              sed "s|NODE_ID_PLACEHOLDER|edge-egress/$POD_NAME|g"
+              /bootstrap-src/bootstrap.yaml
+              > /etc/envoy/bootstrap.yaml
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: bootstrap-src
+              mountPath: /bootstrap-src
+            - name: envoy-config
+              mountPath: /etc/envoy
+      containers:
+        - name: envoy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "-c"
+            - "/etc/envoy/bootstrap.yaml"
+            - "--service-cluster"
+            - "edge-egress"
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.proxy.port }}
+              protocol: TCP
+            # Admin is bound to 127.0.0.1 in the bootstrap — in-pod only.
+            - name: admin
+              containerPort: 9901
+              protocol: TCP
+            - name: health
+              containerPort: 9902
+              protocol: TCP
+            - name: stats
+              containerPort: 9903
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+            {{- if .Values.xds.tls.enabled }}
+            - name: xds-client-tls
+              mountPath: {{ .Values.xds.tls.mountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: bootstrap-src
+          configMap:
+            name: {{ include "edge-egress.fullname" . }}-bootstrap
+        - name: envoy-config
+          emptyDir: {}
+        {{- if .Values.xds.tls.enabled }}
+        - name: xds-client-tls
+          secret:
+            secretName: {{ .Values.xds.tls.existingSecret }}
+        {{- end }}
