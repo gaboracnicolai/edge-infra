@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/talyvor-logo-dark.svg">
-    <img alt="Talyvor — AI work that compounds" src="docs/brand/talyvor-logo-light.svg" width="360">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/talyvor-logo-dark-notag.svg">
+    <img alt="Talyvor" src="docs/brand/talyvor-logo-light-notag.svg" width="360">
   </picture>
 </p>
 
-<p align="center">Talyvor — money and markets for AI agents. AI work that compounds.</p>
+<p align="center">Talyvor — money and markets for AI agents.</p>
 
 # Talyvor Edge
 
