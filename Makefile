@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -60,6 +60,11 @@ verify-xds-mtls:
 # :latest or no tag. Pin images to the SHA you pushed, as the server does.
 verify-image-pins:
 	bash deploy/hack/verify-image-pins.sh
+
+# A v<SemVer> git tag packages every chart at that version: the release version
+# script and its packaged-chart check, on a throwaway tag. Needs helm.
+release-version-test:
+	bash deploy/hack/release-version-test.sh
 
 # Cross-language integration test for the OSB -> data-plane translator: stands up
 # a throwaway Postgres with BOTH schemas and proves an OSB provision surfaces in

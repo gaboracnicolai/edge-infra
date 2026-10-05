@@ -1,12 +1,19 @@
 name: Release
 
-# The nightly release: build and push every image at one commit, pin every chart
-# image to that commit's tag, prove the pinned charts on a throwaway kind cluster
-# with every first-party image PULLED from the registry — nothing built from the
-# working tree — and publish the pinned charts as this run's artifact.
-#   images       — images.yaml, called: all eight images pushed at github.sha
-#   release-e2e  — deploy/hack/release-pin.sh github.sha, make release-e2e,
-#                  helm package -> artifact edge-charts-<sha>
+# The release: build and push every image at one commit, pin every chart image to
+# that build, prove the pinned charts on a throwaway kind cluster with every
+# first-party image PULLED from the registry — nothing built from the working
+# tree — and publish the pinned charts as this run's artifact.
+#
+# A git tag v<SemVer> is a release: `git tag v1.2.3 && git push origin v1.2.3`.
+# Its images are pushed at :<sha> AND :1.2.3, the charts pin :1.2.3 and package
+# as version 1.2.3, and the packages are attached to the GitHub release v1.2.3.
+# Every other run (nightly, main, PR) is the dev version 0.0.0-g<sha12> pinned to
+# :<sha>. deploy/hack/release-version.sh maps the ref to the version.
+#   images       — images.yaml, called: all eight images pushed and stamped
+#   release-e2e  — release-pin.sh <tag>, the stamps checked, make release-e2e,
+#                  helm package --version -> checked -> artifact edge-charts-<version>
+#   publish      — on a tag only: the GitHub release with the packaged charts
 #
 # Unlike the kind-* workflows it is not filtered on the image-build inputs
 # (internal/ciguard): it builds nothing itself, and runs on main every night.
@@ -17,14 +24,18 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    # Path filters do not apply to tags: every v* tag is released.
+    tags: ['v*']
     paths:
       - '.github/workflows/release.yaml'
       - 'deploy/hack/release-pin.sh'
+      - 'deploy/hack/release-version.sh'
   pull_request:
     branches: [main]
     paths:
       - '.github/workflows/release.yaml'
       - 'deploy/hack/release-pin.sh'
+      - 'deploy/hack/release-version.sh'
 
 concurrency:
   group: release-${{ github.event_name }}-${{ github.ref }}
@@ -44,8 +55,15 @@ jobs:
     permissions:
       contents: read
       packages: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Version from the ref
+        id: v
+        run: |
+          set -euo pipefail
+          bash deploy/hack/release-version.sh "$GITHUB_REF" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
       - name: Install kind, kubectl, helm (pinned + checksum-verified)
         env:
           KIND_VERSION: v0.31.0
@@ -73,22 +91,53 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pin every chart image to ${{ github.sha }}
+      - name: Pin every chart image to ${{ steps.v.outputs.image_tag }}
+        env:
+          IMAGE_TAG: ${{ steps.v.outputs.image_tag }}
         run: |
           set -euo pipefail
-          bash deploy/hack/release-pin.sh "$GITHUB_SHA"
+          bash deploy/hack/release-pin.sh "$IMAGE_TAG"
           bash deploy/hack/release-pin.sh --list
           make verify-image-pins
+      - name: Every pinned image is stamped ${{ steps.v.outputs.version }}
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: bash deploy/hack/release-version.sh --stamps "$VERSION" "$GITHUB_SHA"
       - name: make release-e2e
         run: make release-e2e
-      - name: Package the pinned charts
+      - name: Package the pinned charts as ${{ steps.v.outputs.version }}
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          IMAGE_TAG: ${{ steps.v.outputs.image_tag }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          for c in deploy/helm/*/; do helm package "$c" -d dist; done
+          for c in deploy/helm/*/; do helm package "$c" -d dist --version "$VERSION" --app-version "$IMAGE_TAG"; done
           ls -l dist
+          bash deploy/hack/release-version.sh --check "$VERSION" "$IMAGE_TAG" dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: edge-charts-${{ github.sha }}
+          name: edge-charts-${{ steps.v.outputs.version }}
           path: dist/*.tgz
           if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release-e2e
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: edge-charts-${{ needs.release-e2e.outputs.version }}
+          path: dist
+      - name: GitHub release ${{ github.ref_name }} with the charts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-e2e.outputs.version }}
+        run: |
+          set -euo pipefail
+          pre=(); case "$VERSION" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/*.tgz --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "Talyvor Edge $GITHUB_REF_NAME" --generate-notes "${pre[@]}"
