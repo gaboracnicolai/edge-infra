@@ -1,0 +1,13 @@
+# A namespace labelled as holding agents, which gets the lockdown, and one
+# without the label, which the policy does not match.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents-team
+  labels:
+    talyvor.io/agents: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: web

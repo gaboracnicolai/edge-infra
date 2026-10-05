@@ -1,0 +1,36 @@
+# What agent-egress-lockdown must write into agents-team: egress to cluster DNS
+# and to edge-egress:3128, and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-egress-lockdown
+  namespace: agents-team
+  labels:
+    app.kubernetes.io/managed-by: kyverno
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge-egress
+      ports:
+        - protocol: TCP
+          port: 3128

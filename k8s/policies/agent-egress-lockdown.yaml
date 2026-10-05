@@ -1,0 +1,72 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: agent-egress-lockdown
+  annotations:
+    policies.kyverno.io/title: Agent egress lockdown
+    policies.kyverno.io/category: Talyvor Edge Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Namespace, NetworkPolicy
+    policies.kyverno.io/description: >-
+      Every namespace labelled talyvor.io/agents=true gets a NetworkPolicy that
+      lets its pods send traffic to two places only: cluster DNS, and edge-egress
+      on its proxy port. An agent there cannot call a provider directly; it goes
+      out through edge-egress, which reaches only the hosts in
+      egress_destinations. Kyverno keeps the NetworkPolicy in place: deleted or
+      edited, it is put back. Labelling a namespace that already exists locks it
+      too. See docs/agent-egress.md.
+spec:
+  rules:
+    - name: default-deny-egress
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchLabels:
+                  talyvor.io/agents: "true"
+      generate:
+        generateExisting: true
+        synchronize: true
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: agent-egress-lockdown
+        namespace: "{{request.object.metadata.name}}"
+        data:
+          metadata:
+            labels:
+              app.kubernetes.io/managed-by: kyverno
+          spec:
+            # Every pod in the namespace, egress only: ingress stays as it was.
+            podSelector: {}
+            policyTypes:
+              - Egress
+            egress:
+              # Cluster DNS, so a pod can resolve edge-egress (and the names it
+              # asks edge-egress for).
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: kube-system
+                    podSelector:
+                      matchLabels:
+                        k8s-app: kube-dns
+                ports:
+                  - protocol: UDP
+                    port: 53
+                  - protocol: TCP
+                    port: 53
+              # edge-egress, in the namespace it is installed in (edge) and on
+              # its proxy port (the chart's proxy.port). Installed elsewhere,
+              # change these two values.
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: edge
+                    podSelector:
+                      matchLabels:
+                        app.kubernetes.io/name: edge-egress
+                ports:
+                  - protocol: TCP
+                    port: 3128
