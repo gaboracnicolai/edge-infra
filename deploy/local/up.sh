@@ -2281,11 +2281,13 @@ custodian_put() {
 
 # agent_curl <pod> [curl args...] — from inside an agent pod, an HTTPS request to
 # the mtls route on an edge-proxy node, trusting the route's server cert. Echoes
-# curl's verbose output and "curl-exit=<rc>".
+# curl's verbose output and "curl-exit=<rc>". Host is sent without the port, as
+# Phase 20 does: the route's domain is the bare host.
 agent_curl() {
   local pod="$1" out rc=0; shift
   out="$(k -n agents exec "$pod" -- curl -sv --max-time 8 --cacert /etc/agents-server-ca/ca.crt \
-    --resolve "$AGENT_HOST:$AGENT_PORT:$AGENT_GW_IP" "$@" "https://$AGENT_HOST:$AGENT_PORT/" 2>&1)" || rc=$?
+    --resolve "$AGENT_HOST:$AGENT_PORT:$AGENT_GW_IP" -H "Host: $AGENT_HOST" "$@" \
+    "https://$AGENT_HOST:$AGENT_PORT/" 2>&1)" || rc=$?
   printf '%s\ncurl-exit=%s\n' "$out" "$rc"
 }
 
