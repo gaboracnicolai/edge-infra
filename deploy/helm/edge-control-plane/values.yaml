@@ -88,6 +88,24 @@ rateLimitService:
   certFile: ""
   keyFile: ""
 
+# Gateway access logs and tracing. Every listener ALWAYS writes one JSON access
+# line per request to the edge-proxy's stdout (request_id, trace_id, status,
+# route, upstream, duration — the path without its query string), and every
+# response carries the x-request-id it was logged under.
+#
+# telemetry.otel additionally ships each listener's access record and an
+# OpenTelemetry span per sampled request to a collector over OTLP/gRPC. The
+# default address is the collector `make observe` installs (traces → Tempo,
+# logs → Loki). Opt-in; FAIL-OPEN: a collector that is down loses telemetry,
+# never a request.
+telemetry:
+  otel:
+    enabled: false
+    address: otel-collector.monitoring.svc.cluster.local
+    port: 4317
+    serviceName: edge-proxy
+    samplePercent: 100   # share of requests traced, 0–100
+
 # R4 CO-LOCATION: this DSN and the edge-osb DATABASE_URL must reference the SAME
 # Postgres database (both schemas applied there), so the OSB translator can write
 # derived data-plane rows in the same transaction as the services row.

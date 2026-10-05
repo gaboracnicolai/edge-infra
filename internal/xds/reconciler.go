@@ -39,6 +39,7 @@ type Reconciler struct {
 	// not merely logged.
 	mtlsRoutesMissingClientCA atomic.Int64
 	rls                       builders.RateLimitServiceOptions
+	telemetry                 builders.TelemetryOptions
 
 	// allowEmpty disables the empty-collapse guard (EDGE_ALLOW_EMPTY_SNAPSHOT),
 	// permitting an intentional scale-to-zero / drain. Read once at construction.
@@ -235,6 +236,14 @@ func (r *Reconciler) WithRateLimitService(opts builders.RateLimitServiceOptions)
 	r.rls = opts
 }
 
+// WithTelemetry configures the OpenTelemetry collector every gateway listener
+// exports its access log and trace spans to (and the collector's cluster). Must
+// be called before Run. The zero value (Enabled=false) leaves only the stdout
+// access log every listener always writes.
+func (r *Reconciler) WithTelemetry(opts builders.TelemetryOptions) {
+	r.telemetry = opts
+}
+
 // TriggerNow requests an out-of-band reconcile. It is safe to call from any
 // goroutine and never blocks: if a trigger is already pending the call is a
 // no-op (coalescing semantics).
@@ -328,9 +337,10 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 	}
 
 	resources := map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: builders.BuildListeners(domain.Gateways, domain.Routes, r.rateLimit, r.extAuthz, r.rls),
+		resourcev3.ListenerType: builders.BuildListenersWithTelemetry(domain.Gateways, domain.Routes, r.rateLimit, r.extAuthz, r.rls, r.telemetry),
 		resourcev3.RouteType:    builders.BuildRouteConfigs(domain.Gateways, domain.Routes, r.rls),
-		resourcev3.ClusterType:  builders.BuildClusters(domain.Clusters, domain.Endpoints, r.extAuthz, r.rls),
+		resourcev3.ClusterType: append(builders.BuildClusters(domain.Clusters, domain.Endpoints, r.extAuthz, r.rls),
+			builders.TelemetryClusters(r.telemetry)...),
 		resourcev3.EndpointType: builders.BuildEndpoints(domain.Clusters, domain.Endpoints),
 		resourcev3.SecretType:   builders.BuildSecrets(domain.Secrets),
 	}

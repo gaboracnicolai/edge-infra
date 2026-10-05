@@ -28,8 +28,13 @@ func SNIRouteConfigName(gatewayName, host string) string {
 	return gatewayName + "_routes_sni_" + host
 }
 
+// mustAny packs msg deterministically. The reconciler hashes the packed bytes to
+// decide whether config changed, and a map inside msg (the JSON access-log
+// format is one) would otherwise serialise in a different order on every build:
+// the same config would hash differently and be republished on every reconcile.
 func mustAny(msg proto.Message) *anypb.Any {
-	a, err := anypb.New(msg)
+	a := &anypb.Any{}
+	err := anypb.MarshalFrom(a, msg, proto.MarshalOptions{Deterministic: true})
 	if err != nil {
 		panic(fmt.Sprintf("marshal any: %v", err))
 	}

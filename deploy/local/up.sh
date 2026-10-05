@@ -34,6 +34,8 @@
 #  20  one HTTPS port serves two hosts, each with its own per-route cert (SNI)
 #  21  an OSB HTTPS service: public host's cert + stub body via a DNS upstream
 #  22  a second :443 gateway is refused and :443 keeps serving (red-first)
+#  23  forged identity headers are stripped; a path traversal is refused
+#  24  every listener access-logs and traces; the OTel collector shows curl's x-request-id
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -2004,6 +2006,84 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   ok "PHASE 23 — forged identity headers stripped; a path traversal is refused without a token"
 }
 
+# ---- Phase 24 — access logs and tracing on every listener (B28.205) ----------
+# manifests/otel-collector.yaml prints every span and log record it receives, at
+# otel-collector.monitoring:4317 — the chart's telemetry.otel default address.
+# helm_set_otel <true|false> — the same LIVE --set flip as helm_set_extauthz,
+# keeping ext_authz on (Phase 12's jwt route would refuse the snapshot without it).
+helm_set_otel() {
+  section "helm: telemetry.otel enabled=$1 (LIVE --set flip; ext_authz stays on)"
+  h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
+    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
+    -f "$LOCAL_DIR/values/values-control-plane.yaml" \
+    --set extAuthz.enabled=true --set telemetry.otel.enabled="$1" --wait --timeout 200s >/dev/null
+  k -n edge rollout restart ds/edge-proxy >/dev/null
+  k -n edge rollout status ds/edge-proxy --timeout=120s
+}
+
+# request_id <host> — the x-request-id header curl receives through :443.
+request_id() {
+  curl -s -D - -o /dev/null --max-time 6 -H "Host: $1" http://127.0.0.1:443/ 2>/dev/null \
+    | tr -d '\r' | awk -F': ' 'tolower($1)=="x-request-id"{print $2}'
+}
+collector_log() { k -n monitoring logs deploy/otel-collector --tail=-1 2>/dev/null || true; }
+proxy_log() { k -n edge logs -l app.kubernetes.io/name=edge-proxy --tail=5000 --max-log-requests=10 2>/dev/null || true; }
+
+# hcm_telemetry <edge-proxy-pod> — one line per connection manager on that Envoy:
+# "<listener> <access loggers> <tracer>".
+hcm_telemetry() {
+  envoy_config_dump "$1" | jq -r '.configs[]? | .dynamic_listeners[]? | .active_state.listener as $l
+    | $l.filter_chains[]?.filters[]? | select(.name == "envoy.filters.network.http_connection_manager")
+    | "\($l.name) \([.typed_config.access_log[]?.name] | join(",")) \(.typed_config.tracing.provider.name // "no-tracer")"' 2>/dev/null
+}
+
+phase24_telemetry() {
+  section "PHASE 24 — every listener logs its requests; the OTel collector shows the x-request-id curl received"
+  k apply -f "$LOCAL_DIR/manifests/otel-collector.yaml" >/dev/null
+  wait_rollout deploy/otel-collector monitoring
+  helm_set_otel false   # idempotent: no-op on a first run
+
+  section "RED — telemetry.otel off: the stdout access log has the request, the collector never sees it"
+  local rid0
+  retry 15 2 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 -H 'Host: tenant-a.local' http://127.0.0.1:443/)\" = 200 ]" \
+    || die "PHASE24 baseline broken: tenant-a.local is not serving 200"
+  rid0="$(request_id tenant-a.local)"
+  [ -n "$rid0" ] || die "PHASE24 FAIL: the response carries no x-request-id"
+  retry 10 2 sh -c "kubectl --context '$KUBE_CONTEXT' -n edge logs -l app.kubernetes.io/name=edge-proxy --tail=5000 --max-log-requests=10 2>/dev/null | grep -q '\"request_id\":\"$rid0\"'" \
+    || die "PHASE24 FAIL: no edge-proxy stdout access log line for x-request-id $rid0"
+  proxy_log | grep "\"request_id\":\"$rid0\"" | tail -1 | sed 's/^/    /'
+  sleep 5
+  has "$(collector_log)" "$rid0" && die "PHASE24 RED broken: the collector saw $rid0 while telemetry.otel was off"
+  ok "x-request-id $rid0 is in the stdout access log and not in the collector"
+
+  helm_set_otel true
+  retry 30 2 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 -H 'Host: tenant-a.local' http://127.0.0.1:443/)\" = 200 ]" \
+    || die "PHASE24: tenant-a.local stopped serving 200 after telemetry.otel was switched on"
+
+  section "every connection manager on every edge-proxy logs to stdout and the collector, and traces"
+  local pod lines bad=0
+  for pod in $(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[*].metadata.name}'); do
+    lines="$(hcm_telemetry "$pod")"
+    [ -n "$lines" ] || die "PHASE24 FAIL: $pod reports no listeners in its config_dump"
+    printf '%s\n' "$lines" | sed "s/^/    $pod: /"
+    printf '%s\n' "$lines" | awk '$2 != "envoy.access_loggers.stdout,envoy.access_loggers.open_telemetry" || $3 != "envoy.tracers.opentelemetry" {bad=1} END {exit bad}' || bad=1
+  done
+  [ "$bad" = 0 ] || die "PHASE24 FAIL: a listener lacks the stdout or OpenTelemetry access log, or the OpenTelemetry tracer"
+  ok "every listener carries both access logs and the OpenTelemetry tracer"
+
+  section "GREEN — the collector shows the x-request-id curl received, as an access record and a span"
+  local rid log
+  rid="$(request_id tenant-a.local)"
+  [ -n "$rid" ] || die "PHASE24 FAIL: the response carries no x-request-id"
+  log "curl received x-request-id: $rid"
+  retry 15 2 sh -c "kubectl --context '$KUBE_CONTEXT' -n monitoring logs deploy/otel-collector --tail=-1 2>/dev/null | grep -q 'guid:x-request-id: Str($rid)'" \
+    || die "PHASE24 FAIL: the collector has no span tagged guid:x-request-id $rid"
+  log="$(collector_log)"
+  has "$log" "request_id: Str($rid)" || die "PHASE24 FAIL: the collector has no access-log record with request_id $rid"
+  printf '%s\n' "$log" | grep -E "(request_id|guid:x-request-id): Str\($rid\)" | sed 's/^/    /'
+  ok "PHASE 24 — the OTel collector shows x-request-id $rid as an access-log record and a trace span"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2036,7 +2116,8 @@ main() {
   phase21_osb_https_public_host
   phase22_listener_collision
   phase23_connection_manager
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused."
+  phase24_telemetry
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

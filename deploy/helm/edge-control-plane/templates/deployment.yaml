@@ -120,6 +120,16 @@ spec:
             - name: RLS_KEY_FILE
               value: {{ .Values.rateLimitService.keyFile | quote }}
             {{- end }}
+            - name: GW_OTEL_ENABLED
+              value: {{ .Values.telemetry.otel.enabled | quote }}
+            - name: GW_OTEL_COLLECTOR_ADDRESS
+              value: {{ .Values.telemetry.otel.address | quote }}
+            - name: GW_OTEL_COLLECTOR_PORT
+              value: {{ .Values.telemetry.otel.port | quote }}
+            - name: GW_OTEL_SERVICE_NAME
+              value: {{ .Values.telemetry.otel.serviceName | quote }}
+            - name: GW_TRACE_SAMPLE_PERCENT
+              value: {{ .Values.telemetry.otel.samplePercent | quote }}
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

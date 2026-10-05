@@ -41,19 +41,27 @@ type RateLimitOptions struct {
 	FillInterval  time.Duration // refill period (must be > 0)
 }
 
+// BuildListeners renders one listener per gateway, with no telemetry collector:
+// every listener still writes its stdout access log.
 func BuildListeners(gateways []store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) []types.Resource {
+	return BuildListenersWithTelemetry(gateways, routes, rl, ea, rls, TelemetryOptions{})
+}
+
+// BuildListenersWithTelemetry is BuildListeners with every listener also
+// exporting its access log and trace spans to the collector tel names.
+func BuildListenersWithTelemetry(gateways []store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions, tel TelemetryOptions) []types.Resource {
 	byGateway := make(map[string][]store.Route, len(gateways))
 	for _, r := range routes {
 		byGateway[r.GatewayID] = append(byGateway[r.GatewayID], r)
 	}
 	out := make([]types.Resource, 0, len(gateways))
 	for _, g := range gateways {
-		out = append(out, listenerForGateway(g, byGateway[g.ID], rl, ea, rls))
+		out = append(out, listenerForGateway(g, byGateway[g.ID], rl, ea, rls, tel))
 	}
 	return out
 }
 
-func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions) *listenerv3.Listener {
+func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptions, ea ExtAuthzOptions, rls RateLimitServiceOptions, tel TelemetryOptions) *listenerv3.Listener {
 	hcmFilter := func(routeConfigName string) *listenerv3.Filter {
 		hcm := &hcmv3.HttpConnectionManager{
 			CodecType:  hcmv3.HttpConnectionManager_AUTO,
@@ -70,6 +78,7 @@ func listenerForGateway(g store.Gateway, routes []store.Route, rl RateLimitOptio
 			HttpFilters: httpFilters(rl, ea, rls, anyRouteNeedsLocalRateLimit(routes)),
 		}
 		hardenConnectionManager(hcm)
+		observeConnectionManager(hcm, g.Name, tel)
 		return &listenerv3.Filter{
 			Name: wellknown.HTTPConnectionManager,
 			ConfigType: &listenerv3.Filter_TypedConfig{
