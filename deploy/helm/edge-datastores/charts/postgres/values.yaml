@@ -1,0 +1,17 @@
+# Set by the parent chart (edge-datastores/values.yaml → postgres:). The
+# password is read from the connection Secret, key POSTGRES_PASSWORD.
+image:
+  repository: postgres
+  tag: "16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
+  pullPolicy: IfNotPresent
+auth:
+  username: edge
+  database: edge
+extraDatabases: []
+persistence:
+  enabled: true
+  size: 8Gi
+  storageClass: ""
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits: { memory: 1Gi }

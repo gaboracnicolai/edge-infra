@@ -1,0 +1,82 @@
+# edge-datastores — the three datastores Talyvor Edge runs on.
+#
+#   bundled (the default): Postgres, Redis and NATS (JetStream) run in this
+#     release's namespace, each on its own PersistentVolumeClaim.
+#   external: set <store>.enabled=false and fill external.<store> with your own.
+#     Mixing is fine — e.g. your managed Postgres with the bundled Redis and NATS.
+#
+# Either way the release writes ONE connection Secret (global.datastores.secretName)
+# and, after install and every upgrade, applies the control-plane + OSB schema to
+# the edge database. See README.md.
+
+global:
+  datastores:
+    # The connection Secret. Keys: POSTGRES_DSN, ISSUER_DATABASE_URL, REDIS_ADDR,
+    # REDIS_PASSWORD, NATS_URL (+ POSTGRES_PASSWORD / NATS_TOKEN when bundled).
+    secretName: edge-datastores
+    # false = you create that Secret yourself, with the keys above, before you
+    # install (e.g. from a secrets manager). The chart then only reads it.
+    createSecret: true
+  # Pull secrets for every pod here, e.g. [{name: ghcr}].
+  imagePullSecrets: []
+
+# ---- bundled datastores (subcharts in charts/) -------------------------------
+postgres:
+  enabled: true
+  auth:
+    username: edge
+    database: edge          # the shared control-plane + OSB database
+    # "" = generated once and kept across upgrades. Under Argo CD (which renders
+    # with `helm template`, so nothing can be looked up) set it, or bring your
+    # own Secret with global.datastores.createSecret=false.
+    password: ""
+  # Created on first start next to `database`. edge-issuer keeps its own.
+  extraDatabases: [issuer]
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""        # "" = the cluster default
+
+redis:
+  enabled: true
+  auth:
+    password: ""            # "" = generated once and kept across upgrades
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+
+nats:
+  enabled: true
+  auth:
+    token: ""               # "" = generated once and kept across upgrades
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+
+# ---- external datastores (used for any store whose enabled is false) ---------
+external:
+  postgres:
+    dsn: ""                 # postgres://user:pass@host:5432/edge?sslmode=verify-full
+    issuerDsn: ""           # edge-issuer's own database; optional
+  redis:
+    addr: ""                # host:6379; optional — the control plane runs without it
+    password: ""
+  nats:
+    url: ""                 # nats://[token@]host:4222, JetStream on; optional unless you run edge-osb
+
+# ---- schema migration ---------------------------------------------------------
+# cmd/migrate applies the control-plane and OSB migrations to the edge database
+# after install and after every upgrade (a no-op when nothing is new). A Postgres
+# that is still starting fails an attempt, and the Job retries it (backoffLimit).
+migrate:
+  enabled: true
+  image:
+    repository: ghcr.io/gaboracnicolai/edge-migrate
+    tag: "ad3eed7c31f72c3f7892cf9ce1270bacd7a9f13e"  # pin to the SHA you pushed
+    pullPolicy: IfNotPresent
+  backoffLimit: 6
+  # How long the Job may take, retries included.
+  activeDeadlineSeconds: 600
+  resources: {}

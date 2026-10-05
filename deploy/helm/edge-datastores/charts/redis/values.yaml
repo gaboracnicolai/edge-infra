@@ -1,0 +1,13 @@
+# Set by the parent chart (edge-datastores/values.yaml → redis:). The password
+# is read from the connection Secret, key REDIS_PASSWORD.
+image:
+  repository: redis
+  tag: "8.2.10-alpine@sha256:b51665e66f00759be7c3152ad5ac3c66fb2f619c13ef62dea7cc1f9914524635"
+  pullPolicy: IfNotPresent
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 512Mi }

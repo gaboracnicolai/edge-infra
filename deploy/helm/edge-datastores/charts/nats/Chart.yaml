@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nats
+description: Single-instance NATS with JetStream for edge-datastores
+type: application
+version: 0.1.0
+appVersion: "2.12.9"

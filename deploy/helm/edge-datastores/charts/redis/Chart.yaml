@@ -1,0 +1,6 @@
+apiVersion: v2
+name: redis
+description: Single-instance Redis for edge-datastores
+type: application
+version: 0.1.0
+appVersion: "8.2.10"
