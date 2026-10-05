@@ -1,9 +1,10 @@
 //! Process entry point: wires config, JWKS, metrics, and the gRPC + axum servers.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use auth_service::auth::AuthService;
+use auth_service::auth::{AuthService, TrustedIssuer};
 use auth_service::config::Config;
 use auth_service::error::AppError;
 use auth_service::jwks::JwksCache;
@@ -18,7 +19,6 @@ use axum::{
     routing::get,
 };
 use envoy_types::ext_authz::v3::pb::AuthorizationServer;
-use jsonwebtoken::{Algorithm, Validation};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -43,12 +43,22 @@ async fn main() -> Result<(), AppError> {
     );
 
     let metrics = Metrics::new()?;
-    let jwks = JwksCache::new(&cfg.jwks_url, cfg.jwks_ca_file.as_deref()).await?;
-    let _refresh = Arc::clone(&jwks).start_refresh(
-        cfg.jwks_url.clone(),
-        cfg.jwks_refresh_s,
-        Arc::clone(&metrics),
-    );
+    let mut issuers = HashMap::new();
+    for idp in cfg.issuers() {
+        let jwks = JwksCache::new(&idp.jwks_url, cfg.jwks_ca_file.as_deref()).await?;
+        Arc::clone(&jwks).start_refresh(
+            idp.jwks_url.clone(),
+            cfg.jwks_refresh_s,
+            Arc::clone(&metrics),
+        );
+        // issuers() always resolves the audience.
+        let audience = idp.audience.unwrap_or_default();
+        info!(issuer = %idp.issuer, jwks_url = %idp.jwks_url, audience = %audience, "trusting issuer");
+        issuers.insert(
+            idp.issuer.clone(),
+            TrustedIssuer::new(&idp.issuer, &audience, jwks),
+        );
+    }
 
     let transit = Arc::new(TransitSigner::from_pem(
         &cfg.transit_signing_key,
@@ -59,13 +69,8 @@ async fn main() -> Result<(), AppError> {
 
     spawn_metrics_server(&cfg.metrics_addr, Arc::clone(&metrics), transit.jwks()).await?;
 
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_audience(std::slice::from_ref(&cfg.jwt_audience));
-    validation.set_issuer(std::slice::from_ref(&cfg.jwt_issuer));
-
     let auth_service = AuthService {
-        jwks: Arc::clone(&jwks),
-        validation,
+        issuers,
         metrics: Arc::clone(&metrics),
         transit,
     };

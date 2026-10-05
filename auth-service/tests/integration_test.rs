@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use auth_service::auth::AuthService;
+use auth_service::auth::{AuthService, TrustedIssuer};
 use auth_service::jwks::JwksCache;
 use auth_service::metrics::Metrics;
 use auth_service::transit::{TransitError, TransitSigner, TransitVerifier};
@@ -25,7 +25,7 @@ use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, Jwk, JwkSet, KeyAlgorithm, PublicKeyUse,
     RSAKeyParameters, RSAKeyType,
 };
-use jsonwebtoken::{Algorithm, EncodingKey, Header, Validation, encode};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
@@ -97,7 +97,7 @@ fn now_secs() -> usize {
         .as_secs() as usize
 }
 
-fn sign_jwt(private_pem: &str, kid: &str, claims: &TestClaims) -> String {
+fn sign_jwt(private_pem: &str, kid: &str, claims: &impl Serialize) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(kid.to_string());
     let key = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key");
@@ -141,17 +141,26 @@ fn build_check_request_with(
 }
 
 fn build_service(jwks: JwkSet) -> (AuthService, Arc<Metrics>) {
+    build_multi_issuer_service(&[(TEST_ISSUER, TEST_AUDIENCE, jwks)])
+}
+
+/// An AuthService trusting each (issuer, audience, JWKS) — one gateway in
+/// front of several identity providers.
+fn build_multi_issuer_service(idps: &[(&str, &str, JwkSet)]) -> (AuthService, Arc<Metrics>) {
     let metrics = Metrics::new().expect("metrics");
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_audience(&[TEST_AUDIENCE]);
-    validation.set_issuer(&[TEST_ISSUER]);
+    let issuers = idps
+        .iter()
+        .map(|(iss, aud, jwks)| {
+            let idp = TrustedIssuer::new(iss, aud, JwksCache::from_jwk_set(jwks.clone()));
+            (iss.to_string(), idp)
+        })
+        .collect();
     let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
         .expect("transit keygen");
     let transit = TransitSigner::from_pkcs8(pkcs8.as_ref(), TEST_TRANSIT_ISSUER, 30)
         .expect("transit signer");
     let service = AuthService {
-        jwks: JwksCache::from_jwk_set(jwks),
-        validation,
+        issuers,
         metrics: Arc::clone(&metrics),
         transit: Arc::new(transit),
     };
@@ -509,4 +518,109 @@ async fn test_metrics_incremented() {
     let denied_count = metrics.auth_requests.with_label_values(&["denied"]).get();
     assert_eq!(ok_count, 1, "ok counter");
     assert_eq!(denied_count, 1, "denied counter");
+}
+
+const OKTA_ISSUER: &str = "https://dev-31337.okta.com/oauth2/default";
+const OKTA_AUDIENCE: &str = "api://default";
+const SA_ISSUER: &str = "https://kubernetes.default.svc.cluster.local";
+
+/// An Okta access token's claims: `aud` is a single STRING, plus Okta's
+/// own cid/uid/scp/ver/jti claims the gateway does not read.
+fn okta_claims(sub: &str) -> serde_json::Value {
+    let now = now_secs();
+    serde_json::json!({
+        "ver": 1,
+        "jti": "AT.5bxkQ6M3vb3yBsfXf2Gfp5Hv6s1XOS8q5fGRe7tdS2Q",
+        "iss": OKTA_ISSUER,
+        "aud": OKTA_AUDIENCE,
+        "iat": now,
+        "exp": now + 3600,
+        "cid": "0oa1b2c3d4EXAMPLE",
+        "uid": "00u1a2b3c4EXAMPLE",
+        "scp": ["openid", "email"],
+        "sub": sub,
+        "email": sub,
+    })
+}
+
+/// A projected Kubernetes ServiceAccount token's claims: `aud` is an ARRAY,
+/// with nbf and the nested kubernetes.io claim.
+fn service_account_claims() -> serde_json::Value {
+    let now = now_secs();
+    serde_json::json!({
+        "aud": [TEST_AUDIENCE],
+        "exp": now + 3600,
+        "iat": now,
+        "nbf": now,
+        "iss": SA_ISSUER,
+        "kubernetes.io": {
+            "namespace": "agents",
+            "pod": {"name": "billing-bot-7d9f", "uid": "5c1d3e9a-0000-4000-8000-000000000001"},
+            "serviceaccount": {"name": "billing-bot", "uid": "5c1d3e9a-0000-4000-8000-000000000002"}
+        },
+        "sub": "system:serviceaccount:agents:billing-bot",
+    })
+}
+
+async fn check_token(svc: &AuthService, token: &str) -> Result<Vec<HeaderValueOption>, String> {
+    let auth = format!("Bearer {token}");
+    let response = svc
+        .check(build_check_request(Some(&auth)))
+        .await
+        .expect("rpc")
+        .into_inner();
+    match response.http_response {
+        Some(HttpResponse::OkResponse(ok)) => Ok(ok.headers),
+        Some(HttpResponse::DeniedResponse(denied)) => Err(denied.body),
+        other => panic!("unexpected response {other:?}"),
+    }
+}
+
+// B28.204: one gateway, two identity providers — a person signed in through
+// Okta (aud a string) and an agent's Kubernetes ServiceAccount (aud an array).
+#[tokio::test]
+async fn test_okta_and_service_account_tokens_both_accepted() {
+    let okta = make_fixture("okta-kid");
+    let cluster = make_fixture("sa-kid");
+    let (svc, _metrics) = build_multi_issuer_service(&[
+        (OKTA_ISSUER, OKTA_AUDIENCE, okta.jwks.clone()),
+        (SA_ISSUER, TEST_AUDIENCE, cluster.jwks.clone()),
+    ]);
+
+    let person = sign_jwt(&okta.private_pem, "okta-kid", &okta_claims("ada@example.com"));
+    let headers = check_token(&svc, &person).await.expect("Okta token must be accepted");
+    assert_eq!(header_value(&headers, "x-user-id"), Some("ada@example.com"));
+    assert_eq!(header_value(&headers, "x-auth-iss"), Some(OKTA_ISSUER));
+
+    let agent = sign_jwt(&cluster.private_pem, "sa-kid", &service_account_claims());
+    let headers = check_token(&svc, &agent)
+        .await
+        .expect("ServiceAccount token must be accepted");
+    assert_eq!(
+        header_value(&headers, "x-user-id"),
+        Some("system:serviceaccount:agents:billing-bot")
+    );
+    assert_eq!(header_value(&headers, "x-auth-iss"), Some(SA_ISSUER));
+}
+
+// A key only vouches for its own issuer: a token signed by the cluster's key
+// but claiming to be from Okta is refused, and so is an issuer nobody listed.
+#[tokio::test]
+async fn test_key_from_one_issuer_cannot_vouch_for_another() {
+    let okta = make_fixture("okta-kid");
+    let cluster = make_fixture("sa-kid");
+    let (svc, _metrics) = build_multi_issuer_service(&[
+        (OKTA_ISSUER, OKTA_AUDIENCE, okta.jwks.clone()),
+        (SA_ISSUER, TEST_AUDIENCE, cluster.jwks.clone()),
+    ]);
+
+    let forged = sign_jwt(&cluster.private_pem, "sa-kid", &okta_claims("ada@example.com"));
+    let err = check_token(&svc, &forged).await.expect_err("cross-issuer key must be refused");
+    assert_eq!(err, "unknown kid");
+
+    let mut stranger = service_account_claims();
+    stranger["iss"] = serde_json::json!("https://idp.attacker.example");
+    let token = sign_jwt(&cluster.private_pem, "sa-kid", &stranger);
+    let err = check_token(&svc, &token).await.expect_err("unlisted issuer must be refused");
+    assert_eq!(err, "untrusted issuer");
 }

@@ -119,6 +119,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: JWT_ISSUER
+            # More identity providers (Okta, the cluster's ServiceAccounts, ...).
+            # Optional: absent from the Secret means JWT_ISSUER is the only one.
+            - name: JWT_ISSUERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: JWT_ISSUERS
+                  optional: true
             - name: TRANSIT_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

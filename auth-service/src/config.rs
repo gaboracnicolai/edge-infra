@@ -1,6 +1,22 @@
 //! Env-driven configuration.
 
+use serde::Deserialize;
+
 use crate::error::AppError;
+
+/// One more identity provider this gateway trusts (an entry of JWT_ISSUERS):
+/// tokens naming `issuer` must be signed by a key from `jwks_url`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssuerConfig {
+    /// The `iss` claim this provider's tokens carry.
+    pub issuer: String,
+    /// HTTPS endpoint serving this provider's signing keys.
+    pub jwks_url: String,
+    /// Expected `aud` for this provider's tokens; JWT_AUDIENCE when absent.
+    #[serde(default)]
+    pub audience: Option<String>,
+}
 
 /// Runtime configuration sourced from environment variables.
 #[derive(Debug, Clone)]
@@ -22,6 +38,9 @@ pub struct Config {
     pub jwt_audience: String,
     /// Expected JWT issuer.
     pub jwt_issuer: String,
+    /// More trusted issuers (JWT_ISSUERS, a JSON array of IssuerConfig), e.g.
+    /// a customer's Okta beside the cluster's ServiceAccount issuer.
+    pub extra_issuers: Vec<IssuerConfig>,
     /// PEM Ed25519 private key (TRANSIT_SIGNING_KEY) that signs the transit
     /// assertion injected as `x-gateway-auth` on every authorized request.
     /// Backends verify it against the public JWKS this service publishes.
@@ -62,6 +81,12 @@ impl Config {
             )));
         }
 
+        let extra_issuers = match optional_some("JWT_ISSUERS") {
+            Some(raw) => serde_json::from_str::<Vec<IssuerConfig>>(&raw)
+                .map_err(|e| AppError::Config(format!("JWT_ISSUERS parse: {e}")))?,
+            None => Vec::new(),
+        };
+
         // Transit-assertion signing key. Fail closed: refuse to start without
         // one rather than forward requests a backend cannot verify.
         let transit_signing_key = required("TRANSIT_SIGNING_KEY")?;
@@ -79,7 +104,7 @@ impl Config {
             ));
         }
 
-        Ok(Self {
+        let cfg = Self {
             grpc_addr: optional("GRPC_ADDR", "0.0.0.0:50051"),
             metrics_addr: optional("METRICS_ADDR", "0.0.0.0:9090"),
             jwks_url,
@@ -87,6 +112,7 @@ impl Config {
             jwks_ca_file: optional_some("JWKS_CA_FILE"),
             jwt_audience: required("JWT_AUDIENCE")?,
             jwt_issuer: required("JWT_ISSUER")?,
+            extra_issuers,
             transit_signing_key,
             transit_issuer: optional("TRANSIT_ISSUER", "edge-gateway"),
             transit_ttl_s,
@@ -94,7 +120,43 @@ impl Config {
             tls_cert_file,
             tls_key_file,
             tls_ca_file,
-        })
+        };
+
+        let mut seen = std::collections::HashSet::new();
+        for idp in cfg.issuers() {
+            if idp.issuer.is_empty() {
+                return Err(AppError::Config("JWT_ISSUERS: an issuer is empty".to_string()));
+            }
+            if !idp.jwks_url.starts_with("https://") {
+                return Err(AppError::Config(format!(
+                    "jwks_url for {} must use https://, got: {}",
+                    idp.issuer, idp.jwks_url
+                )));
+            }
+            if !seen.insert(idp.issuer.clone()) {
+                return Err(AppError::Config(format!(
+                    "issuer {} is listed twice",
+                    idp.issuer
+                )));
+            }
+        }
+        Ok(cfg)
+    }
+
+    /// Every trusted issuer, JWT_ISSUER first, each with its audience resolved.
+    pub fn issuers(&self) -> Vec<IssuerConfig> {
+        let primary = IssuerConfig {
+            issuer: self.jwt_issuer.clone(),
+            jwks_url: self.jwks_url.clone(),
+            audience: None,
+        };
+        std::iter::once(primary)
+            .chain(self.extra_issuers.iter().cloned())
+            .map(|mut idp| {
+                idp.audience.get_or_insert_with(|| self.jwt_audience.clone());
+                idp
+            })
+            .collect()
     }
 }
 
@@ -116,6 +178,45 @@ mod tests {
         std::env::remove_var("AUTH_TLS_KEY");
         std::env::remove_var("AUTH_TLS_CA");
         std::env::remove_var("JWKS_CA_FILE");
+        std::env::remove_var("JWT_ISSUERS");
+    }
+
+    #[test]
+    fn test_jwt_issuers_adds_providers() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        base_env();
+        std::env::set_var(
+            "JWT_ISSUERS",
+            r#"[{"issuer":"https://dev-1.okta.com/oauth2/default","jwks_url":"https://dev-1.okta.com/oauth2/default/v1/keys","audience":"api://default"},
+                {"issuer":"https://kubernetes.default.svc.cluster.local","jwks_url":"https://kubernetes.default.svc/openid/v1/jwks"}]"#,
+        );
+        let issuers = Config::from_env().unwrap().issuers();
+        std::env::remove_var("JWT_ISSUERS");
+        let got: Vec<(&str, &str)> = issuers
+            .iter()
+            .map(|i| (i.issuer.as_str(), i.audience.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("https://auth.example.com/", "test-audience"),
+                ("https://dev-1.okta.com/oauth2/default", "api://default"),
+                ("https://kubernetes.default.svc.cluster.local", "test-audience"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_jwt_issuers_jwks_url_must_be_https() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        base_env();
+        std::env::set_var(
+            "JWT_ISSUERS",
+            r#"[{"issuer":"https://idp.example.com","jwks_url":"http://idp.example.com/keys"}]"#,
+        );
+        let err = Config::from_env().unwrap_err();
+        std::env::remove_var("JWT_ISSUERS");
+        assert!(err.to_string().contains("https://"), "error was: {err}");
     }
 
     #[test]
