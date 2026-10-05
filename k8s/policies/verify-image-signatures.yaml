@@ -1,0 +1,75 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify image signatures
+    policies.kyverno.io/category: Talyvor Edge Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Every first-party image (ghcr.io/gaboracnicolai/*) must carry a keyless
+      cosign signature made by this repository's images.yaml workflow, on main
+      or on a v<SemVer> release tag — the same signer
+      `make verify-images` checks (docs/self-host-supply-chain.md). An image
+      with no signature, or one signed by another repository, workflow or ref
+      (a pull-request build), is refused at admission. An admitted image is
+      pinned to the digest that was verified, so the tag cannot move after.
+spec:
+  # Fail closed: if Kyverno cannot reach the registry or Rekor, a first-party
+  # pod is refused rather than admitted unverified.
+  failurePolicy: Fail
+  # Fetching the signature and the Sigstore trust root can take longer than
+  # Kyverno's 10s default on a cold start.
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: signed-by-edge-infra-images-workflow
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/gaboracnicolai/*"
+          failureAction: Enforce
+          required: true
+          mutateDigest: true
+          verifyDigest: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: https://token.actions.githubusercontent.com
+                    subjectRegExp: '^https://github\.com/gaboracnicolai/edge-infra/\.github/workflows/images\.yaml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+                    # images.yaml is a reusable workflow: another repository
+                    # calling it gets a certificate with this same subject, so
+                    # the repository the run was in is pinned on its own.
+                    additionalExtensions:
+                      githubWorkflowRepository: gaboracnicolai/edge-infra
+                    rekor:
+                      url: https://rekor.sigstore.dev
+    # imageReferences matches the image as written, and the runtime pulls
+    # ghcr.io:443/gaboracnicolai/… or GHCR.IO/gaboracnicolai/… just the same, so
+    # such a spelling would skip the check above. Refuse it.
+    - name: first-party-images-spelled-canonically
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        failureAction: Enforce
+        message: >-
+          A first-party image must be written as ghcr.io/gaboracnicolai/<name>,
+          or its signature is not checked.
+        foreach:
+          - list: "request.object.spec.[containers, initContainers, ephemeralContainers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ contains(to_lower(element.image), 'gaboracnicolai/') }}"
+                    operator: Equals
+                    value: true
+                  - key: "{{ starts_with(element.image, 'ghcr.io/gaboracnicolai/') }}"
+                    operator: Equals
+                    value: false
