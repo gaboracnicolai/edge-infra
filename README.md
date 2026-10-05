@@ -35,6 +35,9 @@ self-host extras have their own pages: per-node TLS keys, NetworkPolicies, SCIM 
 in [docs/self-host-network-and-identity.md](docs/self-host-network-and-identity.md), and the
 confidential-node option is in
 [docs/self-host-confidential-compute.md](docs/self-host-confidential-compute.md).
+Every image is signed and carries an SBOM and SLSA provenance. To check all three before you install,
+run `make verify-images TAG=<release>` or see
+[docs/self-host-supply-chain.md](docs/self-host-supply-chain.md).
 
 If you are here to run it on a real cluster, read [§ Taking it past kind](#taking-it-past-kind)
 first. Several things that look ready are not.

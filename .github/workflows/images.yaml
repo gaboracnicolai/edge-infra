@@ -18,6 +18,7 @@ on:
       - 'auth-service/src/**'
       - 'auth-service/Cargo.*'
       - 'deploy/hack/release-version.sh'
+      - 'deploy/hack/supply-chain.sh'
       - '.github/workflows/images.yaml'
   pull_request:
     branches: [main]
@@ -29,6 +30,7 @@ on:
       - 'auth-service/src/**'
       - 'auth-service/Cargo.*'
       - 'deploy/hack/release-version.sh'
+      - 'deploy/hack/supply-chain.sh'
       - '.github/workflows/images.yaml'
   workflow_dispatch:
 
@@ -61,6 +63,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # The digest each push produced, which the sign job signs — not the tag,
+    # which a later push of the same commit can move.
+    outputs:
+      edge-control-plane: ${{ steps.edge-control-plane.outputs.digest }}
+      edge-issuer: ${{ steps.edge-issuer.outputs.digest }}
+      edge-ratelimit: ${{ steps.edge-ratelimit.outputs.digest }}
+      edge-secrets: ${{ steps.edge-secrets.outputs.digest }}
+      edge-migrate: ${{ steps.edge-migrate.outputs.digest }}
+      edge-attest: ${{ steps.edge-attest.outputs.digest }}
     env:
       STAMP: |
         org.opencontainers.image.version=${{ needs.version.outputs.version }}
@@ -74,7 +85,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-control-plane
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.control-plane
@@ -88,7 +100,8 @@ jobs:
           labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-issuer
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.control-plane
@@ -102,7 +115,8 @@ jobs:
           labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-ratelimit
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.control-plane
@@ -116,7 +130,8 @@ jobs:
           labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-secrets
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.control-plane
@@ -130,7 +145,8 @@ jobs:
           labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-migrate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.control-plane
@@ -144,7 +160,8 @@ jobs:
           labels: ${{ env.STAMP }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-attest
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: Dockerfile.control-plane
@@ -165,6 +182,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      edge-osb: ${{ steps.edge-osb.outputs.digest }}
     env:
       STAMP: |
         org.opencontainers.image.version=${{ needs.version.outputs.version }}
@@ -179,7 +198,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - id: edge-osb
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: osb/Dockerfile
@@ -296,6 +316,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      auth-service: ${{ steps.merge.outputs.digest }}
     steps:
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -304,10 +326,100 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create multi-arch manifest
+        id: merge
         run: |
+          set -euo pipefail
           docker buildx imagetools create \
             --tag ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }} \
             ${{ github.event_name != 'pull_request' && format('--tag ghcr.io/{0}/auth-service:latest', env.OWNER) || '' }} \
             ${{ needs.version.outputs.release && format('--tag ghcr.io/{0}/auth-service:{1}', env.OWNER, needs.version.outputs.release) || '' }} \
             ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-amd64 \
             ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }}-arm64
+          digest="$(docker buildx imagetools inspect ghcr.io/${{ env.OWNER }}/auth-service:${{ github.sha }} --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no digest for auth-service:${{ github.sha }}: '$digest'"; exit 1; }
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+
+  # Every image above gets a cosign signature, an SPDX SBOM made by syft and SLSA
+  # v1 provenance, attested to the digest its build pushed
+  # (deploy/hack/supply-chain.sh, docs/self-host-supply-chain.md). Keyless: cosign
+  # trades this job's OIDC token for a short-lived certificate naming
+  # images.yaml@<ref>, and the signature goes to the public Rekor log. Only this
+  # job holds id-token: write — the build jobs, which run the build's own code,
+  # cannot mint a signing identity.
+  sign:
+    needs: [control-plane, osb, auth-service-merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [edge-control-plane, edge-issuer, edge-ratelimit, edge-secrets, edge-migrate, edge-attest, edge-osb, auth-service]
+    env:
+      DIGEST: ${{ needs.control-plane.outputs[matrix.image] || needs.osb.outputs[matrix.image] || needs.auth-service-merge.outputs[matrix.image] }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install cosign and syft (pinned + checksum-verified)
+        run: |
+          bash deploy/hack/supply-chain.sh install "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sign ${{ matrix.image }}, attest its SBOM and provenance
+        run: bash deploy/hack/supply-chain.sh sign "ghcr.io/$OWNER/${{ matrix.image }}@$DIGEST"
+
+  # What a customer runs before installing: every image's signature, SBOM and
+  # provenance verified against this run's own signer identity and commit, with
+  # no write access and no OIDC token.
+  verify:
+    needs: [control-plane, osb, auth-service-merge, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install cosign and syft (pinned + checksum-verified)
+        run: |
+          bash deploy/hack/supply-chain.sh install "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      # Two of the eight packages are private; the job token reads them.
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: cosign verify and verify-attestation, every image
+        env:
+          SIGNER_REPO: ${{ github.repository }}
+          SIGNER_REF: ${{ github.ref }}
+          SIGNER_SHA: ${{ github.sha }}
+          O: ghcr.io/${{ env.OWNER }}
+        run: |
+          bash deploy/hack/supply-chain.sh verify \
+            "$O/edge-control-plane@${{ needs.control-plane.outputs.edge-control-plane }}" \
+            "$O/edge-issuer@${{ needs.control-plane.outputs.edge-issuer }}" \
+            "$O/edge-ratelimit@${{ needs.control-plane.outputs.edge-ratelimit }}" \
+            "$O/edge-secrets@${{ needs.control-plane.outputs.edge-secrets }}" \
+            "$O/edge-migrate@${{ needs.control-plane.outputs.edge-migrate }}" \
+            "$O/edge-attest@${{ needs.control-plane.outputs.edge-attest }}" \
+            "$O/edge-osb@${{ needs.osb.outputs.edge-osb }}" \
+            "$O/auth-service@${{ needs.auth-service-merge.outputs.auth-service }}"
+      # The per-arch auth-service image is an intermediate the merge consumes and
+      # nothing signs, so verifying it must fail.
+      - name: An unsigned image is refused
+        env:
+          SIGNER_REPO: ${{ github.repository }}
+          SIGNER_REF: ${{ github.ref }}
+        run: |
+          set -uo pipefail
+          if bash deploy/hack/supply-chain.sh verify "ghcr.io/$OWNER/auth-service:${{ github.sha }}-amd64"; then
+            echo "verify passed an image nothing signed"
+            exit 1
+          fi
+          echo "verify refused the unsigned image"

@@ -10,7 +10,8 @@ name: Release
 # as version 1.2.3, and the packages are attached to the GitHub release v1.2.3.
 # Every other run (nightly, main, PR) is the dev version 0.0.0-g<sha12> pinned to
 # :<sha>. deploy/hack/release-version.sh maps the ref to the version.
-#   images       — images.yaml, called: all eight images pushed and stamped
+#   images       — images.yaml, called: all eight images pushed and stamped, then
+#                  signed with an SBOM and SLSA provenance, and verified
 #   release-e2e  — release-pin.sh <tag>, the stamps checked, make release-e2e,
 #                  helm package --version -> checked -> artifact edge-charts-<version>
 #   publish      — on a tag only: the GitHub release with the packaged charts
@@ -47,6 +48,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # images.yaml's sign job signs keylessly with the job's OIDC token.
+      id-token: write
 
   release-e2e:
     needs: images
