@@ -17,6 +17,7 @@ on:
       - 'deploy/helm/**'
       - 'deploy/envs/dev/**'
       - 'deploy/local/**'
+      - 'scripts/verify-decisions.sh'   # Phase 31 checks the decision log with it
       - 'k8s/**'
       # Everything deploy/local/up.sh builds an image from — internal/ciguard
       # fails if a build input stops triggering this workflow (B28.198).
@@ -38,6 +39,7 @@ on:
       - 'deploy/helm/**'
       - 'deploy/envs/dev/**'
       - 'deploy/local/**'
+      - 'scripts/verify-decisions.sh'   # Phase 31 checks the decision log with it
       - 'k8s/**'
       # Everything deploy/local/up.sh builds an image from — internal/ciguard
       # fails if a build input stops triggering this workflow (B28.198).

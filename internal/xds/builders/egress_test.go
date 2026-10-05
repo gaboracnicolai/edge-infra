@@ -6,7 +6,10 @@ import (
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	grpcalv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
+	streamv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/stream/v3"
 	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
@@ -112,6 +115,66 @@ func TestBuildEgress_KeylessHostGoesThroughAgentAuthz(t *testing.T) {
 	rc = closed[resourcev3.RouteType][0].(*routev3.RouteConfiguration)
 	assert.EqualValues(t, 503, rc.GetVirtualHosts()[0].GetRoutes()[1].GetDirectResponse().GetStatus())
 	assert.NotContains(t, clusterNames(closed), authServiceClusterName)
+}
+
+// B28.228: each agent gets its own bucket — keyed on the ServiceAccount the
+// auth-service put in ext_authz metadata, and on the client address — counted
+// after ext_authz names the agent; the access log carries the agent; and every
+// decision goes to the control plane's decision log over the xDS cluster.
+func TestBuildEgress_AgentRateLimitAndDecisionLog(t *testing.T) {
+	keyless := mockLLM
+	keyless.Keyless = true
+	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
+	listenerHCM := func(opts EgressOptions) *hcmv3.HttpConnectionManager {
+		res := BuildEgress([]store.EgressDestination{keyless}, nil, opts, ea, TelemetryOptions{})
+		hcm := &hcmv3.HttpConnectionManager{}
+		require.NoError(t, res[resourcev3.ListenerType][0].(*listenerv3.Listener).
+			GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+		return hcm
+	}
+
+	hcm := listenerHCM(EgressOptions{Port: 3128, AgentRequestsPerMinute: 5, DecisionLog: true})
+	var names []string
+	for _, f := range hcm.GetHttpFilters() {
+		names = append(names, f.GetName())
+	}
+	assert.Equal(t, []string{extAuthzFilterName, localRateLimitFilterName, "envoy.filters.http.router"}, names,
+		"the limit is counted after ext_authz names the agent")
+	assert.True(t, hcm.GetUseRemoteAddress().GetValue(), "the client is the connection's peer, not X-Forwarded-For")
+	assert.True(t, hcm.GetSkipXffAppend(), "nothing about the agent is added on the way out")
+
+	rl := &lrlv3.LocalRateLimit{}
+	require.NoError(t, hcm.GetHttpFilters()[1].GetTypedConfig().UnmarshalTo(rl))
+	assert.EqualValues(t, 429, rl.GetStatus().GetCode())
+	assert.EqualValues(t, 5, rl.GetTokenBucket().GetMaxTokens())
+	assert.Equal(t, int64(60), rl.GetTokenBucket().GetFillInterval().GetSeconds())
+	agent := rl.GetRateLimits()[0].GetActions()[0].GetMetadata()
+	assert.Equal(t, "agent", agent.GetDescriptorKey())
+	assert.Equal(t, "envoy.filters.http.ext_authz", agent.GetMetadataKey().GetKey())
+	assert.Equal(t, "agent", agent.GetMetadataKey().GetPath()[0].GetKey())
+	assert.NotNil(t, rl.GetRateLimits()[1].GetActions()[0].GetRemoteAddress())
+	require.Len(t, rl.GetDescriptors(), 2)
+	for i, key := range []string{"agent", "remote_address"} {
+		e := rl.GetDescriptors()[i].GetEntries()
+		require.Len(t, e, 1)
+		assert.Equal(t, key, e[0].GetKey())
+		assert.Empty(t, e[0].GetValue(), "no value: a bucket for every %s", key)
+		assert.EqualValues(t, 5, rl.GetDescriptors()[i].GetTokenBucket().GetMaxTokens())
+	}
+
+	require.Len(t, hcm.GetAccessLog(), 2)
+	stdout := &streamv3.StdoutAccessLog{}
+	require.NoError(t, hcm.GetAccessLog()[0].GetTypedConfig().UnmarshalTo(stdout))
+	assert.Equal(t, "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:agent)%",
+		stdout.GetLogFormat().GetJsonFormat().GetFields()["agent"].GetStringValue())
+	als := &grpcalv3.HttpGrpcAccessLogConfig{}
+	require.NoError(t, hcm.GetAccessLog()[1].GetTypedConfig().UnmarshalTo(als))
+	assert.Equal(t, "edge-decisions", als.GetCommonConfig().GetLogName())
+	assert.Equal(t, "xds_cluster", als.GetCommonConfig().GetGrpcService().GetEnvoyGrpc().GetClusterName())
+
+	off := listenerHCM(EgressOptions{Port: 3128})
+	assert.Len(t, off.GetHttpFilters(), 2, "no limit unless one is set")
+	assert.Len(t, off.GetAccessLog(), 1, "no decision log unless it is on")
 }
 
 func clusterNames(res map[resourcev3.Type][]types.Resource) []string {

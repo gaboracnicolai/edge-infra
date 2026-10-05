@@ -64,6 +64,8 @@ first. Several things that look ready are not.
 | Identity-keyed rate limiting (RLS) | Built. **Off** everywhere — though the `edge-ratelimit` chart *would* deploy (2 replicas + Redis in prod overlays), the control plane never routes to it. |
 | Admin READ API | Built. **Off everywhere** — `adminApi.existingSecret` is unset in dev, staging, and both prod regions, so the listener never starts and the Service exposes no port. |
 | Local rate limiting | Built and **on** by default. |
+| Per-agent rate limits on `edge-egress` | Built. **Off** by default (`egress.agentRequestsPerMinute: 0`); Phase 31 sets 5 a minute and shows one agent refused with 429 while another is served. [docs/agent-egress.md](docs/agent-egress.md#rate-limits-per-agent) |
+| `edge-egress` decision log | Built and **on** by default (`egress.decisionLog`): every decision in a hash chain, exported by the admin API as NDJSON and checked by `scripts/verify-decisions.sh` (Phase 31). |
 | Consuming UI | None. The suite's `/admin` area was **deleted** (`AdminRemoved.test.tsx` pins that it stays gone) because it rendered invented node identities, IPs, cert fingerprints and an issuer string for a service that is not deployed. |
 
 ---

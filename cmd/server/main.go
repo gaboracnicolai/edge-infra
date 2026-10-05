@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	accesslogservice "github.com/envoyproxy/go-control-plane/envoy/service/accesslog/v3"
 	clusterservice "github.com/envoyproxy/go-control-plane/envoy/service/cluster/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	endpointservice "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/edge-infra/control-plane/internal/config"
+	"github.com/edge-infra/control-plane/internal/decisions"
 	"github.com/edge-infra/control-plane/internal/ha"
 	"github.com/edge-infra/control-plane/internal/keycrypt"
 	"github.com/edge-infra/control-plane/internal/store"
@@ -112,8 +114,10 @@ func run(log *slog.Logger) error {
 		SamplePercent: cfg.TelemetrySamplePercent,
 	})
 	reconciler.WithEgress(builders.EgressOptions{
-		Port:         cfg.EgressPort,
-		SystemCAFile: cfg.EgressSystemCAFile,
+		Port:                   cfg.EgressPort,
+		SystemCAFile:           cfg.EgressSystemCAFile,
+		AgentRequestsPerMinute: cfg.EgressAgentRequestsPerMinute,
+		DecisionLog:            cfg.EgressDecisionLog,
 	})
 
 	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
@@ -150,6 +154,14 @@ func run(log *slog.Logger) error {
 	xdsSrv := serverv3.NewServer(rootCtx, cache, callbacks)
 	grpcSrv := newGRPCServer(tlsCreds)
 	registerXDS(grpcSrv, xdsSrv)
+	// edge-egress's decision log (B28.228) arrives on the same listener, from
+	// Envoys holding an xDS client certificate. Without TLS anyone who can reach
+	// the port could write to it, so it is not served at all.
+	if tlsCreds != nil {
+		accesslogservice.RegisterAccessLogServiceServer(grpcSrv, decisions.NewService(pgStore, xds.IsEgressNode, log))
+	} else {
+		log.Warn("decision log NOT served: it needs xDS TLS")
+	}
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {

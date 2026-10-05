@@ -79,6 +79,10 @@ type Config struct {
 	// agents, reaching only the hosts in egress_destinations.
 	EgressPort         uint32 // EGRESS_LISTENER_PORT
 	EgressSystemCAFile string // EGRESS_SYSTEM_CA_FILE: trust store for a destination with no CA
+
+	// B28.228: each agent's rate limit through edge-egress, and the decision log.
+	EgressAgentRequestsPerMinute uint32 // EGRESS_AGENT_REQUESTS_PER_MINUTE: per agent, per edge-egress Envoy; 0 = no limit
+	EgressDecisionLog            bool   // EGRESS_DECISION_LOG: record every edge-egress decision in edge_decisions
 }
 
 func FromEnv() (*Config, error) {
@@ -147,6 +151,8 @@ func FromEnv() (*Config, error) {
 
 	c.EgressPort = getenvU32("EGRESS_LISTENER_PORT", 3128)
 	c.EgressSystemCAFile = getenv("EGRESS_SYSTEM_CA_FILE", "/etc/ssl/certs/ca-certificates.crt")
+	c.EgressAgentRequestsPerMinute = getenvU32("EGRESS_AGENT_REQUESTS_PER_MINUTE", 0)
+	c.EgressDecisionLog = getenvBool("EGRESS_DECISION_LOG", true)
 
 	return c, nil
 }

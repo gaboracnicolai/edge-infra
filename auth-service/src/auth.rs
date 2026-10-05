@@ -12,6 +12,7 @@ use envoy_types::ext_authz::v3::pb::{
 use envoy_types::ext_authz::v3::{
     CheckRequestExt, CheckResponseExt, DeniedHttpResponseBuilder, OkHttpResponseBuilder,
 };
+use envoy_types::pb::google::protobuf::{value::Kind, Struct, Value};
 use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use serde::{Deserialize, Deserializer};
 use tonic::{Request, Response, Status};
@@ -291,6 +292,7 @@ impl AuthService {
         );
         let mut response = CheckResponse::with_status(Status::ok("ok"));
         response.set_http_response(builder);
+        response.set_dynamic_metadata(Some(agent_metadata(&claims.sub)));
         self.metrics
             .auth_requests
             .with_label_values(&["ok_agent"])
@@ -410,6 +412,20 @@ fn is_credential_name(name: &str) -> bool {
     ];
     let n = name.to_ascii_lowercase().replace('_', "-");
     EXACT.contains(&n.as_str()) || PARTS.iter().any(|p| n.contains(p))
+}
+
+/// The ext_authz dynamic metadata an agent's allowed request carries: the
+/// ServiceAccount it proved, under `agent`. edge-egress keys the agent's rate
+/// limit on it and writes it into its access and decision logs (B28.228).
+fn agent_metadata(sub: &str) -> Struct {
+    Struct {
+        fields: HashMap::from([(
+            "agent".to_string(),
+            Value {
+                kind: Some(Kind::StringValue(sub.to_string())),
+            },
+        )]),
+    }
 }
 
 /// A header the agent may not send on: a credential, or an identity header
