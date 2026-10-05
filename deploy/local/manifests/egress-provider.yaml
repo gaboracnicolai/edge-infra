@@ -37,6 +37,9 @@ spec:
           args: ["--port", "8443", "--cert", "/tls/tls.crt", "--key", "/tls/tls.key", "--name", "mock-llm"]
           ports:
             - {name: https, containerPort: 8443}
+          readinessProbe:
+            tcpSocket: {port: https}
+            periodSeconds: 2
           volumeMounts:
             - {name: tls, mountPath: /tls, readOnly: true}
       volumes:

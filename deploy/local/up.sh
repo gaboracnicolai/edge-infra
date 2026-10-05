@@ -2475,8 +2475,14 @@ phase28_egress_gateway() {
   ok "mock provider serving HTTPS as $MOCK_HOST; agent-egress trusts its CA"
 
   section "CONTROL — before the provider's NetworkPolicy, the agent's direct call is served"
-  out="$(agent_egress_curl --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
-  has "$out" "Name: mock-llm" || { printf '%s\n' "$out" | tail -15; die "PHASE28: the direct call never worked, so blocking it would prove nothing"; }
+  i=0
+  while :; do
+    out="$(agent_egress_curl --cacert /etc/mock-provider-ca/ca.crt "https://$MOCK_HOST/")"
+    has "$out" "Name: mock-llm" && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { printf '%s\n' "$out" | tail -15; die "PHASE28: the direct call never worked, so blocking it would prove nothing"; }
+    sleep 2
+  done
   ok "agent-egress -> $MOCK_HOST directly: served (the path the policy is about to close is real)"
 
   section "the provider admits edge-egress alone (NetworkPolicy); the direct call is now dropped"
