@@ -59,3 +59,13 @@ as a span tagged `guid:x-request-id`. Before the switch, the same request is in
 the stdout log and not in the collector. One limit: Envoy's own `http.url` span
 tag includes the query string, so strip it in the collector if your clients put
 credentials in URLs.
+
+Phase 28 runs the egress gateway agents call out through
+([agent-egress.md](agent-egress.md)). A mock TLS provider with a CA of its own
+admits only `edge-egress` pods, and the agent's direct call to it, served before
+that NetworkPolicy, times out after. Through `edge-egress` the same call is
+served twice over: as a CONNECT tunnel with the agent's own TLS, and as plain
+HTTP that `edge-egress` sends on over TLS it verifies against the provider's CA.
+A host that is not in `egress_destinations` gets 403, CONNECT included, and a
+listed host whose certificate does not name it gets 503 while Envoy's
+`ssl.fail_verify_san` counter rises.

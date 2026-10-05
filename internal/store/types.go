@@ -87,13 +87,27 @@ type Secret struct {
 	Kind string
 }
 
+// EgressDestination is one outside host agents may reach through edge-egress
+// (B28.222). Anything not listed is refused there.
+type EgressDestination struct {
+	ID   string
+	Name string
+	Host string // DNS name, no port
+	Port uint32
+	// CASecret names the validation_context secret the host's server cert is
+	// verified against; empty ⇒ the egress proxy's system trust store.
+	CASecret       string
+	ConnectTimeout time.Duration
+}
+
 // Snapshot is the full configuration state used to build an xDS snapshot.
 type Snapshot struct {
-	Gateways  []Gateway
-	Routes    []Route
-	Clusters  []Cluster
-	Endpoints []Endpoint
-	Secrets   []Secret
+	Gateways           []Gateway
+	Routes             []Route
+	Clusters           []Cluster
+	Endpoints          []Endpoint
+	Secrets            []Secret
+	EgressDestinations []EgressDestination
 }
 
 // Store persists domain configuration and supplies snapshots to the xDS

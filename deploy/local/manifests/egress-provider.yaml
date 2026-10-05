@@ -1,0 +1,85 @@
+# Phase 28 — a mock TLS model provider, and an agent that calls it.
+#
+#   llm       whoami serving HTTPS on 8443 with a certificate for
+#             llm.mock-provider.svc.cluster.local from a CA of its own (the
+#             llm-tls secret and the agents' mock-provider-ca configmap are
+#             written by up.sh)
+#   impostor  a second name for the same pods, which their certificate does not
+#             name: edge-egress must refuse to talk TLS to it
+#   agent-egress  an agent pod with curl, trusting the provider's CA for its own
+#             TLS through a CONNECT tunnel
+#
+# The NetworkPolicy that lets only edge-egress reach the provider is
+# egress-provider-policy.yaml, applied after the direct call is shown to work.
+# The images are substituted by up.sh (__WHOAMI__ / __CURL__).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mock-provider
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm
+  namespace: mock-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: llm}
+  template:
+    metadata:
+      labels: {app: llm}
+    spec:
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+      containers:
+        - name: llm
+          image: __WHOAMI__
+          args: ["--port", "8443", "--cert", "/tls/tls.crt", "--key", "/tls/tls.key", "--name", "mock-llm"]
+          ports:
+            - {name: https, containerPort: 8443}
+          readinessProbe:
+            tcpSocket: {port: https}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: tls, mountPath: /tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: llm-tls, defaultMode: 0444}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm
+  namespace: mock-provider
+spec:
+  selector: {app: llm}
+  ports:
+    - {name: https, port: 443, targetPort: https}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: impostor
+  namespace: mock-provider
+spec:
+  selector: {app: llm}
+  ports:
+    - {name: https, port: 443, targetPort: https}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-egress
+  namespace: agents
+  labels: {app: agent}
+spec:
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+  containers:
+    - name: agent
+      image: __CURL__
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: provider-ca, mountPath: /etc/mock-provider-ca, readOnly: true}
+  volumes:
+    - name: provider-ca
+      configMap: {name: mock-provider-ca}

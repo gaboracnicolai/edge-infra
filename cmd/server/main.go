@@ -111,6 +111,10 @@ func run(log *slog.Logger) error {
 		ServiceName:   cfg.TelemetryServiceName,
 		SamplePercent: cfg.TelemetrySamplePercent,
 	})
+	reconciler.WithEgress(builders.EgressOptions{
+		Port:         cfg.EgressPort,
+		SystemCAFile: cfg.EgressSystemCAFile,
+	})
 
 	// HA mode: wire Redis coordinator when REDIS_ADDR is configured.
 	if cfg.RedisAddr != "" {
