@@ -128,7 +128,9 @@ For that host:
   removed from the request: `Authorization`, `Proxy-Authorization`, cookies, any
   header whose name holds `api-key`, `apikey`, `access-key`, `subscription-key`,
   `token`, `secret`, `password`, `credential`, `signature` or `x-auth`, and URL
-  parameters named the same way or `key` or `sig`. The auth-service then adds
+  parameters named the same way or `key` or `sig` (percent-encoded names
+  included). Identity headers only the gateway sets (`x-user-*`,
+  `x-client-cert-subject`) are removed too. The auth-service then adds
   `x-gateway-auth`, an EdDSA assertion that lives 30 seconds, names this request
   (method, host, path as sent) and carries `amr: agent`, the ServiceAccount as
   `sub` (`system:serviceaccount:<namespace>:<name>`) and the cluster's issuer as

@@ -412,10 +412,15 @@ fn is_credential_name(name: &str) -> bool {
     EXACT.contains(&n.as_str()) || PARTS.iter().any(|p| n.contains(p))
 }
 
-/// A credential header the agent sent. The transit header is never one: the
-/// gateway overwrites whatever value a client put there.
+/// A header the agent may not send on: a credential, or an identity header
+/// only the gateway sets (x-user-*, x-client-cert-subject). The transit header
+/// is never one: the gateway overwrites whatever value a client put there.
 fn is_credential_header(name: &str) -> bool {
-    !name.eq_ignore_ascii_case(transit::HEADER) && is_credential_name(name)
+    let n = name.to_ascii_lowercase();
+    if n == transit::HEADER {
+        return false;
+    }
+    n.starts_with("x-user-") || n == "x-client-cert-subject" || is_credential_name(&n)
 }
 
 /// The credential URL parameters in `path`, and the path as Envoy sends it on
@@ -430,7 +435,10 @@ fn strip_credential_params(path: &str) -> (Vec<String>, String) {
     let mut kept: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
     for param in query.split('&') {
         let (name, value) = param.split_once('=').unwrap_or((param, ""));
-        if is_credential_name(name) {
+        // Judged by the name the provider will decode (%6Bey is key); removed
+        // by the name Envoy sees.
+        let decoded = percent_encoding::percent_decode_str(name).decode_utf8_lossy();
+        if is_credential_name(&decoded) {
             if !removed.iter().any(|r| r == name) {
                 removed.push(name.to_string());
             }
@@ -605,6 +613,8 @@ aMVnTHM8GoM=\n\
             "ocp-apim-subscription-key",
             "cookie",
             "x-amz-security-token",
+            "x-user-id",
+            "x-client-cert-subject",
         ] {
             assert!(is_credential_header(name), "{name} must be stripped");
         }
@@ -627,8 +637,8 @@ aMVnTHM8GoM=\n\
         let (removed, sent) = strip_credential_params("/v1/models?z=1&key=sk-planted&a=2&access_token=t");
         assert_eq!(removed, ["key", "access_token"]);
         assert_eq!(sent, "/v1/models?a=2&z=1");
-        let (removed, sent) = strip_credential_params("/v1/models?key=sk-planted");
-        assert_eq!(removed, ["key"]);
+        let (removed, sent) = strip_credential_params("/v1/models?%6Bey=sk-planted");
+        assert_eq!(removed, ["%6Bey"], "an encoded name is still a key");
         assert_eq!(sent, "/v1/models");
         let (removed, sent) = strip_credential_params("/v1/models?z=1&a=2");
         assert!(removed.is_empty());
