@@ -39,6 +39,8 @@
 #  22  a second :443 gateway is refused and :443 keeps serving (red-first)
 #  23  forged identity headers are stripped; a path traversal is refused
 #  24  every listener access-logs and traces; the OTel collector shows curl's x-request-id
+#  26  an unsigned first-party image is refused at admission; a signed one is
+#      admitted pinned to its digest (red-first, runs right after 10)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -2196,6 +2198,50 @@ phase25_default_jwt_osb() {
   ok "Phase 25 verified — on a fresh install an OSB service with jwt auth answers 401 without a token and 200 with one"
 }
 
+# ---- Phase 26 — an unsigned first-party image is refused at admission (B28.210)
+# k8s/policies/verify-image-signatures.yaml: every ghcr.io/gaboracnicolai/* image
+# must carry a keyless cosign signature from this repo's images.yaml, on main or
+# a release tag. Kyverno fetches the signature from ghcr and checks it against
+# the public Rekor log. Both Deployments have 0 replicas: the check is admission,
+# so nothing has to pull or run.
+phase26_signed_images() {
+  section "PHASE 26 — an unsigned first-party image is refused at admission (red-first)"
+  k apply -f "$REPO_ROOT/k8s/policies/verify-image-signatures.yaml"
+  k wait --for=condition=Ready clusterpolicy/verify-image-signatures --timeout=120s >/dev/null \
+    || die "PHASE26 FAIL: clusterpolicy/verify-image-signatures never became Ready"
+  k create namespace signed-images --dry-run=client -o yaml | k apply -f - >/dev/null
+  k -n signed-images delete deploy unsigned signed --ignore-not-found >/dev/null
+
+  section "RED — a Deployment of an unsigned image MUST be DENIED"
+  log "image: $UNSIGNED_IMAGE"
+  local out="" denied="" i=0
+  while [ "$i" -lt 20 ]; do
+    out="$(k -n signed-images create deployment unsigned --image="$UNSIGNED_IMAGE" --replicas=0 2>&1 || true)"
+    if has "$out" verify-image-signatures; then denied="$out"; break; fi
+    k -n signed-images delete deploy unsigned --ignore-not-found >/dev/null 2>&1 || true
+    i=$((i + 1)); sleep 3
+  done
+  [ -n "$denied" ] || die "PHASE26 FAIL: the unsigned image was ADMITTED: $out"
+  echo "  Kyverno denial:"; printf '%s\n' "$denied" | fold -s -w 96 | sed 's/^/    /'
+  # Denied for the missing signature, not because ghcr or Rekor was unreachable.
+  has "$denied" "no signatures found" \
+    || die "PHASE26 FAIL: denied, but not for a missing signature — see the denial above"
+  ok "RED proven — Kyverno DENIED the unsigned image: no signatures found"
+
+  section "GREEN — a Deployment of a signed main build is admitted, pinned to the digest Kyverno verified"
+  log "image: $SIGNED_IMAGE"
+  local img
+  img="$(k -n signed-images create deployment signed --image="$SIGNED_IMAGE" --replicas=0 \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>&1)" \
+    || die "PHASE26 FAIL: the signed image was refused: $img"
+  echo "  admitted as: $img"
+  has "$img" "@sha256:" || die "PHASE26 FAIL: admitted without a digest — Kyverno did not verify it"
+  ok "GREEN — the signed image was admitted and pinned to its digest"
+
+  k delete namespace signed-images --wait=false >/dev/null
+  ok "Phase 26 verified — an unsigned first-party image is refused at admission, a signed one runs pinned to its digest"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2216,6 +2262,7 @@ main() {
   phase9_prove
   phase25_default_jwt_osb   # the defaults alone, before phase 12 flips anything
   phase10_sec3_admission
+  phase26_signed_images
   phase11_sec3_dataplane
   phase12_extauthz_cutover
   phase13_inconsistent_guard
@@ -2230,7 +2277,7 @@ main() {
   phase22_listener_collision
   phase23_connection_manager
   phase24_telemetry
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector."
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

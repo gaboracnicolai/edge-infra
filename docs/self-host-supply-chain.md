@@ -130,11 +130,50 @@ provenance from that run. It has no write access and no OIDC token. It then
 verifies the per-arch `auth-service:<sha>-amd64` image, which is an intermediate
 that nothing signs, and requires the check to fail.
 
+## Refused at admission
+
+[`k8s/policies/verify-image-signatures.yaml`](../k8s/policies/verify-image-signatures.yaml)
+is a Kyverno policy that makes the cluster run the signature check on every pod.
+Argo CD syncs it with the other policies in `k8s/policies`. To apply it by hand,
+on a cluster with Kyverno:
+
+```sh
+kubectl apply -f k8s/policies/verify-image-signatures.yaml
+```
+
+Every pod, and every Deployment, StatefulSet, DaemonSet, Job or CronJob, that
+names an image under `ghcr.io/gaboracnicolai/` must carry a signature from the
+signer above: `images.yaml` in `gaboracnicolai/edge-infra`, on main or on a
+`v<SemVer>` release tag. Anything else is refused when you apply it:
+
+```
+$ kubectl create deployment x --image=ghcr.io/gaboracnicolai/auth-service:<sha>-amd64
+error: failed to create deployment: admission webhook "mutate.kyverno.svc-fail" denied the request:
+resource Deployment/default/x was blocked due to the following policies
+verify-image-signatures:
+  autogen-signed-by-edge-infra-images-workflow: 'failed to verify image ghcr.io/gaboracnicolai/auth-service:<sha>-amd64:
+    .attestors[0].entries[0].keyless: no signatures found'
+```
+
+A signature from a pull-request build, another workflow or another repository
+is refused the same way, with `subject mismatch` or `extension mismatch`. An
+image that passes is rewritten to the digest Kyverno verified, e.g.
+`edge-osb:1.2.3@sha256:…`, so the tag cannot move to other bytes after.
+Images from other registries are not checked.
+
+The policy fails closed. If Kyverno cannot reach ghcr.io or the public Rekor
+log, it refuses the pod. To pull `edge-issuer` and `edge-ratelimit`, which are
+private, Kyverno needs read access to them too: name a pull secret in its
+`--imagePullSecrets` flag.
+
+`make kind-e2e` runs it in Phase 26. A Deployment of the per-arch auth-service
+image, which nothing signs, is denied with `no signatures found`, and a signed
+`edge-osb` build from main is admitted, pinned to its digest.
+
 ## What this does not cover yet
 
-- **Nothing in the cluster refuses an unsigned image.** The charts do not yet
-  include an admission policy that runs this check on every pod. Verify before
-  you install.
+- **Admission checks the signature, not the SBOM or the provenance.** Those are
+  checked by `make verify-images`.
 - **The provenance is SLSA Build Level 2, not 3.** GitHub's hosted runner
   generates and signs it, as the build's own workflow. Build L3 needs the
   provenance to come from a generator the build steps cannot touch, and here it

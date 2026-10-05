@@ -41,6 +41,12 @@ ATTACKER_IMAGE="${ATTACKER_IMAGE:-curlimages/curl:8.11.1}"
 # request headers so the auth-service's injected identity headers are visible.
 WHOAMI_IMAGE="${WHOAMI_IMAGE:-traefik/whoami:v1.10.4}"
 DEX_IMAGE="${DEX_IMAGE:-ghcr.io/dexidp/dex:v2.41.1}"
+# Signed-image admission (Phase 26), both from main's images.yaml run at 608373a.
+# SIGNED_IMAGE is a multi-arch image that run signed; UNSIGNED_IMAGE is the
+# per-arch auth-service intermediate it merged into the signed index, which
+# nothing signs.
+SIGNED_IMAGE="${SIGNED_IMAGE:-ghcr.io/gaboracnicolai/edge-osb:608373ac9acc3dafc036da69cb2ef7251182db6d}"
+UNSIGNED_IMAGE="${UNSIGNED_IMAGE:-ghcr.io/gaboracnicolai/auth-service:608373ac9acc3dafc036da69cb2ef7251182db6d-amd64}"
 
 # SCIM bearer token the local issuer accepts (Phase 5 secret, Phase 18 client).
 SCIM_TOKEN="local-dev-scim-token-0123456789abcdef"
