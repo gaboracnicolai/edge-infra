@@ -126,7 +126,11 @@ sign() { # image@sha256:<hex>
 	syft scan "registry:$ref" --platform linux/amd64 -o "spdx-json=$tmp/sbom.spdx.json"
 	cosign attest --yes --type spdxjson --predicate "$tmp/sbom.spdx.json" "$ref"
 	provenance >"$tmp/provenance.json"
-	cosign attest --yes --type slsaprovenance1 --predicate "$tmp/provenance.json" "$ref"
+	# The predicate type as a URI, not cosign's slsaprovenance1 shorthand: the
+	# shorthand re-encodes the predicate through cosign's own struct, which
+	# renames the spec's invocationId to invocationID. The URI keeps it verbatim,
+	# and verify-attestation --type slsaprovenance1 matches the same URI.
+	cosign attest --yes --type https://slsa.dev/provenance/v1 --predicate "$tmp/provenance.json" "$ref"
 	echo "signed $ref: signature, SPDX SBOM of $(jq '.packages | length' "$tmp/sbom.spdx.json") packages, SLSA v1 provenance"
 	rm -rf "$tmp"
 }
