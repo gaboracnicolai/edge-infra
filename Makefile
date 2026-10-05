@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -34,6 +34,7 @@ helm-lint:
 	helm lint --strict deploy/helm/auth-service
 	helm lint --strict deploy/helm/edge-issuer
 	helm lint --strict deploy/helm/edge-ratelimit
+	helm lint --strict deploy/helm/edge-datastores
 
 # Render each chart with its staging values to verify templates produce valid YAML.
 helm-template-dry-run:
@@ -117,6 +118,14 @@ kind-cutover:
 # Real-cluster rollback: docs/ext-authz-cutover-and-rollback.md §2.
 kind-rollback:
 	bash deploy/local/rollback.sh
+
+# The edge-datastores chart in both modes on a throwaway kind cluster: bundled
+# (Postgres, Redis and NATS from the chart) and external (all three switched off,
+# pointed at datastores it did not create). Each must reach Ready with every
+# migration recorded and be reachable through the connection Secret alone; then
+# the cluster is deleted. Needs docker, kind, kubectl, helm and jq.
+kind-datastores:
+	bash deploy/local/datastores.sh
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:

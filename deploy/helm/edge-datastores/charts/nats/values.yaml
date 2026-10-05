@@ -1,0 +1,13 @@
+# Set by the parent chart (edge-datastores/values.yaml → nats:). The client
+# token is read from the connection Secret, key NATS_TOKEN.
+image:
+  repository: nats
+  tag: "2.12.9-alpine@sha256:d152634b3db31218ca61c794827d04e8133e2538ef2f2cc3ab7be77b2ea8efd0"
+  pullPolicy: IfNotPresent
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 512Mi }

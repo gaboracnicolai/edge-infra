@@ -1,0 +1,18 @@
+apiVersion: v2
+name: edge-datastores
+description: Postgres, Redis and NATS for Talyvor Edge — bundled in the cluster, or your own
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+# Each datastore is optional. Switch one off and point external.<store> at your
+# own; the connection Secret and the schema migration work the same either way.
+dependencies:
+  - name: postgres
+    version: 0.1.0
+    condition: postgres.enabled
+  - name: redis
+    version: 0.1.0
+    condition: redis.enabled
+  - name: nats
+    version: 0.1.0
+    condition: nats.enabled
