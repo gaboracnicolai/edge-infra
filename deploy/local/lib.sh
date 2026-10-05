@@ -23,6 +23,7 @@ KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-}"        # empty => kind's default for this
 CALICO_VERSION="${CALICO_VERSION:-v3.30.2}"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.20.0}"
 KYVERNO_VERSION="${KYVERNO_VERSION:-v1.16.0}"
+CSI_DRIVER_SPIFFE_VERSION="${CSI_DRIVER_SPIFFE_VERSION:-v0.15.0}"   # jetstack chart; issues agent SVIDs (Phase 27)
 
 # In-cluster dev datastores (Phase 2) are dev-grade (ephemeral emptyDir, single
 # replica). Their images are pinned in deploy/local/manifests/{postgres,nats}.yaml.

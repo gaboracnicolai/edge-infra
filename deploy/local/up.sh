@@ -41,6 +41,8 @@
 #  24  every listener access-logs and traces; the OTel collector shows curl's x-request-id
 #  26  an unsigned first-party image is refused at admission; a signed one is
 #      admitted pinned to its digest (red-first, runs right after 10)
+#  27  csi-driver-spiffe issues agent pods their SVIDs; with the trust bundle
+#      over SDS, a pod without one is refused at the TLS handshake
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -2249,6 +2251,171 @@ phase26_signed_images() {
   ok "Phase 26 verified — an unsigned first-party image is refused at admission, a signed one runs pinned to its digest"
 }
 
+# ---- Phase 27 — agent certificates (SVIDs) from csi-driver-spiffe (B28.221) --
+# csi-driver-spiffe gives every agent pod that mounts its volume a short-lived
+# certificate for its SPIFFE ID, signed by the edge-spiffe CA (k8s/spiffe). That
+# CA is the trust bundle: loaded through the edge-secrets custodian as a
+# validation_context, named by an mtls route, and served to Envoy over SDS. A pod
+# without a certificate from it never gets past the TLS handshake.
+AGENT_PORT="${AGENT_PORT:-9446}"
+AGENT_HOST="agents.edge.local"
+SPIFFE_TRUST_DOMAIN="${SPIFFE_TRUST_DOMAIN:-edge.talyvor.local}"
+AGENT_SPIFFE_ID="spiffe://$SPIFFE_TRUST_DOMAIN/ns/agents/sa/agent-alpha"
+
+# custodian_put <name> <json body> — PUT /v1/secrets/<name> on edge-secrets, the
+# only writer of the secrets table, as the operator from Phase 5's admin PKI.
+# Echoes the HTTP status.
+custodian_put() {
+  local pki="$LOCAL_DIR/.pki-bootstrap" pf code
+  kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward svc/edge-secrets 18082:8082 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X PUT \
+    --cacert "$pki/admin-ca.crt" --cert "$pki/operator.crt" --key "$pki/operator.key" \
+    -H 'Content-Type: application/json' --data-binary "$2" \
+    "https://localhost:18082/v1/secrets/$1" 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+# agent_curl <pod> [curl args...] — from inside an agent pod, an HTTPS request to
+# the mtls route on an edge-proxy node, trusting the route's server cert. Echoes
+# curl's verbose output and "curl-exit=<rc>". Host is sent without the port, as
+# Phase 20 does: the route's domain is the bare host.
+agent_curl() {
+  local pod="$1" out rc=0; shift
+  out="$(k -n agents exec "$pod" -- curl -sv --max-time 8 --cacert /etc/agents-server-ca/ca.crt \
+    --resolve "$AGENT_HOST:$AGENT_PORT:$AGENT_GW_IP" -H "Host: $AGENT_HOST" "$@" \
+    "https://$AGENT_HOST:$AGENT_PORT/" 2>&1)" || rc=$?
+  printf '%s\ncurl-exit=%s\n' "$out" "$rc"
+}
+
+# agent_tls_refusal <edge-proxy-pod> <counter> — that Envoy's count of handshakes
+# the :AGENT_PORT listener refused for <counter>: fail_verify_no_cert (no client
+# cert) or fail_verify_error (a cert the trust bundle did not sign). Echoes "?"
+# when the admin stats could not be read, never a silent 0.
+agent_tls_refusal() {
+  local pf out
+  kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$1" 19004:9901 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  out="$(curl -s --max-time 8 -G --data-urlencode "filter=_${AGENT_PORT}\\.ssl\\.$2\$" \
+    http://127.0.0.1:19004/stats 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  has "$out" ".ssl.$2: " || { echo "?"; return; }
+  printf '%s\n' "$out" | awk -F': ' '{s += $2} END {print s + 0}'
+}
+
+# assert_refused_at_handshake <pod> <counter> <why> [curl args...] — the pod gets
+# no HTTP answer, and Envoy's <counter> rose: it refused the TLS handshake.
+assert_refused_at_handshake() {
+  local pod="$1" counter="$2" why="$3" before after out; shift 3
+  before="$(agent_tls_refusal "$AGENT_GW_POD" "$counter")"
+  out="$(agent_curl "$pod" "$@")"
+  after="$(agent_tls_refusal "$AGENT_GW_POD" "$counter")"
+  echo "  $pod -> $(printf '%s\n' "$out" | grep -m1 -iE 'alert|failure|reset' | sed 's/^[* ]*//') ($(printf '%s\n' "$out" | tail -1)); Envoy ssl.$counter $before -> $after"
+  ! has "$out" "curl-exit=0" && ! has "$out" "< HTTP/" && ! has "$out" "TENANT-A-BACKEND" \
+    || { printf '%s\n' "$out" | tail -15; die "PHASE27 FAIL: $pod ($why) got an HTTP answer"; }
+  [ "$before" != "?" ] && [ "$after" != "?" ] && [ "$after" -gt "$before" ] \
+    || die "PHASE27 FAIL: $pod ($why) — Envoy's ssl.$counter did not rise ($before -> $after), so the handshake was not what refused it"
+}
+
+phase27_agent_svids() {
+  section "PHASE 27 — agent certificates (SVIDs): only a pod holding one gets past the TLS handshake"
+  local tmp node pgpod code body svid
+  tmp="$(mktemp -d)"
+
+  section "the agent trust root (edge-spiffe CA) and csi-driver-spiffe $CSI_DRIVER_SPIFFE_VERSION, trust domain $SPIFFE_TRUST_DOMAIN"
+  k apply -f "$REPO_ROOT/k8s/spiffe/trust-root.yaml" >/dev/null
+  k -n cert-manager wait --for=condition=Ready certificate/edge-spiffe-ca --timeout=120s >/dev/null
+  k wait --for=condition=Ready clusterissuer/edge-spiffe --timeout=120s >/dev/null
+  h upgrade --install cert-manager-csi-driver-spiffe cert-manager-csi-driver-spiffe \
+    --repo https://charts.jetstack.io --version "$CSI_DRIVER_SPIFFE_VERSION" -n cert-manager \
+    -f "$REPO_ROOT/k8s/spiffe/csi-driver-spiffe-values.yaml" \
+    --set app.trustDomain="$SPIFFE_TRUST_DOMAIN" --wait --timeout 5m >/dev/null
+  ok "edge-spiffe ClusterIssuer Ready; csi-driver-spiffe running on every node"
+
+  section "the trust bundle and the route's server cert, written through the edge-secrets custodian"
+  k -n cert-manager get secret edge-spiffe-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > "$tmp/bundle.crt"
+  grep -q 'BEGIN CERTIFICATE' "$tmp/bundle.crt" || die "PHASE27: the edge-spiffe CA has no ca.crt"
+  body="$(jq -n --rawfile c "$tmp/bundle.crt" '{kind: "validation_context", cert_pem: $c}')"
+  code="$(custodian_put agent-trust-bundle "$body")"
+  [ "$code" = 200 ] || die "PHASE27: the custodian did not accept the trust bundle (HTTP $code)"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$AGENT_HOST" \
+    -addext "subjectAltName=DNS:$AGENT_HOST" -keyout "$tmp/server.key" -out "$tmp/server.crt" >/dev/null 2>&1 \
+    || die "openssl could not mint the route's server cert"
+  body="$(jq -n --rawfile c "$tmp/server.crt" --rawfile k "$tmp/server.key" '{kind: "tls_certificate", cert_pem: $c, key_pem: $k}')"
+  code="$(custodian_put agents-server-cert "$body")"
+  [ "$code" = 200 ] || die "PHASE27: the custodian did not accept the route's server cert (HTTP $code)"
+  ok "agent-trust-bundle (validation_context) and agents-server-cert (tls_certificate) in the secrets table"
+
+  section "an mtls route: $AGENT_HOST on :$AGENT_PORT, client certs checked against agent-trust-bundle"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q >/dev/null <<SQL
+BEGIN;
+INSERT INTO gateways (id,name,port,protocol,tls_secret,node_selector,deleted_at)
+VALUES ('agents-https','agents-https',$AGENT_PORT,'HTTPS',NULL,'{}'::jsonb,NULL)
+ON CONFLICT (name) DO UPDATE SET port=EXCLUDED.port,protocol=EXCLUDED.protocol,tls_secret=NULL,node_selector=EXCLUDED.node_selector,deleted_at=NULL,updated_at=now();
+INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,tls_secret_name,client_ca_secret_name,deleted_at)
+VALUES ('agents','agents','agents-https',ARRAY['$AGENT_HOST']::text[],'/','tenant-a',30,'mtls','agents-server-cert','agent-trust-bundle',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,path_prefix=EXCLUDED.path_prefix,cluster_name=EXCLUDED.cluster_name,
+  auth_policy=EXCLUDED.auth_policy,tls_secret_name=EXCLUDED.tls_secret_name,client_ca_secret_name=EXCLUDED.client_ca_secret_name,updated_at=now(),deleted_at=NULL;
+COMMIT;
+SQL
+  ok "route agents (auth_policy=mtls) -> tenant-a"
+
+  section "three agent pods: one with its SVID, one with no certificate, one with a certificate from another CA"
+  k create namespace agents --dry-run=client -o yaml | k apply -f - >/dev/null
+  k -n agents create configmap agents-server-ca --from-file=ca.crt="$tmp/server.crt" --dry-run=client -o yaml | k apply -f - >/dev/null
+  # Impersonates agent-alpha's SPIFFE ID, but is signed by a CA of its own.
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=agent-alpha" \
+    -addext "subjectAltName=URI:$AGENT_SPIFFE_ID" -keyout "$tmp/foreign.key" -out "$tmp/foreign.crt" >/dev/null 2>&1 \
+    || die "openssl could not mint the foreign cert"
+  apply_secret agents generic foreign-cert --from-file=tls.crt="$tmp/foreign.crt" --from-file=tls.key="$tmp/foreign.key" >/dev/null
+  sed "s|__IMAGE__|$ATTACKER_IMAGE|" "$LOCAL_DIR/manifests/agents.yaml" | k apply -f - >/dev/null
+  k -n agents wait --for=condition=Ready pod --all --timeout=180s >/dev/null \
+    || { k -n agents describe pod agent-alpha | tail -20; die "PHASE27: the agent pods did not become Ready"; }
+
+  svid="$(k -n agents exec agent-alpha -- cat /var/run/secrets/spiffe.io/tls.crt)"
+  printf '%s\n' "$svid" > "$tmp/svid.crt"
+  echo "  agent-alpha's SVID: $(openssl x509 -in "$tmp/svid.crt" -noout -ext subjectAltName 2>/dev/null | tail -1 | sed 's/^ *//'), $(openssl x509 -in "$tmp/svid.crt" -noout -enddate)"
+  has "$(openssl x509 -in "$tmp/svid.crt" -noout -ext subjectAltName 2>/dev/null)" "URI:$AGENT_SPIFFE_ID" \
+    || die "PHASE27 FAIL: agent-alpha's certificate does not name $AGENT_SPIFFE_ID"
+  openssl verify -CAfile "$tmp/bundle.crt" "$tmp/svid.crt" >/dev/null \
+    || die "PHASE27 FAIL: agent-alpha's certificate does not chain to the trust bundle"
+  ok "agent-alpha holds an SVID for $AGENT_SPIFFE_ID, signed by the edge-spiffe CA"
+
+  AGENT_GW_POD="$(ep_pod)"
+  node="$(k -n edge get pod "$AGENT_GW_POD" -o jsonpath='{.spec.nodeName}')"
+  AGENT_GW_IP="$(k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  [ -n "$AGENT_GW_IP" ] || die "PHASE27: no edge-proxy node IP"
+
+  section "GREEN — agent-alpha presents its SVID: served ($node, $AGENT_GW_IP:$AGENT_PORT)"
+  local i=0 out
+  while :; do
+    out="$(agent_curl agent-alpha --cert /var/run/secrets/spiffe.io/tls.crt --key /var/run/secrets/spiffe.io/tls.key)"
+    has "$out" "TENANT-A-BACKEND" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out" | tail -15; die "PHASE27 FAIL: agent-alpha was never served with its SVID"; }
+    sleep 2
+  done
+  ok "agent-alpha -> $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //') TENANT-A-BACKEND"
+
+  section "RED — a pod with no certificate: refused at the TLS handshake"
+  assert_refused_at_handshake no-svid fail_verify_no_cert "no certificate"
+  ok "no-svid refused at the handshake for its missing certificate — no HTTP answer"
+
+  section "RED — a certificate for the same SPIFFE ID from another CA: refused at the TLS handshake"
+  assert_refused_at_handshake foreign-cert fail_verify_error "foreign CA" \
+    --cert /var/run/secrets/spiffe.io/tls.crt --key /var/run/secrets/spiffe.io/tls.key
+  ok "foreign-cert refused at the handshake — its certificate failed the trust bundle, no HTTP answer"
+
+  rm -rf "$tmp"
+  ok "PHASE 27 — csi-driver-spiffe issues agent SVIDs; with the trust bundle over SDS, a pod without one is refused at the TLS handshake"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2284,7 +2451,8 @@ main() {
   phase22_listener_collision
   phase23_connection_manager
   phase24_telemetry
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission."
+  phase27_agent_svids
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

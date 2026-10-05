@@ -43,7 +43,9 @@ export. **Wallet enforcement at the edge is therefore not yet exercised in a run
 self-host extras have their own pages: per-node TLS keys, NetworkPolicies, SCIM and OIDC sign-in are
 in [docs/self-host-network-and-identity.md](docs/self-host-network-and-identity.md), and the
 confidential-node option is in
-[docs/self-host-confidential-compute.md](docs/self-host-confidential-compute.md).
+[docs/self-host-confidential-compute.md](docs/self-host-confidential-compute.md), and certificates
+for agent pods, so a route admits only your agents, are in
+[docs/agent-certificates.md](docs/agent-certificates.md).
 Every image is signed and carries an SBOM and SLSA provenance. To check all three before you install,
 run `make verify-images TAG=<release>` or see
 [docs/self-host-supply-chain.md](docs/self-host-supply-chain.md). Nothing is signed if trivy finds a

@@ -1,0 +1,24 @@
+# Values for jetstack's cert-manager-csi-driver-spiffe chart (v0.15.0), which
+# issues every agent pod its SVID from the edge-spiffe ClusterIssuer in
+# trust-root.yaml:
+#
+#   helm upgrade --install cert-manager-csi-driver-spiffe cert-manager-csi-driver-spiffe \
+#     --repo https://charts.jetstack.io --version v0.15.0 \
+#     -n cert-manager -f k8s/spiffe/csi-driver-spiffe-values.yaml --wait
+#
+# Set app.trustDomain to your own domain; it is the authority part of every
+# agent's SPIFFE ID (spiffe://<trustDomain>/ns/<namespace>/sa/<service account>).
+app:
+  trustDomain: edge.talyvor.local
+  # How long each SVID lives. The driver renews it before it expires, in place,
+  # without restarting the pod.
+  certificateRequestDuration: 1h
+  issuer:
+    name: edge-spiffe
+    kind: ClusterIssuer
+    group: cert-manager.io
+  approver:
+    # The approver approves only requests for this signer: SVIDs from
+    # edge-spiffe. Requests to every other issuer are left to whatever approves
+    # them in your cluster.
+    signerName: clusterissuers.cert-manager.io/edge-spiffe

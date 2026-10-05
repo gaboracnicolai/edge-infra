@@ -1,0 +1,104 @@
+# Phase 27 — three agent pods in their own namespace, each trying the mtls route
+# agents.edge.local:
+#   agent-alpha   mounts its SVID from csi-driver-spiffe          -> served
+#   no-svid       no certificate at all                           -> refused at the handshake
+#   foreign-cert  a certificate the edge-spiffe CA did not sign    -> refused at the handshake
+# All three trust the route's server cert (agents-server-ca, written by up.sh).
+# The image is substituted by up.sh (ATTACKER_IMAGE: curl).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-alpha
+  namespace: agents
+---
+# csi-driver-spiffe asks for the SVID as the pod's own service account, so the
+# account needs to create CertificateRequests in its namespace. The driver's
+# approver approves only a request whose SPIFFE ID is that account's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: request-svid
+  namespace: agents
+rules:
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificaterequests"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-alpha-request-svid
+  namespace: agents
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: request-svid}
+subjects:
+  - {kind: ServiceAccount, name: agent-alpha, namespace: agents}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-alpha
+  namespace: agents
+  labels: {app: agent}
+spec:
+  serviceAccountName: agent-alpha
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+  containers:
+    - name: agent
+      image: __IMAGE__
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: svid, mountPath: /var/run/secrets/spiffe.io, readOnly: true}
+        - {name: server-ca, mountPath: /etc/agents-server-ca, readOnly: true}
+  volumes:
+    - name: svid
+      csi:
+        driver: spiffe.csi.cert-manager.io
+        readOnly: true
+        volumeAttributes:
+          spiffe.csi.cert-manager.io/fs-group: "1000"   # the key is readable by the agent's group only
+    - name: server-ca
+      configMap: {name: agents-server-ca}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-svid
+  namespace: agents
+  labels: {app: agent}
+spec:
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+  containers:
+    - name: agent
+      image: __IMAGE__
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: server-ca, mountPath: /etc/agents-server-ca, readOnly: true}
+  volumes:
+    - name: server-ca
+      configMap: {name: agents-server-ca}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: foreign-cert
+  namespace: agents
+  labels: {app: agent}
+spec:
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true, fsGroup: 1000}
+  containers:
+    - name: agent
+      image: __IMAGE__
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: foreign, mountPath: /var/run/secrets/spiffe.io, readOnly: true}
+        - {name: server-ca, mountPath: /etc/agents-server-ca, readOnly: true}
+  volumes:
+    - name: foreign
+      secret: {secretName: foreign-cert, defaultMode: 0440}
+    - name: server-ca
+      configMap: {name: agents-server-ca}
