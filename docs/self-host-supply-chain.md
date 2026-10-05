@@ -62,6 +62,41 @@ certificate and in the provenance. You can name images directly:
 If you have no cosign, `bash deploy/hack/supply-chain.sh install <dir>` fetches
 the pinned one and checks its sha256.
 
+## Scanned for known vulnerabilities
+
+Before the `sign` job signs anything, the `scan` job in `images.yaml` runs
+[trivy](https://github.com/aquasecurity/trivy) 0.74.0 over all eight images. If
+any of them carries a HIGH or CRITICAL vulnerability that already has a fixed
+version, the run fails and nothing is signed. That covers OS packages, the Go
+modules and Go standard library compiled into each binary, and the OSB image's
+Python packages. A vulnerability with no fix yet does not fail the run, because
+there is nothing to upgrade to. The nightly run fails on the morning a fix
+ships. To scan a release yourself, with `trivy` on your PATH:
+
+```sh
+make scan-images TAG=1.2.3
+```
+
+If you have no trivy, `bash deploy/hack/image-scan.sh install <dir>` fetches the
+pinned one and checks its sha256.
+
+What goes into an image is locked as well:
+
+- **Base images are pinned to a digest**, e.g.
+  `gcr.io/distroless/static:nonroot@sha256:…`, so a commit always builds on the
+  same bytes. A new base comes in as a commit, and that commit's run scans it.
+  `bash deploy/hack/image-scan.sh bases` fails if any `FROM` names a tag alone.
+- **Go 1.27.1** builds every Go binary, from the pinned `golang` image, and
+  `go.mod` asks for the same version.
+- **The OSB image installs `osb/requirements.lock`**, which pins every Python
+  package to an exact version and hash. pip refuses any package the lock does
+  not name. `make -f osb/Makefile lock` regenerates it from `osb/pyproject.toml`.
+
+CI also proves the scan can fail. It plants PyYAML 5.3.1 (CVE-2020-14343,
+CRITICAL) in the OSB image the same run pushed
+([`test/image-scan/planted`](../test/image-scan/planted)). The scan must refuse
+that image and name that CVE.
+
 ## By hand, with cosign alone
 
 You do not need this repository:

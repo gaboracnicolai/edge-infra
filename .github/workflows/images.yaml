@@ -17,8 +17,11 @@ on:
       - 'osb/**'
       - 'auth-service/src/**'
       - 'auth-service/Cargo.*'
+      - 'auth-service/Dockerfile'
       - 'deploy/hack/release-version.sh'
       - 'deploy/hack/supply-chain.sh'
+      - 'deploy/hack/image-scan.sh'
+      - 'test/image-scan/**'
       - '.github/workflows/images.yaml'
   pull_request:
     branches: [main]
@@ -29,8 +32,11 @@ on:
       - 'osb/**'
       - 'auth-service/src/**'
       - 'auth-service/Cargo.*'
+      - 'auth-service/Dockerfile'
       - 'deploy/hack/release-version.sh'
       - 'deploy/hack/supply-chain.sh'
+      - 'deploy/hack/image-scan.sh'
+      - 'test/image-scan/**'
       - '.github/workflows/images.yaml'
   workflow_dispatch:
 
@@ -339,6 +345,71 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no digest for auth-service:${{ github.sha }}: '$digest'"; exit 1; }
           echo "digest=$digest" >>"$GITHUB_OUTPUT"
 
+  # Every image above is trivy-scanned before the sign job will sign any of them
+  # (deploy/hack/image-scan.sh): a HIGH or CRITICAL vulnerability that already
+  # has a fixed version fails the run, so a vulnerable image is never signed, and
+  # the nightly run catches a CVE published after an image was built.
+  scan:
+    needs: [control-plane, osb, auth-service-merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      O: ghcr.io/${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install trivy (pinned + checksum-verified)
+        run: |
+          bash deploy/hack/image-scan.sh install "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+      # Two of the eight packages are private; the job token reads them.
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Every base image is pinned to a digest, and a floating one is refused
+        run: |
+          set -uo pipefail
+          bash deploy/hack/image-scan.sh bases || exit 1
+          if bash deploy/hack/image-scan.sh bases <(printf 'FROM python:3.12-slim\n'); then
+            echo "bases passed a FROM pinned to a tag alone"
+            exit 1
+          fi
+          echo "bases refused the floating FROM"
+      - name: trivy, every image
+        run: |
+          bash deploy/hack/image-scan.sh scan \
+            "$O/edge-control-plane@${{ needs.control-plane.outputs.edge-control-plane }}" \
+            "$O/edge-issuer@${{ needs.control-plane.outputs.edge-issuer }}" \
+            "$O/edge-ratelimit@${{ needs.control-plane.outputs.edge-ratelimit }}" \
+            "$O/edge-secrets@${{ needs.control-plane.outputs.edge-secrets }}" \
+            "$O/edge-migrate@${{ needs.control-plane.outputs.edge-migrate }}" \
+            "$O/edge-attest@${{ needs.control-plane.outputs.edge-attest }}" \
+            "$O/edge-osb@${{ needs.osb.outputs.edge-osb }}" \
+            "$O/auth-service@${{ needs.auth-service-merge.outputs.auth-service }}"
+      # The gate is worth something only if it can fail: the OSB image this run
+      # pushed, with a known-vulnerable package planted in it, must be refused —
+      # and refused for that CVE, not because the scanner could not run.
+      - name: A planted CVE is refused
+        run: |
+          set -uo pipefail
+          docker build -q --build-arg BASE="$O/edge-osb@${{ needs.osb.outputs.edge-osb }}" \
+            -t edge-osb:planted test/image-scan/planted || exit 1
+          rc=0
+          out="$(bash deploy/hack/image-scan.sh scan edge-osb:planted 2>&1)" || rc=$?
+          echo "$out"
+          if [ "$rc" = 0 ]; then
+            echo "the scan passed an image carrying CVE-2020-14343"
+            exit 1
+          fi
+          if ! grep -q 'CVE-2020-14343' <<<"$out"; then
+            echo "the scan failed, but not on the planted CVE-2020-14343"
+            exit 1
+          fi
+          echo "the scan refused the planted CVE-2020-14343"
+
   # Every image above gets a cosign signature, an SPDX SBOM made by syft and SLSA
   # v1 provenance, attested to the digest its build pushed
   # (deploy/hack/supply-chain.sh, docs/self-host-supply-chain.md). Keyless: cosign
@@ -347,7 +418,7 @@ jobs:
   # job holds id-token: write — the build jobs, which run the build's own code,
   # cannot mint a signing identity.
   sign:
-    needs: [control-plane, osb, auth-service-merge]
+    needs: [control-plane, osb, auth-service-merge, scan]
     runs-on: ubuntu-latest
     permissions:
       contents: read

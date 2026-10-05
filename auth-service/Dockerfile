@@ -14,7 +14,7 @@ ARG BUILD_MODE=local
 
 # ---- builder ----------------------------------------------------------
 # Reached only when BUILD_MODE=local.
-FROM rust:1.95-slim AS builder
+FROM rust:1.95.0-slim-trixie@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 WORKDIR /app
 
 # Cache dependency compilation by building a stub crate first.
@@ -43,7 +43,7 @@ FROM ${BUILD_MODE}-source AS source
 
 
 # ---- runtime ----------------------------------------------------------
-FROM gcr.io/distroless/cc:nonroot
+FROM gcr.io/distroless/cc:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 COPY --from=source /auth-service /auth-service
 USER nonroot:nonroot
 EXPOSE 50051 9090
