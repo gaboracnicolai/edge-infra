@@ -1,0 +1,36 @@
+# Phase 30 — a keyless agent (B28.224), in Phase 29's locked namespace.
+#
+# A provider key is planted in its environment (OPENAI_API_KEY, __PLANTED__ is
+# substituted by up.sh), as one leaked into an agent would be. The only thing
+# it should need is its own ServiceAccount token, projected for the edge-egress
+# audience: edge-egress hands it to the auth-service, which removes every
+# credential the agent sent and signs the transit assertion instead.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-keyless
+  namespace: agents-locked
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-keyless
+  namespace: agents-locked
+  labels: {app: agent}
+spec:
+  serviceAccountName: agent-keyless
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+  containers:
+    - name: agent
+      image: __CURL__
+      command: ["sleep", "infinity"]
+      env:
+        - {name: OPENAI_API_KEY, value: __PLANTED__}
+      volumeMounts:
+        - {name: edge-token, mountPath: /var/run/secrets/talyvor, readOnly: true}
+  volumes:
+    - name: edge-token
+      projected:
+        sources:
+          - serviceAccountToken: {audience: edge-egress, expirationSeconds: 600, path: token}

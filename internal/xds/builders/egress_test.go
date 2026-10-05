@@ -4,8 +4,12 @@ import (
 	"testing"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,7 +22,7 @@ var mockLLM = store.EgressDestination{ID: "d1", Name: "mock-llm", Host: "llm.moc
 // A listed host is reachable two ways — proxied HTTP onto the TLS cluster, and
 // CONNECT host:port onto the tunnel — and every other host gets 403.
 func TestBuildEgress_OnlyListedHostsAreRouted(t *testing.T) {
-	res := BuildEgress([]store.EgressDestination{mockLLM}, nil, EgressOptions{Port: 3128}, TelemetryOptions{})
+	res := BuildEgress([]store.EgressDestination{mockLLM}, nil, EgressOptions{Port: 3128}, ExtAuthzOptions{}, TelemetryOptions{})
 	rc := res[resourcev3.RouteType][0].(*routev3.RouteConfiguration)
 	require.Len(t, rc.GetVirtualHosts(), 2)
 
@@ -48,7 +52,7 @@ func TestBuildEgress_UpstreamTLSVerifiesTheHost(t *testing.T) {
 		{Name: "mock-ca", Kind: "validation_context", CertPEM: "CA"},
 		{Name: "gateway-cert", Kind: "tls_certificate", CertPEM: "C", KeyPEM: "KEY"},
 	}
-	res := BuildEgress([]store.EgressDestination{mockLLM}, secrets, EgressOptions{Port: 3128}, TelemetryOptions{})
+	res := BuildEgress([]store.EgressDestination{mockLLM}, secrets, EgressOptions{Port: 3128}, ExtAuthzOptions{}, TelemetryOptions{})
 	require.Len(t, res[resourcev3.ClusterType], 2)
 
 	tlsCl := res[resourcev3.ClusterType][0].(*clusterv3.Cluster)
@@ -69,4 +73,51 @@ func TestBuildEgress_UpstreamTLSVerifiesTheHost(t *testing.T) {
 
 	require.Len(t, res[resourcev3.SecretType], 1)
 	assert.Equal(t, "mock-ca", res[resourcev3.SecretType][0].(*tlsv3.Secret).GetName())
+}
+
+// A keyless host (B28.224): its plain-HTTP route asks the auth-service in agent
+// mode, its CONNECT is refused, and every other route skips ext_authz. With
+// ext_authz off on the control plane the keyless host is closed, not open.
+func TestBuildEgress_KeylessHostGoesThroughAgentAuthz(t *testing.T) {
+	keyless := mockLLM
+	keyless.Keyless = true
+	other := store.EgressDestination{ID: "d2", Name: "other", Host: "other.test", Port: 443}
+	ea := ExtAuthzOptions{Enabled: true, Address: "auth-service.infra.svc.cluster.local", Port: 50051}
+
+	res := BuildEgress([]store.EgressDestination{keyless, other}, nil, EgressOptions{Port: 3128}, ea, TelemetryOptions{})
+	l := res[resourcev3.ListenerType][0].(*listenerv3.Listener)
+	hcm := &hcmv3.HttpConnectionManager{}
+	require.NoError(t, l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm))
+	require.Len(t, hcm.GetHttpFilters(), 2)
+	assert.Equal(t, extAuthzFilterName, hcm.GetHttpFilters()[0].GetName(), "ext_authz runs before the router")
+	assert.Contains(t, clusterNames(res), authServiceClusterName)
+
+	perRoute := func(r *routev3.Route) *extauthzv3.ExtAuthzPerRoute {
+		pr := &extauthzv3.ExtAuthzPerRoute{}
+		require.NoError(t, r.GetTypedPerFilterConfig()[extAuthzFilterName].UnmarshalTo(pr), r.GetName())
+		return pr
+	}
+	rc := res[resourcev3.RouteType][0].(*routev3.RouteConfiguration)
+	connect, plain := rc.GetVirtualHosts()[0].GetRoutes()[0], rc.GetVirtualHosts()[0].GetRoutes()[1]
+	assert.EqualValues(t, 403, connect.GetDirectResponse().GetStatus(), "a tunnel would carry the agent's own key")
+	assert.Equal(t, "egress_mock-llm", plain.GetRoute().GetCluster())
+	assert.Equal(t, map[string]string{"auth_policy": "agent"}, perRoute(plain).GetCheckSettings().GetContextExtensions())
+	for _, vh := range rc.GetVirtualHosts()[1:] {
+		for _, r := range vh.GetRoutes() {
+			assert.True(t, perRoute(r).GetDisabled(), "%s must not call the auth-service", r.GetName())
+		}
+	}
+
+	closed := BuildEgress([]store.EgressDestination{keyless}, nil, EgressOptions{Port: 3128}, ExtAuthzOptions{}, TelemetryOptions{})
+	rc = closed[resourcev3.RouteType][0].(*routev3.RouteConfiguration)
+	assert.EqualValues(t, 503, rc.GetVirtualHosts()[0].GetRoutes()[1].GetDirectResponse().GetStatus())
+	assert.NotContains(t, clusterNames(closed), authServiceClusterName)
+}
+
+func clusterNames(res map[resourcev3.Type][]types.Resource) []string {
+	var out []string
+	for _, c := range res[resourcev3.ClusterType] {
+		out = append(out, c.(*clusterv3.Cluster).GetName())
+	}
+	return out
 }

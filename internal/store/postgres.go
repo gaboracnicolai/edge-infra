@@ -350,7 +350,7 @@ func loadEndpoints(ctx context.Context, q querier) ([]Endpoint, error) {
 
 func loadEgressDestinations(ctx context.Context, q querier) ([]EgressDestination, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, name, host, port, COALESCE(ca_secret_name, ''), connect_timeout_ms
+		SELECT id, name, host, port, COALESCE(ca_secret_name, ''), connect_timeout_ms, keyless
 		FROM egress_destinations
 		ORDER BY name
 	`)
@@ -363,7 +363,7 @@ func loadEgressDestinations(ctx context.Context, q querier) ([]EgressDestination
 	for rows.Next() {
 		var d EgressDestination
 		var ms int64
-		if err := rows.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.CASecret, &ms); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.CASecret, &ms, &d.Keyless); err != nil {
 			return nil, err
 		}
 		d.ConnectTimeout = time.Duration(ms) * time.Millisecond

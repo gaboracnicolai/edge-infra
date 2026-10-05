@@ -631,3 +631,84 @@ async fn test_key_from_one_issuer_cannot_vouch_for_another() {
     let err = check_token(&svc, &token).await.expect_err("unlisted issuer must be refused");
     assert_eq!(err, "untrusted issuer");
 }
+
+/// An agent's call through edge-egress to a keyless destination: Envoy sends
+/// auth_policy=agent, and whatever headers and path the agent sent.
+fn agent_request(headers: &[(&str, &str)], path: &str) -> Request<CheckRequest> {
+    Request::new(CheckRequest {
+        attributes: Some(AttributeContext {
+            request: Some(AttrRequest {
+                http: Some(HttpRequest {
+                    method: "POST".into(),
+                    headers: headers
+                        .iter()
+                        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                        .collect(),
+                    path: path.into(),
+                    host: "api.openai.com".into(),
+                    scheme: "http".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            context_extensions: HashMap::from([("auth_policy".to_string(), "agent".to_string())]),
+            ..Default::default()
+        }),
+    })
+}
+
+// B28.224: a keyless agent. Its ServiceAccount token buys it a signed
+// assertion, and every key planted in it — headers, the URL, the workload
+// token itself — is removed before the request leaves.
+#[tokio::test]
+async fn test_keyless_agent_credentials_stripped_and_assertion_signed() {
+    let cluster = make_fixture("sa-kid");
+    let (svc, _metrics) = build_multi_issuer_service(&[(SA_ISSUER, TEST_AUDIENCE, cluster.jwks.clone())]);
+    let workload = format!("Bearer {}", sign_jwt(&cluster.private_pem, "sa-kid", &service_account_claims()));
+    let planted = "sk-planted-0123456789";
+    let bearer_key = format!("Bearer {planted}");
+
+    let response = svc
+        .check(agent_request(
+            &[
+                ("proxy-authorization", &workload),
+                ("authorization", &bearer_key),
+                ("x-api-key", planted),
+                ("content-type", "application/json"),
+            ],
+            &format!("/v1/chat/completions?key={planted}"),
+        ))
+        .await
+        .expect("rpc")
+        .into_inner();
+    let ok = match response.http_response {
+        Some(HttpResponse::OkResponse(ok)) => ok,
+        other => panic!("expected OkResponse, got {other:?}"),
+    };
+    assert_eq!(ok.headers_to_remove, ["authorization", "proxy-authorization", "x-api-key"]);
+    assert_eq!(ok.query_parameters_to_remove, ["key"]);
+    for h in ok.headers.iter().filter_map(|o| o.header.as_ref()) {
+        assert!(!h.value.contains(planted), "{} carries the planted key", h.key);
+    }
+    let assertion = header_value(&ok.headers, "x-gateway-auth").expect("transit assertion");
+    let vouched = backend_verifier(&svc)
+        .verify(assertion, "POST", "api.openai.com", "/v1/chat/completions")
+        .expect("the assertion names the request as it leaves, without the key");
+    assert_eq!(vouched.sub, "system:serviceaccount:agents:billing-bot");
+    assert_eq!(vouched.amr, "agent");
+    assert_eq!(vouched.idp.as_deref(), Some(SA_ISSUER));
+
+    // The planted key alone, without the workload token: refused by the proxy.
+    let response = svc
+        .check(agent_request(&[("authorization", &bearer_key)], "/v1/chat/completions"))
+        .await
+        .expect("rpc")
+        .into_inner();
+    match response.http_response {
+        Some(HttpResponse::DeniedResponse(denied)) => {
+            assert_eq!(denied.status.map(|s| s.code), Some(407));
+            assert!(denied.body.contains("Proxy-Authorization"), "body: {}", denied.body);
+        }
+        other => panic!("expected a 407, got {other:?}"),
+    }
+}

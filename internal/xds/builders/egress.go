@@ -10,6 +10,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	dnscommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/common/dns/v3"
 	dnsclusterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dns/v3"
+	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -17,6 +18,7 @@ import (
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/edge-infra/control-plane/internal/store"
@@ -31,6 +33,14 @@ import (
 //   - CONNECT <host>:<port> for a listed host opens a TCP tunnel to it, and the
 //     agent's own TLS runs through it end to end (https_proxy);
 //   - any other host, CONNECT included, gets 403 from the proxy.
+//
+// A keyless destination (B28.224) takes no credential from the agent. Its
+// plain-HTTP route goes through ext_authz in the auth-service's agent mode: the
+// agent's workload token in Proxy-Authorization is verified, every credential
+// it sent is removed, and the signed transit assertion is added. CONNECT to it
+// is refused, since the agent's own TLS would carry its credentials past the
+// gateway unseen. With ext_authz off on the control plane a keyless host is
+// closed (503) rather than open.
 
 const (
 	// EgressListenerName is the edge-egress listener (and its stat prefix).
@@ -46,6 +56,9 @@ const (
 
 	// egressDeniedBody is what a request for an unlisted host gets, with a 403.
 	egressDeniedBody = "edge-egress: destination not allowed\n"
+
+	// egressAgentPolicy is the auth_policy a keyless route sends the auth-service.
+	egressAgentPolicy = "agent"
 
 	// defaultEgressConnectTimeout applies to a destination row with none.
 	defaultEgressConnectTimeout = 5 * time.Second
@@ -66,18 +79,24 @@ func EgressTunnelClusterName(d store.EgressDestination) string {
 }
 
 // BuildEgress renders everything an edge-egress Envoy holds: its listener, the
-// allow-list route config, two DNS clusters per destination, the telemetry
-// cluster when telemetry is on, and the CA bundles the destinations name. Only
-// validation_context secrets are included — never a private key — so a name
-// that resolves to anything else leaves that upstream unverifiable, and closed.
-func BuildEgress(dests []store.EgressDestination, secrets []store.Secret, opts EgressOptions, tel TelemetryOptions) map[resourcev3.Type][]types.Resource {
-	clusters := make([]types.Resource, 0, 2*len(dests)+1)
+// allow-list route config, two DNS clusters per destination, the auth-service
+// cluster when a destination is keyless, the telemetry cluster when telemetry
+// is on, and the CA bundles the destinations name. Only validation_context
+// secrets are included — never a private key — so a name that resolves to
+// anything else leaves that upstream unverifiable, and closed.
+func BuildEgress(dests []store.EgressDestination, secrets []store.Secret, opts EgressOptions, ea ExtAuthzOptions, tel TelemetryOptions) map[resourcev3.Type][]types.Resource {
+	authz := false
+	clusters := make([]types.Resource, 0, 2*len(dests)+2)
 	cas := map[string]bool{}
 	for _, d := range dests {
 		clusters = append(clusters, egressTLSCluster(d, opts), egressTunnelCluster(d))
 		if d.CASecret != "" {
 			cas[d.CASecret] = true
 		}
+		authz = authz || (d.Keyless && ea.Enabled)
+	}
+	if authz {
+		clusters = append(clusters, authServiceCluster(ea))
 	}
 	clusters = append(clusters, TelemetryClusters(tel)...)
 
@@ -89,14 +108,25 @@ func BuildEgress(dests []store.EgressDestination, secrets []store.Secret, opts E
 	}
 
 	return map[resourcev3.Type][]types.Resource{
-		resourcev3.ListenerType: {egressListener(opts, tel)},
-		resourcev3.RouteType:    {egressRouteConfig(dests)},
+		resourcev3.ListenerType: {egressListener(opts, authz, ea, tel)},
+		resourcev3.RouteType:    {egressRouteConfig(dests, ea.Enabled, authz)},
 		resourcev3.ClusterType:  clusters,
 		resourcev3.SecretType:   BuildSecrets(bundles),
 	}
 }
 
-func egressListener(opts EgressOptions, tel TelemetryOptions) *listenerv3.Listener {
+func egressListener(opts EgressOptions, authz bool, ea ExtAuthzOptions, tel TelemetryOptions) *listenerv3.Listener {
+	filters := []*hcmv3.HttpFilter{{
+		Name: wellknown.Router,
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{
+			// No x-envoy-* headers on requests that leave the cluster.
+			TypedConfig: mustAny(&routerv3.Router{SuppressEnvoyHeaders: true}),
+		},
+	}}
+	if authz {
+		// Only keyless routes enable it; every other route turns it off.
+		filters = append([]*hcmv3.HttpFilter{extAuthzFilter(ea)}, filters...)
+	}
 	hcm := &hcmv3.HttpConnectionManager{
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
 		StatPrefix: EgressListenerName,
@@ -112,13 +142,7 @@ func egressListener(opts EgressOptions, tel TelemetryOptions) *listenerv3.Listen
 		CommonHttpProtocolOptions: &corev3.HttpProtocolOptions{
 			IdleTimeout: durationpb.New(connectionIdleTimeout),
 		},
-		HttpFilters: []*hcmv3.HttpFilter{{
-			Name: wellknown.Router,
-			ConfigType: &hcmv3.HttpFilter_TypedConfig{
-				// No x-envoy-* headers on requests that leave the cluster.
-				TypedConfig: mustAny(&routerv3.Router{SuppressEnvoyHeaders: true}),
-			},
-		}},
+		HttpFilters: filters,
 	}
 	observeConnectionManager(hcm, EgressListenerName, tel)
 	return &listenerv3.Listener{
@@ -136,45 +160,55 @@ func egressListener(opts EgressOptions, tel TelemetryOptions) *listenerv3.Listen
 // egressRouteConfig has one virtual host per destination — its bare host for
 // proxied HTTP, host:port for CONNECT — and a catch-all that refuses the rest.
 // A CONNECT request matches only a connect_matcher route, so each host carries
-// one of each.
-func egressRouteConfig(dests []store.EgressDestination) *routev3.RouteConfiguration {
+// one of each. With the ext_authz filter on the listener (authz), only a keyless
+// host's plain-HTTP route runs it; every other route switches it off.
+func egressRouteConfig(dests []store.EgressDestination, extAuthzEnabled, authz bool) *routev3.RouteConfiguration {
 	vhs := make([]*routev3.VirtualHost, 0, len(dests)+1)
 	for _, d := range dests {
+		connect := &routev3.Route{
+			Name:  d.Name + "_connect",
+			Match: connectMatch(),
+			Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+				ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: EgressTunnelClusterName(d)},
+				Timeout:          durationpb.New(0),
+				// connect_config terminates the CONNECT here: the tunnel's bytes
+				// go to the cluster as plain TCP.
+				UpgradeConfigs: []*routev3.RouteAction_UpgradeConfig{{
+					UpgradeType:   "CONNECT",
+					ConnectConfig: &routev3.RouteAction_UpgradeConfig_ConnectConfig{},
+				}},
+			}},
+		}
+		plain := &routev3.Route{
+			Name:  d.Name,
+			Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
+			Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+				ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: EgressClusterName(d)},
+				// Model calls stream for minutes; the stream idle timeout still
+				// reaps one that stalls.
+				Timeout: durationpb.New(0),
+			}},
+		}
+		if d.Keyless {
+			connect.Action = directResponse(403, "edge-egress: "+d.Host+" is keyless: send plain http:// through the proxy, not CONNECT\n")
+			if extAuthzEnabled {
+				plain.TypedPerFilterConfig = map[string]*anypb.Any{extAuthzFilterName: mustAny(&extauthzv3.ExtAuthzPerRoute{
+					Override: &extauthzv3.ExtAuthzPerRoute_CheckSettings{CheckSettings: &extauthzv3.CheckSettings{
+						ContextExtensions: map[string]string{"auth_policy": egressAgentPolicy},
+					}},
+				})}
+			} else {
+				// Nothing could remove the agent's credentials: closed, not open.
+				plain.Action = directResponse(503, "edge-egress: "+d.Host+" is keyless and ext_authz is off\n")
+			}
+		}
 		vhs = append(vhs, &routev3.VirtualHost{
 			Name:    "egress_" + d.Name,
 			Domains: []string{d.Host, d.Host + ":" + strconv.FormatUint(uint64(d.Port), 10)},
-			Routes: []*routev3.Route{
-				{
-					Name:  d.Name + "_connect",
-					Match: connectMatch(),
-					Action: &routev3.Route_Route{Route: &routev3.RouteAction{
-						ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: EgressTunnelClusterName(d)},
-						Timeout:          durationpb.New(0),
-						// connect_config terminates the CONNECT here: the tunnel's bytes
-						// go to the cluster as plain TCP.
-						UpgradeConfigs: []*routev3.RouteAction_UpgradeConfig{{
-							UpgradeType:   "CONNECT",
-							ConnectConfig: &routev3.RouteAction_UpgradeConfig_ConnectConfig{},
-						}},
-					}},
-				},
-				{
-					Name:  d.Name,
-					Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}},
-					Action: &routev3.Route_Route{Route: &routev3.RouteAction{
-						ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: EgressClusterName(d)},
-						// Model calls stream for minutes; the stream idle timeout still
-						// reaps one that stalls.
-						Timeout: durationpb.New(0),
-					}},
-				},
-			},
+			Routes:  []*routev3.Route{connect, plain},
 		})
 	}
-	deny := &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{
-		Status: 403,
-		Body:   &corev3.DataSource{Specifier: &corev3.DataSource_InlineString{InlineString: egressDeniedBody}},
-	}}
+	deny := directResponse(403, egressDeniedBody)
 	vhs = append(vhs, &routev3.VirtualHost{
 		Name:    "egress_denied",
 		Domains: []string{"*"},
@@ -183,7 +217,25 @@ func egressRouteConfig(dests []store.EgressDestination) *routev3.RouteConfigurat
 			{Name: "denied", Match: &routev3.RouteMatch{PathSpecifier: &routev3.RouteMatch_Prefix{Prefix: "/"}}, Action: deny},
 		},
 	})
+	if authz {
+		for _, vh := range vhs {
+			for _, rt := range vh.GetRoutes() {
+				if rt.TypedPerFilterConfig == nil {
+					rt.TypedPerFilterConfig = map[string]*anypb.Any{extAuthzFilterName: mustAny(&extauthzv3.ExtAuthzPerRoute{
+						Override: &extauthzv3.ExtAuthzPerRoute_Disabled{Disabled: true},
+					})}
+				}
+			}
+		}
+	}
 	return &routev3.RouteConfiguration{Name: EgressRouteConfigName, VirtualHosts: vhs}
+}
+
+func directResponse(status uint32, body string) *routev3.Route_DirectResponse {
+	return &routev3.Route_DirectResponse{DirectResponse: &routev3.DirectResponseAction{
+		Status: status,
+		Body:   &corev3.DataSource{Specifier: &corev3.DataSource_InlineString{InlineString: body}},
+	}}
 }
 
 func connectMatch() *routev3.RouteMatch {

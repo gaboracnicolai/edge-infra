@@ -98,6 +98,9 @@ type EgressDestination struct {
 	// verified against; empty ⇒ the egress proxy's system trust store.
 	CASecret       string
 	ConnectTimeout time.Duration
+	// Keyless (B28.224): the agent's credentials are removed on the way out and
+	// replaced by the gateway's signed assertion; CONNECT is refused.
+	Keyless bool
 }
 
 // Snapshot is the full configuration state used to build an xDS snapshot.

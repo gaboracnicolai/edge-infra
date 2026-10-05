@@ -360,7 +360,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (err error) {
 	// What edge-egress nodes hold. It is folded into the hash, so a change to the
 	// destinations (or a CA bundle one names) publishes a new version even though
 	// no gateway resource changed.
-	egress := builders.BuildEgress(domain.EgressDestinations, domain.Secrets, r.egress, r.telemetry)
+	egress := builders.BuildEgress(domain.EgressDestinations, domain.Secrets, r.egress, r.extAuthz, r.telemetry)
 	hash := hashWithEgress(hashWithPins(hashResources(resources), nodePins(domain.Gateways)), hashResources(egress))
 
 	// Fast path: local state confirms nothing has changed on this replica.

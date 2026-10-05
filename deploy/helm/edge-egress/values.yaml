@@ -32,6 +32,18 @@ xds:
     existingSecret: envoy-xds-client-tls-secret
     mountPath: /etc/xds-client-tls
 
+# ext_authz client certificate (edge-egress -> auth-service mTLS), used by
+# keyless destinations (B28.224): their requests are checked by the auth-service
+# in agent mode, which removes the agent's credentials and signs the transit
+# assertion. The control plane renders the auth-service cluster with its own
+# extAuthz.caFile/certFile/keyFile, so mountPath MUST be their directory — the
+# same secret and path edge-proxy mounts.
+extAuthz:
+  clientTLS:
+    enabled: true
+    existingSecret: envoy-authz-client-tls-secret
+    mountPath: /etc/authz-client-tls
+
 # Pull secret(s) for private images, wired onto the ServiceAccount.
 imagePullSecrets: []
 

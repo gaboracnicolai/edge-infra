@@ -16,6 +16,11 @@ pub struct IssuerConfig {
     /// Expected `aud` for this provider's tokens; JWT_AUDIENCE when absent.
     #[serde(default)]
     pub audience: Option<String>,
+    /// PEM CA the JWKS fetch trusts besides the system roots; JWKS_CA_FILE
+    /// when absent. The cluster's own ServiceAccount issuer needs the API
+    /// server's CA (/var/run/secrets/kubernetes.io/serviceaccount/ca.crt).
+    #[serde(default)]
+    pub ca_file: Option<String>,
 }
 
 /// Runtime configuration sourced from environment variables.
@@ -143,17 +148,22 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Every trusted issuer, JWT_ISSUER first, each with its audience resolved.
+    /// Every trusted issuer, JWT_ISSUER first, each with its audience and CA
+    /// resolved.
     pub fn issuers(&self) -> Vec<IssuerConfig> {
         let primary = IssuerConfig {
             issuer: self.jwt_issuer.clone(),
             jwks_url: self.jwks_url.clone(),
             audience: None,
+            ca_file: None,
         };
         std::iter::once(primary)
             .chain(self.extra_issuers.iter().cloned())
             .map(|mut idp| {
                 idp.audience.get_or_insert_with(|| self.jwt_audience.clone());
+                if idp.ca_file.is_none() {
+                    idp.ca_file = self.jwks_ca_file.clone();
+                }
                 idp
             })
             .collect()
@@ -202,6 +212,30 @@ mod tests {
                 ("https://auth.example.com/", "test-audience"),
                 ("https://dev-1.okta.com/oauth2/default", "api://default"),
                 ("https://kubernetes.default.svc.cluster.local", "test-audience"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_jwt_issuers_ca_file_defaults_to_jwks_ca_file() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        base_env();
+        std::env::set_var("JWKS_CA_FILE", "/etc/auth-tls/ca.crt");
+        std::env::set_var(
+            "JWT_ISSUERS",
+            r#"[{"issuer":"https://kubernetes.default.svc.cluster.local","jwks_url":"https://kubernetes.default.svc.cluster.local/openid/v1/jwks","ca_file":"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"},
+                {"issuer":"https://dev-1.okta.com/oauth2/default","jwks_url":"https://dev-1.okta.com/oauth2/default/v1/keys"}]"#,
+        );
+        let issuers = Config::from_env().unwrap().issuers();
+        std::env::remove_var("JWT_ISSUERS");
+        std::env::remove_var("JWKS_CA_FILE");
+        let got: Vec<&str> = issuers.iter().map(|i| i.ca_file.as_deref().unwrap()).collect();
+        assert_eq!(
+            got,
+            [
+                "/etc/auth-tls/ca.crt",
+                "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+                "/etc/auth-tls/ca.crt",
             ]
         );
     }
