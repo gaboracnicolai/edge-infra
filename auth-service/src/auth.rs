@@ -1,6 +1,10 @@
 //! Implementation of Envoy's ext_authz Authorization service.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use envoy_types::ext_authz::v3::pb::{
     Authorization, CheckRequest, CheckResponse, HeaderAppendAction, HttpStatusCode,
@@ -8,8 +12,8 @@ use envoy_types::ext_authz::v3::pb::{
 use envoy_types::ext_authz::v3::{
     CheckRequestExt, CheckResponseExt, DeniedHttpResponseBuilder, OkHttpResponseBuilder,
 };
-use jsonwebtoken::{decode, decode_header, Validation};
-use serde::Deserialize;
+use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
+use serde::{Deserialize, Deserializer};
 use tonic::{Request, Response, Status};
 
 use crate::jwks::JwksCache;
@@ -25,7 +29,9 @@ pub struct Claims {
     pub exp: usize,
     /// Issued-at time (seconds since epoch).
     pub iat: usize,
-    /// Intended audience(s); validated against the configured audience.
+    /// Intended audience(s); validated against the configured audience. A
+    /// single string (Okta, Auth0) or an array (Kubernetes ServiceAccounts).
+    #[serde(deserialize_with = "one_or_many")]
     pub aud: Vec<String>,
     /// Issuer; validated against the configured issuer.
     pub iss: String,
@@ -36,13 +42,46 @@ pub struct Claims {
     pub email: Option<String>,
 }
 
-/// gRPC ext_authz service: validates a Bearer JWT and forwards identity headers.
+fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(aud) => vec![aud],
+        OneOrMany::Many(auds) => auds,
+    })
+}
+
+/// An identity provider this gateway trusts: the keys its tokens must be
+/// signed with and the issuer and audience they must carry.
 #[derive(Debug)]
-pub struct AuthService {
-    /// JWKS used to resolve signing keys by `kid`.
+pub struct TrustedIssuer {
+    /// This issuer's JWKS, resolving signing keys by `kid`.
     pub jwks: Arc<JwksCache>,
     /// Pre-built validation config (algorithm, audience, issuer).
     pub validation: Validation,
+}
+
+impl TrustedIssuer {
+    /// Trust RS256 tokens from `issuer` for `audience`, signed by a key in `jwks`.
+    pub fn new(issuer: &str, audience: &str, jwks: Arc<JwksCache>) -> Self {
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[audience]);
+        validation.set_issuer(&[issuer]);
+        Self { jwks, validation }
+    }
+}
+
+/// gRPC ext_authz service: validates a Bearer JWT and forwards identity headers.
+#[derive(Debug)]
+pub struct AuthService {
+    /// Trusted issuers keyed by `iss`. A token is checked only against the
+    /// keys of the issuer it names, so one provider's key can never vouch
+    /// for a token claiming to come from another.
+    pub issuers: HashMap<String, TrustedIssuer>,
     /// Metrics handle shared with the metrics HTTP server.
     pub metrics: Arc<Metrics>,
     /// Mints the signed transit assertion injected as `x-gateway-auth`, so a
@@ -119,7 +158,14 @@ impl Authorization for AuthService {
             }
         };
 
-        let key = match self.jwks.get_key(&kid) {
+        // Route on the unverified `iss`; decode() below re-checks it against
+        // that issuer's validation once the signature verifies.
+        let Some(idp) = unverified_issuer(token).and_then(|iss| self.issuers.get(&iss)) else {
+            drop(timer);
+            return Ok(Response::new(self.denied("untrusted issuer")));
+        };
+
+        let key = match idp.jwks.get_key(&kid) {
             Some(k) => k,
             None => {
                 drop(timer);
@@ -127,7 +173,7 @@ impl Authorization for AuthService {
             }
         };
 
-        let claims = match decode::<Claims>(token, &key, &self.validation) {
+        let claims = match decode::<Claims>(token, &key, &idp.validation) {
             Ok(data) => data.claims,
             Err(err) => {
                 drop(timer);
@@ -142,6 +188,7 @@ impl Authorization for AuthService {
         let vouch = Vouch {
             sub: &claims.sub,
             amr: "jwt",
+            idp: Some(&claims.iss),
             email: claims.email.as_deref(),
             teams: claims.teams.as_deref(),
             method,
@@ -254,6 +301,17 @@ fn mtls_headers(cert_subject: &str, assertion: String) -> Vec<(&'static str, Str
         ("x-client-cert-subject", cert_subject.to_string()),
         (transit::HEADER, assertion),
     ]
+}
+
+/// The `iss` a token claims, read WITHOUT verifying it — only to pick which
+/// issuer's keys and rules the token is then verified against.
+fn unverified_issuer(token: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Iss {
+        iss: String,
+    }
+    let payload = URL_SAFE_NO_PAD.decode(token.split('.').nth(1)?).ok()?;
+    serde_json::from_slice::<Iss>(&payload).ok().map(|c| c.iss)
 }
 
 /// The method, host and path Envoy is authorizing — what the transit

@@ -38,6 +38,31 @@ JWKS_URL         = https://edge-issuer.infra.svc.cluster.local:8081/.well-known/
 JWKS_CA_FILE     = /etc/auth-tls/ca.crt   # set by the auth-service chart when TLS is configured
 ```
 
+### More identity providers
+
+The edge-issuer above is one provider. To also accept tokens from your own
+IdP, or from the cluster's ServiceAccounts, add `JWT_ISSUERS` to
+`auth-service-secrets` — a JSON array, one entry per provider:
+
+```json
+[
+  {"issuer": "https://dev-1.okta.com/oauth2/default",
+   "jwks_url": "https://dev-1.okta.com/oauth2/default/v1/keys",
+   "audience": "api://default"},
+  {"issuer": "https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE",
+   "jwks_url": "https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE/keys"}
+]
+```
+
+Each token is verified only with the keys of the issuer named in its `iss`, so
+one provider's key can never vouch for another. Every listed provider can still
+assert any `sub`, `email` and `teams`, so list only providers whose claims you
+trust. The signed `x-gateway-auth` assertion carries the provider as `idp`, so
+a backend can key identity on (idp, sub). `audience` defaults to
+`JWT_AUDIENCE`; a token's `aud` may be a string (Okta) or an array
+(ServiceAccount tokens). Every `jwks_url` must be https, and every JWKS must be
+reachable when auth-service starts.
+
 ## 1. Provision the issuer database
 
 Create an empty Postgres database and a user the issuer owns, e.g.
