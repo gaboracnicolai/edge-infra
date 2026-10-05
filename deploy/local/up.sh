@@ -2210,7 +2210,7 @@ phase26_signed_images() {
   k wait --for=condition=Ready clusterpolicy/verify-image-signatures --timeout=120s >/dev/null \
     || die "PHASE26 FAIL: clusterpolicy/verify-image-signatures never became Ready"
   k create namespace signed-images --dry-run=client -o yaml | k apply -f - >/dev/null
-  k -n signed-images delete deploy unsigned signed --ignore-not-found >/dev/null
+  k -n signed-images delete deploy unsigned respelled signed --ignore-not-found >/dev/null
 
   section "RED — a Deployment of an unsigned image MUST be DENIED"
   log "image: $UNSIGNED_IMAGE"
@@ -2227,6 +2227,13 @@ phase26_signed_images() {
   has "$denied" "no signatures found" \
     || die "PHASE26 FAIL: denied, but not for a missing signature — see the denial above"
   ok "RED proven — Kyverno DENIED the unsigned image: no signatures found"
+
+  section "RED — the same image with the registry spelled ghcr.io:443 MUST be DENIED too"
+  out="$(k -n signed-images create deployment respelled --image="${UNSIGNED_IMAGE/ghcr.io/ghcr.io:443}" --replicas=0 2>&1 || true)"
+  echo "  Kyverno denial:"; printf '%s\n' "$out" | fold -s -w 96 | sed 's/^/    /'
+  has "$out" first-party-images-spelled-canonically \
+    || die "PHASE26 FAIL: a ghcr.io:443 spelling was not refused — it would skip the signature check"
+  ok "RED proven — a respelled registry does not skip the check"
 
   section "GREEN — a Deployment of a signed main build is admitted, pinned to the digest Kyverno verified"
   log "image: $SIGNED_IMAGE"

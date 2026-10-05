@@ -159,7 +159,9 @@ A signature from a pull-request build, another workflow or another repository
 is refused the same way, with `subject mismatch` or `extension mismatch`. An
 image that passes is rewritten to the digest Kyverno verified, e.g.
 `edge-osb:1.2.3@sha256:…`, so the tag cannot move to other bytes after.
-Images from other registries are not checked.
+A first-party image written any other way, such as `ghcr.io:443/gaboracnicolai/…`
+or `GHCR.IO/gaboracnicolai/…`, is refused too, because the check matches the
+image as written. Images from other registries are not checked.
 
 The policy fails closed. If Kyverno cannot reach ghcr.io or the public Rekor
 log, it refuses the pod. To pull `edge-issuer` and `edge-ratelimit`, which are
@@ -167,8 +169,9 @@ private, Kyverno needs read access to them too: name a pull secret in its
 `--imagePullSecrets` flag.
 
 `make kind-e2e` runs it in Phase 26. A Deployment of the per-arch auth-service
-image, which nothing signs, is denied with `no signatures found`, and a signed
-`edge-osb` build from main is admitted, pinned to its digest.
+image, which nothing signs, is denied with `no signatures found`, so is the same image written as
+`ghcr.io:443/…`, and a signed `edge-osb` build from main is admitted, pinned to
+its digest.
 
 ## What this does not cover yet
 

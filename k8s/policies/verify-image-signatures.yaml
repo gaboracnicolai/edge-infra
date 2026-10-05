@@ -48,3 +48,28 @@ spec:
                       githubWorkflowRepository: gaboracnicolai/edge-infra
                     rekor:
                       url: https://rekor.sigstore.dev
+    # imageReferences matches the image as written, and the runtime pulls
+    # ghcr.io:443/gaboracnicolai/… or GHCR.IO/gaboracnicolai/… just the same, so
+    # such a spelling would skip the check above. Refuse it.
+    - name: first-party-images-spelled-canonically
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        failureAction: Enforce
+        message: >-
+          A first-party image must be written as ghcr.io/gaboracnicolai/<name>,
+          or its signature is not checked.
+        foreach:
+          - list: "request.object.spec.[containers, initContainers, ephemeralContainers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ contains(to_lower(element.image), 'gaboracnicolai/') }}"
+                    operator: Equals
+                    value: true
+                  - key: "{{ starts_with(element.image, 'ghcr.io/gaboracnicolai/') }}"
+                    operator: Equals
+                    value: false
