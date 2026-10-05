@@ -130,6 +130,10 @@ spec:
               value: {{ .Values.telemetry.otel.serviceName | quote }}
             - name: GW_TRACE_SAMPLE_PERCENT
               value: {{ .Values.telemetry.otel.samplePercent | quote }}
+            - name: EGRESS_AGENT_REQUESTS_PER_MINUTE
+              value: {{ .Values.egress.agentRequestsPerMinute | quote }}
+            - name: EGRESS_DECISION_LOG
+              value: {{ .Values.egress.decisionLog | quote }}
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

@@ -5,8 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/edge-infra/control-plane/internal/config"
@@ -40,6 +42,7 @@ type adminStore interface {
 	LoadTopology(ctx context.Context) (*store.Topology, error)
 	LoadCertificateRows(ctx context.Context) ([]store.CertificateRow, error)
 	LoadProvisioning(ctx context.Context, requestLimit int) (*store.Provisioning, error)
+	ExportDecisions(ctx context.Context, after int64, w io.Writer) error
 }
 
 // adminNodeSource is the read-only reconciler slice: connected-node ACK state
@@ -193,7 +196,31 @@ func newAdminHandler(d adminDeps) http.Handler {
 	mux.HandleFunc("GET /admin/v1/config", d.handleJSON("config", func(context.Context) (any, error) {
 		return d.cfg, nil
 	}))
+	mux.HandleFunc("GET /admin/v1/decisions", d.requireAuth(d.exportDecisions))
 	return mux
+}
+
+// exportDecisions streams edge-egress's decision log (B28.228) as NDJSON, oldest
+// first, from the record after ?after= (default: the whole log). Each line is
+// the record exactly as it was hashed, so the export verifies on its own: the
+// sha256 of each line is the next line's prev.
+func (d adminDeps) exportDecisions(w http.ResponseWriter, r *http.Request) {
+	var after int64
+	if v := r.URL.Query().Get("after"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeAdminError(w, http.StatusBadRequest, "after: want a record number (seq), 0 or more")
+			return
+		}
+		after = n
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	if err := d.store.ExportDecisions(r.Context(), after, w); err != nil {
+		d.log.Error("admin read failed", "endpoint", "decisions", "err", err)
+		// The 200 may be on its way already: abort the response so the client
+		// sees a broken transfer, never a shorter log that still verifies.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // handleJSON wraps a loader as an authenticated GET handler. Errors are logged

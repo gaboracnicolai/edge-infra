@@ -4,23 +4,31 @@ import (
 	"strconv"
 	"time"
 
+	accesslogv3 "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	grpcalv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	dnscommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/common/dns/v3"
 	dnsclusterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dns/v3"
+	commonrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/common/ratelimit/v3"
 	extauthzv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	lrlv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/local_ratelimit/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	metadatav3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"github.com/edge-infra/control-plane/internal/decisions"
 	"github.com/edge-infra/control-plane/internal/store"
 )
 
@@ -41,6 +49,13 @@ import (
 // is refused, since the agent's own TLS would carry its credentials past the
 // gateway unseen. With ext_authz off on the control plane a keyless host is
 // closed (503) rather than open.
+//
+// Each agent has a rate limit of its own (B28.228): a token bucket per agent —
+// the ServiceAccount the auth-service verified, which it hands Envoy as ext_authz
+// metadata — and per client address, so traffic from an agent that proved no
+// identity is limited by the pod it comes from. Over the limit the agent gets
+// 429. Every decision is logged with the agent in it, and sent to the control
+// plane's hash-chained decision log.
 
 const (
 	// EgressListenerName is the edge-egress listener (and its stat prefix).
@@ -62,12 +77,39 @@ const (
 
 	// defaultEgressConnectTimeout applies to a destination row with none.
 	defaultEgressConnectTimeout = 5 * time.Second
+
+	// egressControlPlaneCluster is the edge-egress bootstrap's static cluster to
+	// the control plane (deploy/helm/edge-egress/templates/configmap.yaml). The
+	// decision log travels over it, on the mTLS connection xDS already uses.
+	egressControlPlaneCluster = "xds_cluster"
+
+	// egressAgentRateLimitPrefix is the agent rate limit's stat prefix.
+	egressAgentRateLimitPrefix = "egress_agent_rate_limit"
+
+	// maxAgentBuckets is how many agents' buckets (and as many client
+	// addresses') one edge-egress Envoy keeps. Past it, the agent seen least
+	// recently is forgotten and starts again with a full bucket.
+	maxAgentBuckets = 4096
 )
+
+// egressLogFields are what the egress access log carries besides
+// accessLogFields: the agent the auth-service verified (null when it proved
+// none). With response_flags (RL: the agent's rate limit, UAEX: the
+// auth-service refused it) and response_code_details, they are the decision.
+var egressLogFields = []logField{
+	{"agent", "%DYNAMIC_METADATA(" + decisions.AgentMetadataNamespace + ":" + decisions.AgentMetadataKey + ")%"},
+}
 
 // EgressOptions configures the edge-egress listener.
 type EgressOptions struct {
 	Port         uint32 // the agents' proxy port
 	SystemCAFile string // trust store for a destination with no CA secret
+
+	// AgentRequestsPerMinute is how many requests each agent may send through
+	// one edge-egress Envoy in a minute; 0 is no limit.
+	AgentRequestsPerMinute uint32
+	// DecisionLog sends every decision to the control plane's decision log.
+	DecisionLog bool
 }
 
 // EgressClusterName is the cluster that originates TLS to d's host.
@@ -116,17 +158,22 @@ func BuildEgress(dests []store.EgressDestination, secrets []store.Secret, opts E
 }
 
 func egressListener(opts EgressOptions, authz bool, ea ExtAuthzOptions, tel TelemetryOptions) *listenerv3.Listener {
-	filters := []*hcmv3.HttpFilter{{
+	var filters []*hcmv3.HttpFilter
+	if authz {
+		// Only keyless routes enable it; every other route turns it off.
+		filters = append(filters, extAuthzFilter(ea))
+	}
+	if opts.AgentRequestsPerMinute > 0 {
+		// After ext_authz, which names the agent.
+		filters = append(filters, agentRateLimitFilter(opts.AgentRequestsPerMinute))
+	}
+	filters = append(filters, &hcmv3.HttpFilter{
 		Name: wellknown.Router,
 		ConfigType: &hcmv3.HttpFilter_TypedConfig{
 			// No x-envoy-* headers on requests that leave the cluster.
 			TypedConfig: mustAny(&routerv3.Router{SuppressEnvoyHeaders: true}),
 		},
-	}}
-	if authz {
-		// Only keyless routes enable it; every other route turns it off.
-		filters = append([]*hcmv3.HttpFilter{extAuthzFilter(ea)}, filters...)
-	}
+	})
 	hcm := &hcmv3.HttpConnectionManager{
 		CodecType:  hcmv3.HttpConnectionManager_AUTO,
 		StatPrefix: EgressListenerName,
@@ -144,7 +191,10 @@ func egressListener(opts EgressOptions, authz bool, ea ExtAuthzOptions, tel Tele
 		},
 		HttpFilters: filters,
 	}
-	observeConnectionManager(hcm, EgressListenerName, tel)
+	observeConnectionManager(hcm, EgressListenerName, tel, egressLogFields...)
+	if opts.DecisionLog {
+		hcm.AccessLog = append(hcm.AccessLog, decisionLogger())
+	}
 	return &listenerv3.Listener{
 		Name:    EgressListenerName,
 		Address: socketAddress("0.0.0.0", opts.Port),
@@ -154,6 +204,86 @@ func egressListener(opts EgressOptions, authz bool, ea ExtAuthzOptions, tel Tele
 				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: mustAny(hcm)},
 			}},
 		}},
+	}
+}
+
+// agentRateLimitFilter gives every agent a bucket of perMinute requests,
+// refilled each minute. A request is counted against its agent (the
+// ServiceAccount in the auth-service's metadata, when it proved one) and its
+// client address; when either bucket is empty it gets 429, with Retry-After and
+// the X-RateLimit headers.
+func agentRateLimitFilter(perMinute uint32) *hcmv3.HttpFilter {
+	bucket := &typev3.TokenBucket{
+		MaxTokens:     perMinute,
+		TokensPerFill: wrapperspb.UInt32(perMinute),
+		FillInterval:  durationpb.New(time.Minute),
+	}
+	wildcard := func(key string) *commonrlv3.LocalRateLimitDescriptor {
+		// No value: a bucket for each value seen.
+		return &commonrlv3.LocalRateLimitDescriptor{
+			Entries:     []*commonrlv3.RateLimitDescriptor_Entry{{Key: key}},
+			TokenBucket: bucket,
+		}
+	}
+	cfg := &lrlv3.LocalRateLimit{
+		StatPrefix:     egressAgentRateLimitPrefix,
+		Status:         &typev3.HttpStatus{Code: typev3.StatusCode_TooManyRequests},
+		TokenBucket:    bucket,
+		FilterEnabled:  fullPercent(),
+		FilterEnforced: fullPercent(),
+		RateLimits: []*routev3.RateLimit{
+			{Actions: []*routev3.RateLimit_Action{{
+				ActionSpecifier: &routev3.RateLimit_Action_Metadata{Metadata: &routev3.RateLimit_Action_MetaData{
+					DescriptorKey: "agent",
+					MetadataKey: &metadatav3.MetadataKey{
+						Key:  decisions.AgentMetadataNamespace,
+						Path: []*metadatav3.MetadataKey_PathSegment{{Segment: &metadatav3.MetadataKey_PathSegment_Key{Key: decisions.AgentMetadataKey}}},
+					},
+					Source: routev3.RateLimit_Action_MetaData_DYNAMIC,
+				}},
+			}}},
+			{Actions: []*routev3.RateLimit_Action{{
+				ActionSpecifier: &routev3.RateLimit_Action_RemoteAddress_{RemoteAddress: &routev3.RateLimit_Action_RemoteAddress{}},
+			}}},
+		},
+		Descriptors: []*commonrlv3.LocalRateLimitDescriptor{wildcard("agent"), wildcard("remote_address")},
+		// Every request has a client address, so a descriptor always matches
+		// and the filter-wide bucket is never the one counted.
+		AlwaysConsumeDefaultTokenBucket: wrapperspb.Bool(false),
+		MaxDynamicDescriptors:           wrapperspb.UInt32(maxAgentBuckets),
+		EnableXRatelimitHeaders:         commonrlv3.XRateLimitHeadersRFCVersion_DRAFT_VERSION_03,
+		ResponseHeadersToAdd: []*corev3.HeaderValueOption{{
+			Header:       &corev3.HeaderValue{Key: "Retry-After", Value: "60"},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}},
+	}
+	return &hcmv3.HttpFilter{
+		Name:       localRateLimitFilterName,
+		ConfigType: &hcmv3.HttpFilter_TypedConfig{TypedConfig: mustAny(cfg)},
+	}
+}
+
+// decisionLogger sends every egress access-log entry to the control plane's
+// decision log (decisions.Service) over the xDS connection, a batch a second.
+// Like every access log it is fail-open: entries an unreachable control plane
+// cannot take are dropped, never a request.
+func decisionLogger() *accesslogv3.AccessLog {
+	return &accesslogv3.AccessLog{
+		Name: "envoy.access_loggers.http_grpc",
+		ConfigType: &accesslogv3.AccessLog_TypedConfig{
+			TypedConfig: mustAny(&grpcalv3.HttpGrpcAccessLogConfig{
+				CommonConfig: &grpcalv3.CommonGrpcAccessLogConfig{
+					LogName: decisions.LogName,
+					GrpcService: &corev3.GrpcService{
+						TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+							EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{ClusterName: egressControlPlaneCluster},
+						},
+					},
+					TransportApiVersion: corev3.ApiVersion_V3,
+					BufferFlushInterval: durationpb.New(time.Second),
+				},
+			}),
+		},
 	}
 }
 

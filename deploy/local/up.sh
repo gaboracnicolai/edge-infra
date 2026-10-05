@@ -2819,6 +2819,189 @@ phase30_keyless_agents() {
   ok "PHASE 30 — keyless agents: the key planted in agent-keyless never reached the provider (stripped through edge-egress, CONNECT 403, direct dropped), and the provider got the gateway's signed assertion for $sa_sub instead"
 }
 
+# ---- Phase 31 — per-agent rate limits and the decision log (B28.228) ---------
+# edge-egress counts every request against two buckets of the agent's own: the
+# ServiceAccount the auth-service verified (it hands it to Envoy as ext_authz
+# metadata), and the pod address the request came from. When either is empty
+# the agent gets 429. Every decision edge-egress makes — sent on, refused,
+# refused for the limit — is logged with the agent in it and appended to the
+# control plane's decision log, a hash chain the admin API exports as NDJSON and
+# scripts/verify-decisions.sh checks. mock-llm is keyless (Phase 30), so the
+# agents below prove who they are with their ServiceAccount tokens.
+RL_PER_MINUTE=5
+CP_ADMIN_KEY="local-dev-cp-admin-key"
+
+# rl_burst <pod> <n> — <n> requests from <pod> in $LOCKED_NS through edge-egress
+# to mock-llm with the pod's workload token, back to back in one exec. Echoes
+# the status codes, space-separated.
+rl_burst() {
+  k -n "$LOCKED_NS" exec "$1" -- sh -c '
+    for i in $(seq 1 "$1"); do
+      curl -s -o /dev/null -w "%{http_code} " --max-time 8 -x "$2" \
+        --proxy-header "Proxy-Authorization: Bearer $(cat /var/run/secrets/talyvor/token)" "http://$3/v1/models"
+    done' _ "$2" "$EGRESS_PROXY" "$MOCK_HOST" 2>/dev/null || true
+}
+
+# rl_headers <pod> — one more request from <pod>; echoes its status line and
+# its Retry-After and X-RateLimit-* headers.
+rl_headers() {
+  k -n "$LOCKED_NS" exec "$1" -- sh -c '
+    curl -s -D - -o /dev/null --max-time 8 -x "$1" \
+      --proxy-header "Proxy-Authorization: Bearer $(cat /var/run/secrets/talyvor/token)" "http://$2/v1/models"' \
+    _ "$EGRESS_PROXY" "$MOCK_HOST" 2>/dev/null | tr -d '\r' | grep -iE '^(HTTP/|retry-after|x-ratelimit-)' || true
+}
+
+# egress_stats <regex> — the edge-egress Envoy's stats matching <regex>, one
+# "name: value" per line (nothing when it could not read them).
+egress_stats() {
+  local pod pf
+  pod="$(k -n edge get pod -l app.kubernetes.io/name=edge-egress -o jsonpath='{.items[0].metadata.name}')"
+  kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$pod" 19005:9901 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  curl -s --max-time 8 -G --data-urlencode "filter=$1" http://127.0.0.1:19005/stats 2>/dev/null || true
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+}
+
+# decision_export — GET /admin/v1/decisions from the control plane's admin API.
+decision_export() {
+  local pf
+  kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward deploy/edge-control-plane 19802:18002 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  curl -sf --max-time 20 -H "X-Admin-Key: $CP_ADMIN_KEY" http://127.0.0.1:19802/admin/v1/decisions 2>/dev/null || true
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+}
+
+phase31_agent_rate_limits() {
+  section "PHASE 31 — per-agent rate limits and the decision log: a burst gets 429 and the exported chain verifies"
+  local pgpod pod codes round1 hdrs i n200 first tdir verified line limited sa_alpha sa_beta
+  sa_alpha="system:serviceaccount:$LOCKED_NS:rl-alpha"
+  sa_beta="system:serviceaccount:$LOCKED_NS:rl-beta"
+
+  section "the control plane: $RL_PER_MINUTE requests a minute per agent through edge-egress, and its admin API on"
+  k -n "$INFRA_NS" create secret generic edge-cp-admin --from-literal=admin-api-key="$CP_ADMIN_KEY" \
+    --dry-run=client -o yaml | k apply -f - >/dev/null
+  # --reuse-values: every earlier phase's settings stay as they are.
+  h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" --reuse-values \
+    --set egress.agentRequestsPerMinute="$RL_PER_MINUTE" --set adminApi.existingSecret=edge-cp-admin \
+    --wait --timeout 200s >/dev/null || diag_fail edge-control-plane "$INFRA_NS"
+  [ "$(k -n "$INFRA_NS" get deploy edge-control-plane \
+      -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="EGRESS_AGENT_REQUESTS_PER_MINUTE")].value}')" = "$RL_PER_MINUTE" ] \
+    || die "PHASE31: the control plane did not take EGRESS_AGENT_REQUESTS_PER_MINUTE=$RL_PER_MINUTE"
+  k -n "$INFRA_NS" rollout status deploy/edge-control-plane --timeout=180s >/dev/null \
+    || die "PHASE31: the control plane did not come back"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -q >/dev/null \
+    <<<"UPDATE egress_destinations SET keyless = true, updated_at = now() WHERE name = 'mock-llm';"
+
+  section "three agent pods in $LOCKED_NS: rl-alpha-1 and rl-alpha-2 are one agent ($sa_alpha), rl-beta another"
+  for pod in rl-alpha-1:rl-alpha rl-alpha-2:rl-alpha rl-beta:rl-beta; do
+    k -n "$LOCKED_NS" delete pod "${pod%%:*}" --ignore-not-found --wait=true >/dev/null
+    sed -e "s|__CURL__|$ATTACKER_IMAGE|" -e "s|__POD__|${pod%%:*}|" -e "s|__SA__|${pod#*:}|" \
+      "$LOCAL_DIR/manifests/agent-ratelimit.yaml" | k apply -f - >/dev/null
+  done
+  for pod in rl-alpha-1 rl-alpha-2 rl-beta; do
+    k -n "$LOCKED_NS" wait --for=condition=Ready "pod/$pod" --timeout=180s >/dev/null \
+      || die "PHASE31: $pod did not become Ready"
+  done
+  ok "rl-alpha-1, rl-alpha-2 (ServiceAccount rl-alpha) and rl-beta (ServiceAccount rl-beta) running"
+
+  section "edge-egress has the agent rate limit from the control plane"
+  i=0
+  until has "$(egress_stats '^egress_agent_rate_limit\.')" "egress_agent_rate_limit."; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || die "PHASE31: edge-egress never received the agent rate limit"
+    sleep 2
+  done
+  ok "edge-egress counts egress_agent_rate_limit.*"
+
+  section "RED — rl-alpha-1 sends a burst: $RL_PER_MINUTE requests are served, then 429"
+  # The burst is twice the limit and two more, so it reaches 429 even if the
+  # bucket refills (once a minute) during it. rl-alpha-2 asks right after, and
+  # a refill between the two would hand rl-alpha tokens again: then both run
+  # again, and only the first burst, from a full bucket, is counted.
+  for i in 1 2 3; do
+    codes="$(rl_burst rl-alpha-1 $((2 * RL_PER_MINUTE + 2)))"
+    hdrs="$(rl_headers rl-alpha-2)"
+    [ -n "${round1:-}" ] || round1="$codes"
+    has "$codes" 429 && has "$hdrs" " 429" && break
+    warn "round $i: rl-alpha-1 [$codes], rl-alpha-2 [$(printf '%s' "$hdrs" | head -1)] — a refill between them; again"
+  done
+  codes="$round1"
+  echo "  rl-alpha-1: $codes"
+  has "$codes" 429 || die "PHASE31 FAIL: a burst of $((2 * RL_PER_MINUTE + 2)) from rl-alpha-1 never got 429"
+  first="${codes%%429*}"
+  n200="$(printf '%s' "$first" | grep -o 200 | wc -l | tr -d ' ')"
+  [ "$n200" -ge "$RL_PER_MINUTE" ] && [ "$first" = "$(printf '200 %.0s' $(seq 1 "$n200"))" ] \
+    || die "PHASE31 FAIL: rl-alpha-1 was refused before its $RL_PER_MINUTE requests were served: $codes"
+  ok "rl-alpha-1: $n200 served, then 429"
+
+  section "RED — rl-alpha-2, the same agent from another pod: 429 at once, the bucket is the agent's"
+  printf '%s\n' "$hdrs" | sed 's/^/    /'
+  has "$hdrs" " 429" || die "PHASE31 FAIL: rl-alpha-2 (agent rl-alpha, a pod address of its own) was served"
+  has "$hdrs" "x-ratelimit-limit: $RL_PER_MINUTE" && has "$hdrs" "retry-after: 60" \
+    || die "PHASE31 FAIL: the 429 does not carry x-ratelimit-limit: $RL_PER_MINUTE and retry-after: 60"
+  ok "rl-alpha-2: 429, x-ratelimit-limit: $RL_PER_MINUTE, retry-after: 60"
+
+  section "GREEN — rl-beta, another agent, at the same moment: served from its own bucket"
+  codes="$(rl_burst rl-beta 1)"
+  [ "$codes" = "200 " ] || die "PHASE31 FAIL: rl-beta was not served while rl-alpha was limited: [$codes]"
+  ok "rl-beta: 200"
+  limited="$(egress_stats '^egress_agent_rate_limit\..*rate_limited$' | awk -F': ' '{print $2 + 0; exit}')"
+  [ "${limited:-0}" -gt 0 ] || die "PHASE31 FAIL: edge-egress counted no rate-limited request"
+  ok "edge-egress egress_agent_rate_limit rate_limited: $limited"
+
+  section "the access log names the agent and the decision"
+  line="$(k -n edge logs -l app.kubernetes.io/name=edge-egress --tail=2000 2>/dev/null \
+    | grep -F "\"agent\":\"$sa_alpha\"" | grep -F '"status":429' | tail -1)"
+  [ -n "$line" ] || die "PHASE31 FAIL: no access-log line for $sa_alpha with status 429"
+  printf '%s' "$line" | jq -e '.response_flags == "RL" and .response_code_details == "local_rate_limited"' >/dev/null \
+    || die "PHASE31 FAIL: the 429's access-log line does not say rate limited: $line"
+  echo "  $(printf '%s' "$line" | jq -c '{agent, status, response_flags, response_code_details, route, client_address}')"
+  ok "edge-egress logged rl-alpha's 429 with its agent and RL / local_rate_limited"
+
+  section "the decision log, exported from the admin API, holds rl-alpha's 429s and rl-beta's 200"
+  tdir="$(mktemp -d)"
+  i=0
+  while :; do
+    decision_export > "$tdir/decisions.ndjson"
+    jq -e -s --arg a "$sa_alpha" --arg b "$sa_beta" '
+      any(.[]; .agent == $a and .decision == "rate_limited" and .status == 429 and .reason == "local_rate_limited")
+      and any(.[]; .agent == $b and .decision == "allowed" and .status == 200)' "$tdir/decisions.ndjson" >/dev/null 2>&1 && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || { tail -5 "$tdir/decisions.ndjson"; die "PHASE31 FAIL: the decision log never showed rl-alpha rate limited and rl-beta served"; }
+    sleep 2
+  done
+  jq -c -s 'group_by(.decision) | map({decision: .[0].decision, records: length})' "$tdir/decisions.ndjson" | sed 's/^/  /'
+  jq -e -s 'any(.[]; .decision == "denied" and .status == 407) and all(.[]; .node | startswith("edge-egress/"))' \
+    "$tdir/decisions.ndjson" >/dev/null \
+    || die "PHASE31 FAIL: the log is missing Phase 30's 407s, or holds a record from something other than edge-egress"
+  ok "$(wc -l < "$tdir/decisions.ndjson" | tr -d ' ') records, Phase 30's 407s included, every one from an edge-egress Envoy"
+
+  section "GREEN — the exported chain verifies"
+  verified="$("$REPO_ROOT/scripts/verify-decisions.sh" "$tdir/decisions.ndjson")" \
+    || die "PHASE31 FAIL: the exported decision log does not verify"
+  echo "  $verified"
+  has "$verified" "seq 1.." && has "$verified" "chained to 0000000000000000000000000000000000000000000000000000000000000000" \
+    || die "PHASE31 FAIL: the export does not start at the beginning of the log"
+
+  section "RED — the same export with one rate_limited record rewritten as allowed: it does not verify"
+  awk -v a="$sa_alpha" 'done || index($0, "\"agent\":\"" a "\"") == 0 || index($0, "\"rate_limited\"") == 0 { print; next }
+    { sub(/"decision":"rate_limited"/, "\"decision\":\"allowed\""); print; done = 1 }' \
+    "$tdir/decisions.ndjson" > "$tdir/tampered.ndjson"
+  ! cmp -s "$tdir/decisions.ndjson" "$tdir/tampered.ndjson" || die "PHASE31: the tampered copy is unchanged"
+  if "$REPO_ROOT/scripts/verify-decisions.sh" "$tdir/tampered.ndjson" 2>"$tdir/err"; then
+    die "PHASE31 FAIL: a rewritten record still verifies"
+  fi
+  echo "  $(cat "$tdir/err")"
+  rm -rf "$tdir"
+
+  ok "PHASE 31 — per-agent rate limits and the decision log: rl-alpha got 429 after $RL_PER_MINUTE (from both its pods) while rl-beta was served, edge-egress logged each decision with its agent, and the exported hash chain verifies — and stops verifying when one record is rewritten"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -2858,7 +3041,8 @@ main() {
   phase28_egress_gateway
   phase29_egress_lockdown
   phase30_keyless_agents
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider."
+  phase31_agent_rate_limits
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

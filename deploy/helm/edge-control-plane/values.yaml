@@ -111,6 +111,22 @@ telemetry:
     serviceName: edge-proxy
     samplePercent: 100   # share of requests traced, 0–100
 
+# edge-egress (B28.228).
+#
+# agentRequestsPerMinute: how many requests each agent may send through
+# edge-egress in a minute. An agent is the ServiceAccount it proved to the
+# auth-service (keyless destinations), and the pod address its requests come
+# from; over the limit it gets 429 with Retry-After. Counted on each edge-egress
+# Envoy, so with N replicas an agent can send up to N times this. 0 = no limit.
+#
+# decisionLog: record every request edge-egress decides — sent on, refused, or
+# refused for the rate limit — in the hash-chained edge_decisions table. Export
+# it with GET /admin/v1/decisions (adminApi) and check it with
+# scripts/verify-decisions.sh. See docs/agent-egress.md.
+egress:
+  agentRequestsPerMinute: 0
+  decisionLog: true
+
 # R4 CO-LOCATION: this DSN and the edge-osb DATABASE_URL must reference the SAME
 # Postgres database (both schemas applied there), so the OSB translator can write
 # derived data-plane rows in the same transaction as the services row.

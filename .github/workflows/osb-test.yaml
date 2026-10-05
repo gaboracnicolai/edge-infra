@@ -107,6 +107,7 @@ jobs:
               "migrations/0007_route_client_ca.sql",
               "migrations/0009_egress_destinations.sql",
               "migrations/0010_egress_keyless.sql",
+              "migrations/0011_edge_decisions.sql",
               "osb/migrations/0001_osb.sql",
               "osb/migrations/0002_tenancy.sql",
               "osb/migrations/0003_dead_letter.sql",
@@ -155,6 +156,9 @@ jobs:
         run: go test -count=1 -tags integration ./internal/store/ -run TestAdminRead
       - name: Go admin read-API E2E leak guard (-count=1, no cached pass)
         run: go test -count=1 -tags integration ./cmd/server/ -run TestAdminAPI
+      # B28.228: edge-egress's decision log appends and exports as one chain.
+      - name: Go decision log chain (-count=1, no cached pass)
+        run: go test -count=1 -v -tags integration ./internal/store/ -run TestDecisions
       # Schema-safety + co-location suites. BOTH reset `public` on the database
       # they are given (DROP SCHEMA public CASCADE), so each gets its OWN
       # throwaway database — never `edge`, which the steps above depend on.

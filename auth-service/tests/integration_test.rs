@@ -18,6 +18,7 @@ use envoy_types::ext_authz::v3::pb::{
     Authorization, CheckRequest, HeaderAppendAction, HeaderValueOption, HttpResponse,
 };
 use envoy_types::pb::envoy::service::auth::v3::AttributeContext;
+use envoy_types::pb::google::protobuf::value::Kind;
 use envoy_types::pb::envoy::service::auth::v3::attribute_context::{
     HttpRequest, Request as AttrRequest,
 };
@@ -681,6 +682,16 @@ async fn test_keyless_agent_credentials_stripped_and_assertion_signed() {
         .await
         .expect("rpc")
         .into_inner();
+    // edge-egress keys the agent's rate limit and its decision log on this (B28.228).
+    let agent = response
+        .dynamic_metadata
+        .as_ref()
+        .and_then(|m| m.fields.get("agent"))
+        .and_then(|v| v.kind.clone());
+    assert_eq!(
+        agent,
+        Some(Kind::StringValue("system:serviceaccount:agents:billing-bot".into()))
+    );
     let ok = match response.http_response {
         Some(HttpResponse::OkResponse(ok)) => ok,
         other => panic!("expected OkResponse, got {other:?}"),

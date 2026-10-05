@@ -193,6 +193,94 @@ token the call is served, the provider sees no key and no token, and the
 assertion it receives names the agent and verifies with the published key.
 CONNECT gets 403 and the direct call is dropped.
 
+## Rate limits per agent
+
+Each agent can be held to a number of requests a minute through `edge-egress`.
+Set it on the control-plane chart (the default, `0`, is no limit):
+
+```bash
+helm upgrade edge-control-plane deploy/helm/edge-control-plane -n infra --reuse-values \
+  --set egress.agentRequestsPerMinute=60
+```
+
+Every request counts against two buckets, and gets `429` when either is empty:
+
+- **the agent's**: the ServiceAccount it proved with its token on a keyless
+  destination. All of an agent's pods share it.
+- **its pod's**: the address the request came from. This is what limits an agent
+  on a destination that is not keyless, and on CONNECT, where it proves no
+  identity.
+
+Each bucket holds the limit and is refilled to it once a minute. A refused
+request gets `Retry-After: 60` and `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+and `X-RateLimit-Reset`. A request `edge-egress` refuses for another reason (an
+unlisted host, a missing token) is refused before it is counted.
+
+Each `edge-egress` Envoy counts on its own, so with N replicas an agent can send
+up to N times the limit. One Envoy keeps buckets for 4096 agents and as many pod
+addresses; past that, the one seen least recently is dropped and starts full.
+
+## The decision log
+
+`edge-egress` writes one access-log line per request to its stdout, as every
+Envoy here does. On `edge-egress` it also names the agent — `agent`, the
+ServiceAccount, or `null` when it proved none — and `response_flags` tells the
+decision: `RL` for the agent's rate limit, `UAEX` for a refused token, `-` for a
+request sent on.
+
+Every decision is also kept in the control plane's decision log, the
+`edge_decisions` table: one record per request `edge-egress` sent on (`allowed`,
+whatever the destination answered), refused (`denied`) or refused for the rate
+limit (`rate_limited`). The Envoys send them to the control plane over the mTLS
+connection they already use for their configuration, once a second, and the
+control plane appends them in the order it receives them. It is on by default;
+`egress.decisionLog=false` on the control-plane chart turns it off.
+
+Each record names the hash of the record before it:
+
+```json
+{"seq":42,"prev":"9f2c…","time":"2026-10-06T09:14:03.118Z","node":"edge-egress/edge-egress-7d9…","agent":"system:serviceaccount:agents:billing-bot","client":"10.244.1.7","decision":"rate_limited","status":429,"reason":"local_rate_limited","method":"GET","authority":"api.openai.com","path":"/v1/models","destination":"openai","request_id":"1ad6…"}
+```
+
+`prev` is the sha256 of the previous line, exactly as exported (64 zeros for the
+first record). Changing, removing or reordering a record breaks the link after
+it. The path is recorded without its query string.
+
+### Exporting and checking it
+
+The control plane's admin API serves the log as NDJSON. Turn the admin API on
+with a Secret holding its key:
+
+```bash
+kubectl -n infra create secret generic edge-cp-admin --from-literal=admin-api-key="$(openssl rand -hex 24)"
+helm upgrade edge-control-plane deploy/helm/edge-control-plane -n infra --reuse-values \
+  --set adminApi.existingSecret=edge-cp-admin
+```
+
+then export it and check every link:
+
+```bash
+kubectl -n infra port-forward deploy/edge-control-plane 18002 &
+curl -s -H "X-Admin-Key: $KEY" http://127.0.0.1:18002/admin/v1/decisions > decisions.ndjson
+scripts/verify-decisions.sh decisions.ndjson
+# verified: 1873 records, seq 1..1873, chained to 0000…0000, head 5be1…
+```
+
+`?after=<seq>` exports only the records after that one; the first line it
+returns names record `<seq>`'s hash as its prev. Keep the `head` the check
+prints. A later export that verifies and still holds a line with that hash shows
+that nothing up to it has changed.
+
+What the log cannot show: a decision an Envoy could not deliver — the control
+plane was unreachable for longer than Envoy buffers — was never written, so it is
+missing without a broken link.
+
+`make kind-e2e` runs this as Phase 31. With a limit of 5 a minute, one agent's
+burst is served 5 times and then gets 429, the same agent from a second pod
+gets 429 at once, and another agent is served. The exported log holds those
+decisions, `scripts/verify-decisions.sh` verifies it, and it stops verifying
+when one `rate_limited` record is rewritten as `allowed`.
+
 ## What this does not do yet
 
 Wallet rules, approvals and metering are not applied here yet.

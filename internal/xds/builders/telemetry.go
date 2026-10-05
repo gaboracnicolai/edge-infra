@@ -42,11 +42,14 @@ type TelemetryOptions struct {
 	SamplePercent float64 // share of requests traced, 0–100
 }
 
+// logField is one key of an access-log record and the Envoy format of its value.
+type logField struct{ key, format string }
+
 // accessLogFields is what every access-log record carries, on stdout and in the
 // collector alike. request_id is the x-request-id the client receives (the HCM
 // always echoes it in the response) and trace_id joins the record to its span.
 // The path is logged without its query string, which can carry credentials.
-var accessLogFields = []struct{ key, format string }{
+var accessLogFields = []logField{
 	{"start_time", "%START_TIME%"},
 	{"request_id", "%REQ(X-REQUEST-ID)%"},
 	{"trace_id", "%TRACE_ID%"},
@@ -77,13 +80,16 @@ var accessLogFields = []struct{ key, format string }{
 //   - a JSON access log line per request on stdout, on every listener.
 //   - with a collector configured, the same record to it as an OTLP log, and an
 //     OpenTelemetry span per sampled request (Envoy tags it guid:x-request-id).
-func observeConnectionManager(hcm *hcmv3.HttpConnectionManager, gateway string, tel TelemetryOptions) {
+//
+// extra fields are logged after accessLogFields, in both records.
+func observeConnectionManager(hcm *hcmv3.HttpConnectionManager, gateway string, tel TelemetryOptions, extra ...logField) {
+	fields := append(append([]logField{}, accessLogFields...), extra...)
 	hcm.AlwaysSetRequestIdInResponse = true
-	hcm.AccessLog = []*accesslogv3.AccessLog{stdoutAccessLog(gateway)}
+	hcm.AccessLog = []*accesslogv3.AccessLog{stdoutAccessLog(gateway, fields)}
 	if !tel.Enabled {
 		return
 	}
-	hcm.AccessLog = append(hcm.AccessLog, otelAccessLog(gateway, tel))
+	hcm.AccessLog = append(hcm.AccessLog, otelAccessLog(gateway, tel, fields))
 	hcm.Tracing = &hcmv3.HttpConnectionManager_Tracing{
 		RandomSampling: &typev3.Percent{Value: tel.SamplePercent},
 		CustomTags: []*tracingtypev3.CustomTag{{
@@ -105,9 +111,9 @@ func observeConnectionManager(hcm *hcmv3.HttpConnectionManager, gateway string, 
 // literalFormat escapes s for use as literal text in an access-log format.
 func literalFormat(s string) string { return strings.ReplaceAll(s, "%", "%%") }
 
-func stdoutAccessLog(gateway string) *accesslogv3.AccessLog {
+func stdoutAccessLog(gateway string, logged []logField) *accesslogv3.AccessLog {
 	fields := map[string]*structpb.Value{"gateway": structpb.NewStringValue(literalFormat(gateway))}
-	for _, f := range accessLogFields {
+	for _, f := range logged {
 		fields[f.key] = structpb.NewStringValue(f.format)
 	}
 	return &accesslogv3.AccessLog{
@@ -126,9 +132,9 @@ func stdoutAccessLog(gateway string) *accesslogv3.AccessLog {
 	}
 }
 
-func otelAccessLog(gateway string, tel TelemetryOptions) *accesslogv3.AccessLog {
+func otelAccessLog(gateway string, tel TelemetryOptions, logged []logField) *accesslogv3.AccessLog {
 	attrs := []*otlpcommonv1.KeyValue{otlpString("gateway", literalFormat(gateway))}
-	for _, f := range accessLogFields {
+	for _, f := range logged {
 		attrs = append(attrs, otlpString(f.key, f.format))
 	}
 	return &accesslogv3.AccessLog{

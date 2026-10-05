@@ -125,6 +125,9 @@ type fakeAdminStore struct {
 	certErr  error
 	prov     *store.Provisioning
 	provErr  error
+
+	decisions     string // what ExportDecisions writes
+	exportedAfter int64  // the after it was last called with
 }
 
 func (f *fakeAdminStore) LoadTopology(context.Context) (*store.Topology, error) {
@@ -135,6 +138,11 @@ func (f *fakeAdminStore) LoadCertificateRows(context.Context) ([]store.Certifica
 }
 func (f *fakeAdminStore) LoadProvisioning(context.Context, int) (*store.Provisioning, error) {
 	return f.prov, f.provErr
+}
+func (f *fakeAdminStore) ExportDecisions(_ context.Context, after int64, w io.Writer) error {
+	f.exportedAfter = after
+	_, err := io.WriteString(w, f.decisions)
+	return err
 }
 
 type fakeNodeSource struct {
@@ -248,6 +256,7 @@ var adminPaths = []string{
 	"/admin/v1/certificates",
 	"/admin/v1/provisioning",
 	"/admin/v1/config",
+	"/admin/v1/decisions",
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +468,32 @@ func TestAdminAPI_Provisioning_IncludesFailed(t *testing.T) {
 		"a FAILED request's error is the whole point of this endpoint")
 	assert.Nil(t, got.Requests[0].CompletedAt)
 	assert.Positive(t, got.RequestLimit)
+}
+
+// B28.228: the decision log leaves as NDJSON, every line exactly as the store
+// holds it (the bytes its hash covers), from the record after ?after=.
+func TestAdminAPI_DecisionsExportNDJSON(t *testing.T) {
+	d := happyAdminDeps(t)
+	fake := d.store.(*fakeAdminStore)
+	fake.decisions = "{\"seq\":8,\"prev\":\"ab\"}\n{\"seq\":9,\"prev\":\"cd\"}\n"
+	ts := adminTestServer(t, d)
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/admin/v1/decisions?after=7", nil)
+	require.NoError(t, err)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/x-ndjson", resp.Header.Get("Content-Type"))
+	assert.Equal(t, fake.decisions, string(body))
+	assert.Equal(t, int64(7), fake.exportedAfter)
+
+	code, _ := adminGET(t, ts, "/admin/v1/decisions?after=-1", testAdminKey)
+	assert.Equal(t, http.StatusBadRequest, code)
 }
 
 func TestAdminAPI_ConfigReflectsEffectiveFlags(t *testing.T) {

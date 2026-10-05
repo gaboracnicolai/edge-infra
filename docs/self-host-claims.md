@@ -89,3 +89,16 @@ keyless the provider echoes the key back. Once it is keyless, the key alone gets
 no token, and it holds an `x-gateway-auth` assertion naming the agent's
 ServiceAccount that verifies against auth-service's published transit key.
 CONNECT to the keyless host gets 403, and the direct call is dropped.
+
+Phase 31 gives each agent a rate limit of its own and checks the decision log
+([agent-egress.md](agent-egress.md#rate-limits-per-agent)). The control plane is
+set to 5 requests a minute per agent. Two pods sharing the ServiceAccount
+`rl-alpha` are one agent: the first sends a burst and is served 5 times, then
+gets 429; the second, from its own address, gets 429 at once, with
+`x-ratelimit-limit: 5` and `retry-after: 60`. A pod of another agent, `rl-beta`,
+is served at the same moment. The `edge-egress` access log names the agent of the
+429 with `RL` / `local_rate_limited`. The decision log exported from the admin
+API holds the 429s, `rl-beta`'s 200 and Phase 30's 407s, all from
+`edge-egress`, and `scripts/verify-decisions.sh` verifies the chain from its
+first record. Rewritten from `rate_limited` to `allowed` in one record, the same
+export no longer verifies.
