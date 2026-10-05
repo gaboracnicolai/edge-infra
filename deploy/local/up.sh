@@ -2934,7 +2934,7 @@ phase31_agent_rate_limits() {
   echo "  rl-alpha-1: $codes"
   has "$codes" 429 || die "PHASE31 FAIL: a burst of $((2 * RL_PER_MINUTE + 2)) from rl-alpha-1 never got 429"
   first="${codes%%429*}"
-  n200="$(printf '%s' "$first" | grep -o 200 | wc -l | tr -d ' ')"
+  n200="$(printf '%s' "$first" | wc -w | tr -d ' ')"
   [ "$n200" -ge "$RL_PER_MINUTE" ] && [ "$first" = "$(printf '200 %.0s' $(seq 1 "$n200"))" ] \
     || die "PHASE31 FAIL: rl-alpha-1 was refused before its $RL_PER_MINUTE requests were served: $codes"
   ok "rl-alpha-1: $n200 served, then 429"
@@ -2955,9 +2955,16 @@ phase31_agent_rate_limits() {
   ok "edge-egress egress_agent_rate_limit rate_limited: $limited"
 
   section "the access log names the agent and the decision"
-  line="$(k -n edge logs -l app.kubernetes.io/name=edge-egress --tail=2000 2>/dev/null \
-    | grep -F "\"agent\":\"$sa_alpha\"" | grep -F '"status":429' | tail -1)"
-  [ -n "$line" ] || die "PHASE31 FAIL: no access-log line for $sa_alpha with status 429"
+  # Envoy writes its access log out every few seconds, not per request.
+  i=0
+  while :; do
+    line="$(k -n edge logs -l app.kubernetes.io/name=edge-egress --tail=2000 2>/dev/null \
+      | grep -F "\"agent\":\"$sa_alpha\"" | grep -F '"status":429' | tail -1 || true)"
+    [ -n "$line" ] && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || die "PHASE31 FAIL: no access-log line for $sa_alpha with status 429"
+    sleep 2
+  done
   printf '%s' "$line" | jq -e '.response_flags == "RL" and .response_code_details == "local_rate_limited"' >/dev/null \
     || die "PHASE31 FAIL: the 429's access-log line does not say rate limited: $line"
   echo "  $(printf '%s' "$line" | jq -c '{agent, status, response_flags, response_code_details, route, client_address}')"
