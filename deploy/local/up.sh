@@ -2761,7 +2761,8 @@ phase30_keyless_agents() {
   ok "keyless mock-llm without a workload token: $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //') — $(provider_echo "$out" | head -1)"
 
   section "GREEN — with its workload token: served, and nothing the agent sent as a key reaches the provider"
-  out="$(keyless_curl with-token -x "$EGRESS_PROXY" "http://$MOCK_HOST/v1/models?z=1&key=$planted&a=2")"
+  # key= and its percent-encoded twin %6Bey=, which a provider decodes to key.
+  out="$(keyless_curl with-token -x "$EGRESS_PROXY" "http://$MOCK_HOST/v1/models?z=1&key=$planted&a=2&%6Bey=$planted")"
   echo="$(provider_echo "$out")"
   has "$out" "< HTTP/1.1 200" && has "$echo" "Name: mock-llm" \
     || { printf '%s\n' "$out" | tail -25; die "PHASE30 FAIL: the keyless agent was not served through edge-egress"; }
