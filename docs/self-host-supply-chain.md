@@ -25,8 +25,11 @@ identity  https://github.com/gaboracnicolai/edge-infra/.github/workflows/images.
 ```
 
 `<ref>` is `refs/heads/main` for a build from main, or `refs/tags/v1.2.3` for the
-release `v1.2.3`. A signature made by another repository, another workflow, or a
-pull-request build (`refs/pull/<n>/merge`) does not pass.
+release `v1.2.3`. The certificate must also name `gaboracnicolai/edge-infra` as
+the repository the run was in. `images.yaml` is a reusable workflow, and another
+repository that called it would get a certificate with the same identity but its
+own repository name. A signature made by another repository, another workflow,
+or a pull-request build (`refs/pull/<n>/merge`) does not pass.
 
 ## One command
 
@@ -38,8 +41,10 @@ make verify-images TAG=<sha>       # a build from main, at its commit sha
 ```
 
 This verifies every first-party image named in `deploy/helm/*/values.yaml`, at
-that tag. It exits 1 if any image is missing its signature, its SBOM or its
-provenance:
+that tag. The tag sets the signer: `TAG=1.2.3` accepts only a signature from the
+`v1.2.3` release run, and `TAG=<sha>` only one from a run at that commit, so an
+older signed image retagged under the name you asked for does not pass. It exits
+1 if any image is missing its signature, its SBOM or its provenance:
 
 ```
 ok    ghcr.io/gaboracnicolai/edge-osb@sha256:…
@@ -50,8 +55,8 @@ ok    ghcr.io/gaboracnicolai/edge-osb@sha256:…
 all 8 image(s) signed, with an SBOM and SLSA provenance, by https://github.com/gaboracnicolai/edge-infra/.github/workflows/images.yaml@refs/{heads/main,tags/v<SemVer>}
 ```
 
-You can pin it tighter. `SIGNER_REF=refs/tags/v1.2.3` accepts only that
-release's signer. `SIGNER_SHA=<sha>` also requires the commit, both in the
+You can set the signer yourself. `SIGNER_REF=refs/tags/v1.2.3` accepts only that
+release's signer. `SIGNER_SHA=<sha>` requires the commit, both in the
 certificate and in the provenance. You can name images directly:
 `bash deploy/hack/supply-chain.sh verify ghcr.io/gaboracnicolai/edge-osb@sha256:…`.
 If you have no cosign, `bash deploy/hack/supply-chain.sh install <dir>` fetches
@@ -64,6 +69,7 @@ You do not need this repository:
 ```sh
 IMG=ghcr.io/gaboracnicolai/edge-control-plane:1.2.3
 WHO=(--certificate-oidc-issuer https://token.actions.githubusercontent.com
+     --certificate-github-workflow-repository gaboracnicolai/edge-infra
      --certificate-identity https://github.com/gaboracnicolai/edge-infra/.github/workflows/images.yaml@refs/tags/v1.2.3)
 
 cosign verify "${WHO[@]}" "$IMG"

@@ -26,9 +26,12 @@
 #   issuer    https://token.actions.githubusercontent.com
 #   identity  https://github.com/$SIGNER_REPO/.github/workflows/images.yaml@<ref>
 # where <ref> is refs/heads/main or a refs/tags/v<SemVer> release tag.
+# The certificate must also name $SIGNER_REPO as the repository the run was in.
 # SIGNER_REF=<ref> pins one exact ref instead (CI pins its own run's ref, which is
 # refs/pull/<n>/merge on a pull request), and SIGNER_SHA=<sha> also pins the
 # commit the workflow ran at — in the certificate and in the provenance.
+# `verify <tag>` sets them from the tag: 1.2.3 needs SIGNER_REF=refs/tags/v1.2.3,
+# and a 40-hex commit tag needs SIGNER_SHA=<that sha>.
 #
 # Run: make verify-images TAG=<tag>   (needs cosign and jq, and read access to the packages)
 set -euo pipefail
@@ -136,11 +139,16 @@ chart_images() {
 
 ID=()
 signer() {
-	if [ -n "${SIGNER_REF:-}" ]; then echo "https://github.com/$SIGNER_REPO/$WORKFLOW@$SIGNER_REF"; else
-		echo "https://github.com/$SIGNER_REPO/$WORKFLOW@refs/{heads/main,tags/v<SemVer>}"; fi
+	local at=""
+	[ -z "${SIGNER_SHA:-}" ] || at=" at $SIGNER_SHA"
+	if [ -n "${SIGNER_REF:-}" ]; then echo "https://github.com/$SIGNER_REPO/$WORKFLOW@$SIGNER_REF$at"; else
+		echo "https://github.com/$SIGNER_REPO/$WORKFLOW@refs/{heads/main,tags/v<SemVer>}$at"; fi
 }
 identity() {
-	ID=(--certificate-oidc-issuer "$ISSUER")
+	# The repository is pinned on its own as well as in the identity: images.yaml
+	# is a reusable workflow, and another repository calling it would be issued a
+	# certificate with this same identity but its own repository.
+	ID=(--certificate-oidc-issuer "$ISSUER" --certificate-github-workflow-repository "$SIGNER_REPO")
 	if [ -n "${SIGNER_REF:-}" ]; then
 		ID+=(--certificate-identity "https://github.com/$SIGNER_REPO/$WORKFLOW@$SIGNER_REF")
 	else
@@ -203,6 +211,10 @@ verify() { # <tag> | <ref>...
 	need jq
 	if [ $# = 1 ] && [[ "$1" != */* ]]; then
 		[[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "'$1' is not an image tag"
+		# Bind the check to the tag: a release tag must be signed by that
+		# release's run, and a commit-sha tag by a run at that commit.
+		if [ -z "${SIGNER_REF:-}" ] && [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then SIGNER_REF="refs/tags/v$1"; fi
+		if [ -z "${SIGNER_SHA:-}" ] && [[ "$1" =~ ^[0-9a-f]{40}$ ]]; then SIGNER_SHA="$1"; fi
 		while IFS= read -r r; do refs+=("$r:$1"); done < <(chart_images)
 		[ ${#refs[@]} -gt 0 ] || die "no chart names an image under $REGISTRY"
 	else
