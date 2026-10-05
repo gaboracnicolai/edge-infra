@@ -2291,14 +2291,35 @@ agent_curl() {
   printf '%s\ncurl-exit=%s\n' "$out" "$rc"
 }
 
-# assert_refused_at_handshake <pod> <alert> <why> [curl args...]
+# agent_tls_refusal <edge-proxy-pod> <counter> — that Envoy's count of handshakes
+# the :AGENT_PORT listener refused for <counter>: fail_verify_no_cert (no client
+# cert) or fail_verify_error (a cert the trust bundle did not sign). Echoes "?"
+# when the admin stats could not be read, never a silent 0.
+agent_tls_refusal() {
+  local pf out
+  kubectl --context "$KUBE_CONTEXT" -n edge port-forward "pod/$1" 19004:9901 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  out="$(curl -s --max-time 8 -G --data-urlencode "filter=_${AGENT_PORT}\\.ssl\\.$2\$" \
+    http://127.0.0.1:19004/stats 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  has "$out" ".ssl.$2: " || { echo "?"; return; }
+  printf '%s\n' "$out" | awk -F': ' '{s += $2} END {print s + 0}'
+}
+
+# assert_refused_at_handshake <pod> <counter> <why> [curl args...] — the pod gets
+# no HTTP answer, and Envoy's <counter> rose: it refused the TLS handshake.
 assert_refused_at_handshake() {
-  local pod="$1" alert="$2" why="$3" out; shift 3
+  local pod="$1" counter="$2" why="$3" before after out; shift 3
+  before="$(agent_tls_refusal "$AGENT_GW_POD" "$counter")"
   out="$(agent_curl "$pod" "$@")"
-  echo "  $pod -> $(printf '%s\n' "$out" | grep -m1 -i 'alert' | sed 's/^[* ]*//') ($(printf '%s\n' "$out" | tail -1))"
+  after="$(agent_tls_refusal "$AGENT_GW_POD" "$counter")"
+  echo "  $pod -> $(printf '%s\n' "$out" | grep -m1 -iE 'alert|failure|reset' | sed 's/^[* ]*//') ($(printf '%s\n' "$out" | tail -1)); Envoy ssl.$counter $before -> $after"
   ! has "$out" "curl-exit=0" && ! has "$out" "< HTTP/" && ! has "$out" "TENANT-A-BACKEND" \
     || { printf '%s\n' "$out" | tail -15; die "PHASE27 FAIL: $pod ($why) got an HTTP answer"; }
-  has "$out" "$alert" || { printf '%s\n' "$out" | tail -15; die "PHASE27 FAIL: $pod ($why) was not refused with '$alert'"; }
+  [ "$before" != "?" ] && [ "$after" != "?" ] && [ "$after" -gt "$before" ] \
+    || die "PHASE27 FAIL: $pod ($why) — Envoy's ssl.$counter did not rise ($before -> $after), so the handshake was not what refused it"
 }
 
 phase27_agent_svids() {
@@ -2366,7 +2387,8 @@ SQL
     || die "PHASE27 FAIL: agent-alpha's certificate does not chain to the trust bundle"
   ok "agent-alpha holds an SVID for $AGENT_SPIFFE_ID, signed by the edge-spiffe CA"
 
-  node="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].spec.nodeName}')"
+  AGENT_GW_POD="$(ep_pod)"
+  node="$(k -n edge get pod "$AGENT_GW_POD" -o jsonpath='{.spec.nodeName}')"
   AGENT_GW_IP="$(k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
   [ -n "$AGENT_GW_IP" ] || die "PHASE27: no edge-proxy node IP"
 
@@ -2382,13 +2404,13 @@ SQL
   ok "agent-alpha -> $(printf '%s\n' "$out" | grep -m1 '^< HTTP/' | tr -d '\r' | sed 's/^< //') TENANT-A-BACKEND"
 
   section "RED — a pod with no certificate: refused at the TLS handshake"
-  assert_refused_at_handshake no-svid "alert certificate required" "no certificate"
-  ok "no-svid refused at the handshake — no HTTP answer"
+  assert_refused_at_handshake no-svid fail_verify_no_cert "no certificate"
+  ok "no-svid refused at the handshake for its missing certificate — no HTTP answer"
 
   section "RED — a certificate for the same SPIFFE ID from another CA: refused at the TLS handshake"
-  assert_refused_at_handshake foreign-cert "alert unknown ca" "foreign CA" \
+  assert_refused_at_handshake foreign-cert fail_verify_error "foreign CA" \
     --cert /var/run/secrets/spiffe.io/tls.crt --key /var/run/secrets/spiffe.io/tls.key
-  ok "foreign-cert refused at the handshake — no HTTP answer"
+  ok "foreign-cert refused at the handshake — its certificate failed the trust bundle, no HTTP answer"
 
   rm -rf "$tmp"
   ok "PHASE 27 — csi-driver-spiffe issues agent SVIDs; with the trust bundle over SDS, a pod without one is refused at the TLS handshake"
