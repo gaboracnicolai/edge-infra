@@ -88,4 +88,47 @@ jobs:
           sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
           kind version; kubectl version --client; helm version
       - name: make kind-observability
+        # The cluster is kept for the screenshots below; it goes with the runner.
+        env:
+          KEEP_CLUSTER: "1"
         run: make kind-observability
+      # What the drill measured, as Grafana draws it. Not a gate: the drill
+      # above already passed or failed on the numbers.
+      - name: Screenshot the Request Traffic dashboard at 1440 and 390 wide
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_VERSION: 1.63.0
+        run: |
+          set -euo pipefail
+          ctx=kind-edge-observability
+          GF_PASS="$(kubectl --context "$ctx" -n monitoring get secret edge-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d)"
+          export GF_PASS
+          kubectl --context "$ctx" -n monitoring port-forward svc/grafana 13000:3000 >/dev/null 2>&1 &
+          mkdir -p "$RUNNER_TEMP/shots" && cd "$RUNNER_TEMP/shots"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}" >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > shots.cjs <<'JS'
+          const { chromium } = require('playwright');
+          (async () => {
+            const auth = 'Basic ' + Buffer.from('admin:' + process.env.GF_PASS).toString('base64');
+            const browser = await chromium.launch();
+            for (const [w, h] of [[1440, 900], [390, 844]]) {
+              const ctx = await browser.newContext({ viewport: { width: w, height: h }, extraHTTPHeaders: { Authorization: auth } });
+              const page = await ctx.newPage();
+              await page.goto('http://127.0.0.1:13000/d/edge-request-traffic?orgId=1&from=now-15m&to=now&kiosk', { waitUntil: 'networkidle' });
+              await page.waitForTimeout(5000);
+              await page.screenshot({ path: `request-traffic-${w}.png`, fullPage: true });
+            }
+            await browser.close();
+          })().catch((e) => { console.error(e); process.exit(1); });
+          JS
+          node shots.cjs
+          ls -l ./*.png
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        continue-on-error: true
+        with:
+          name: grafana-request-traffic
+          path: ${{ runner.temp }}/shots/*.png
+          if-no-files-found: ignore
