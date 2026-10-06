@@ -3114,16 +3114,35 @@ airgap_queries() {
   done | sed -n 's/.*"[A-Z0-9]* IN \([^ ]*\) .*/\1/p'
 }
 
-# airgap_external — the names among stdin that are not the cluster's own: not
-# under cluster.local, and not the reverse lookup of a private address.
-airgap_external() {
-  awk '
+# airgap_search_domains — the search domains a pod gets from its node, which
+# kubelet appends after the cluster's own.
+airgap_search_domains() {
+  k -n tenant-secure exec minter -- cat /etc/resolv.conf 2>/dev/null \
+    | awk '$1 == "search" { for (i = 2; i <= NF; i++) if ($i !~ /cluster\.local\.?$/) { sub(/\.$/, "", $i); print $i } }'
+}
+
+# airgap_classify <external|expansion> <search domain>... — the names among
+# stdin of one class. In the cluster: under cluster.local, or the reverse lookup
+# of a private address. An expansion: a name under cluster.local with one of
+# the node's search domains appended, which a pod's resolver tries before the
+# name as written. External: every other name.
+airgap_classify() {
+  local want="$1"; shift
+  awk -v want="$want" -v doms="$*" '
+    BEGIN { n = split(doms, d, " ") }
     /\.cluster\.local\.$/ { next }
     /\.in-addr\.arpa\.$/ {
       split($0, o, ".")
       if (o[4] == "10" || o[4] == "127" || (o[4] == "192" && o[3] == "168") || (o[4] == "172" && o[3] >= 16 && o[3] <= 31)) next
     }
-    { print }'
+    {
+      cls = "external"
+      for (i = 1; i <= n; i++) {
+        suf = ".cluster.local." d[i] "."
+        if (length($0) > length(suf) && substr($0, length($0) - length(suf) + 1) == suf) cls = "expansion"
+      }
+      if (cls == want) print
+    }'
 }
 
 # airgap_metric <pod> <series> — one auth-service pod's value of a series.
@@ -3143,7 +3162,7 @@ phase32_no_internet() {
   section "PHASE 32 — no internet at run time: every node cut off, the stack restarted cold, and not one DNS query for a name outside the cluster"
   local UMAIL="dev@edge.local" UPASS="devpassword-abc12345"
   local ISS="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"
-  local tdir aud issuers r sip n ns rel w x wl out c tok1 tok2 itok i pods p ext all ok_refresh fail_refresh
+  local tdir aud issuers r sip n ns rel w x wl out c tok1 tok2 itok i pods p ext all ok_refresh fail_refresh ok0 fail0 doms nexp
   need xxd
   tdir="$(mktemp -d)"
   trap 'airgap_lift' EXIT
@@ -3210,6 +3229,13 @@ phase32_no_internet() {
     ok "$ns/$w Ready"
   done <<<"$wl"
 
+  # Key-refresh counters once the restart has settled (no issuer pod is
+  # terminating any more); the check below compares against them.
+  pods="$(k -n "$INFRA_NS" get pod -l app.kubernetes.io/instance=auth-service -o jsonpath='{.items[*].metadata.name}')"
+  for p in $pods; do
+    echo "$p $(airgap_metric "$p" 'jwks_refresh_total{result="success"}') $(airgap_metric "$p" 'jwks_refresh_total{result="failure"}')"
+  done > "$tdir/refresh0"
+
   section "auth-service loaded every issuer's keys from inside the cluster"
   out="$(k -n "$INFRA_NS" logs deploy/auth-service --tail=-1 2>/dev/null | grep '"trusting issuer"' || true)"
   printf '%s\n' "$out" | jq -r '.fields | "    \(.issuer)  <-  \(.jwks)"' 2>/dev/null || printf '%s\n' "$out"
@@ -3257,21 +3283,27 @@ phase32_no_internet() {
   [ "$(gw80_code "$sip" -H "Authorization: Bearer $tok1")" = 401 ] || die "PHASE32 FAIL: the rotated-out corp-1 key is still trusted"
   ok "corp-2 -> 200 and corp-1 -> 401 after ~$((i * 3))s — rotated with no restart and no network"
 
-  section "every key refresh since the cold start succeeded, offline"
-  pods="$(k -n "$INFRA_NS" get pod -l app.kubernetes.io/instance=auth-service -o jsonpath='{.items[*].metadata.name}')"
-  for p in $pods; do
+  section "every key refresh since the restart settled succeeded, offline"
+  while read -r p ok0 fail0; do
     ok_refresh="$(airgap_metric "$p" 'jwks_refresh_total{result="success"}')"
     fail_refresh="$(airgap_metric "$p" 'jwks_refresh_total{result="failure"}')"
-    echo "  $p: jwks_refresh_total success=$ok_refresh failure=$fail_refresh"
-    [ "${ok_refresh%%.*}" -ge 3 ] || die "PHASE32 FAIL: $p refreshed its issuers' keys $ok_refresh times, want at least one round of all three"
-    [ "${fail_refresh%%.*}" = 0 ] || die "PHASE32 FAIL: $p failed $fail_refresh key refreshes with no internet"
-  done
+    echo "  $p: jwks_refresh_total success $ok0 -> $ok_refresh, failure $fail0 -> $fail_refresh"
+    [ $(( ${ok_refresh%%.*} - ${ok0%%.*} )) -ge 3 ] \
+      || die "PHASE32 FAIL: $p did not refresh all three issuers' keys while offline"
+    [ "${fail_refresh%%.*}" = "${fail0%%.*}" ] \
+      || die "PHASE32 FAIL: $p failed a key refresh with no internet"
+  done < "$tdir/refresh0"
 
   section "THE VERDICT — every name CoreDNS was asked since it went offline"
   all="$(airgap_queries | grep . || true)"
-  ext="$(printf '%s\n' "$all" | grep . | airgap_external | sort | uniq -c | sort -rn || true)"
+  doms="$(airgap_search_domains | tr '\n' ' ')"
+  ext="$(printf '%s\n' "$all" | grep . | airgap_classify external $doms | sort | uniq -c | sort -rn || true)"
+  nexp="$(printf '%s\n' "$all" | grep . | airgap_classify expansion $doms | grep -c . || true)"
   echo "  $(printf '%s\n' "$all" | grep -c .) queries, $(printf '%s\n' "$all" | grep . | sort -u | wc -l | tr -d ' ') distinct names; the most asked:"
   printf '%s\n' "$all" | grep . | sort | uniq -c | sort -rn | head -5 | sed 's/^/    /'
+  if [ "${nexp:-0}" -gt 0 ]; then
+    echo "  $nexp of them are a cluster.local name with the node's search domain (${doms% }) appended — a pod's resolver tries that before the name as written; none names a host outside the cluster"
+  fi
   [ "$(printf '%s\n' "$all" | grep -c .)" -gt 0 ] || die "PHASE32 FAIL: CoreDNS logged no queries at all, so its silence proves nothing"
   [ -z "$ext" ] || { echo "  names outside the cluster:"; printf '%s\n' "$ext" | sed 's/^/    /'; die "PHASE32 FAIL: with no internet, a workload still looked up a name outside the cluster"; }
   ok "0 queries for a name outside the cluster"
@@ -3279,7 +3311,7 @@ phase32_no_internet() {
   section "CONTROL — the instruments see: an outside name is logged, a public address has no route"
   out="$(k -n tenant-secure exec minter -- curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://api.openai.com/ 2>&1 || true)"
   i=0
-  until has "$(airgap_queries | airgap_external)" "api.openai.com."; do
+  until has "$(airgap_queries | airgap_classify external $doms)" "api.openai.com."; do
     i=$((i + 1)); [ "$i" -lt 10 ] || die "PHASE32: CoreDNS did not log a lookup of api.openai.com — the verdict above could not have seen one"
     sleep 1
   done
