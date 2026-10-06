@@ -66,7 +66,8 @@ the kind cluster off and checks the stack still works:
 1. On every node, every public address is made unreachable (two
    `unreachable` /1 routes; the private ranges still go via the gateway), so no
    pod, no node and no hostNetwork Envoy can send a packet to the internet.
-   CoreDNS loses its upstream and logs every query it is asked.
+   CoreDNS loses its upstream: a name outside the cluster gets NXDOMAIN, as from
+   an internal resolver with no internet, and every query is logged.
 2. Every Edge workload is restarted from cold and must become Ready.
 3. `auth-service` must load all three issuers' keys from inside the cluster: the
    `edge-issuer`, the API server's ServiceAccount keys, and an outside IdP's keys
@@ -77,6 +78,9 @@ the kind cluster off and checks the stack still works:
    gets 200 and the old one's 401, and every key refresh since the cold start
    succeeded.
 6. **The verdict:** CoreDNS logged no query for a name outside the cluster.
+   A pod's resolver also tries each `cluster.local` name with the node's own
+   search domain appended before the name as written; those are counted and
+   shown apart, since they name nothing outside the cluster.
 7. Two controls show the instruments work. A pod's lookup of `api.openai.com`
    shows up in the log as outside the cluster, and a pod's request to `1.1.1.1`
    finds no way out.

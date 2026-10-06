@@ -3017,15 +3017,17 @@ phase31_agent_rate_limits() {
 # A customer's cluster may have no route to the internet once it is installed.
 # Cut it off: on every node every public address is unreachable, so neither a
 # pod nor the node itself (nor hostNetwork Envoy) can send a packet outside the
-# private ranges, and CoreDNS loses its upstream and logs every query it is asked. Then restart
-# every Edge workload from cold. They must come up and serve: auth-service
-# loads each issuer's keys from inside the cluster (the edge-issuer, the API
-# server's ServiceAccount keys, and the keys of an IdP outside the cluster, held
-# in a Secret it re-reads, so rotating them is a Secret update), the OSB broker
-# provisions a jwt route, and a token from each issuer is checked at the gateway.
-# Over the whole run CoreDNS must log no query for a name outside the cluster.
-# Two controls show the instruments can see: an outside name looked up on
-# purpose is logged, and a packet to a public address has no way out.
+# private ranges, and CoreDNS loses its upstream — a name outside the cluster
+# gets NXDOMAIN, as from an internal resolver with no internet — and logs every
+# query it is asked. Then restart every Edge workload from cold. They must come
+# up and serve: auth-service loads each issuer's keys from inside the cluster
+# (the edge-issuer, the API server's ServiceAccount keys, and the keys of an IdP
+# outside the cluster, held in a Secret it re-reads, so rotating them is a
+# Secret update), the OSB broker provisions a jwt route, and a token from each
+# issuer is checked at the gateway. Over the whole run CoreDNS must log no query
+# for a name outside the cluster. Two controls show the instruments can see: an
+# outside name looked up on purpose is logged, and a packet to a public address
+# has no way out.
 AIRGAP_IDP="https://idp.corp.example"
 AIRGAP_SECRET="idp-jwks"
 AIRGAP_JWKS_FILE="/etc/auth-service/jwks/corp.json"
@@ -3145,6 +3147,25 @@ airgap_classify() {
     }'
 }
 
+# airgap_gateway_diag <host> — what the gateway looks like when it does not
+# answer: the codes on :80 and :443, what listens on the routable worker, the
+# listeners its Envoy holds, and the last lines of the Envoy and control plane.
+airgap_gateway_diag() {
+  local ep
+  echo "  :80 Host $1 -> $(gw80_code "$1"), :443 tenant-a.local -> $(gw_code tenant-a.local)"
+  curl -sv --max-time 6 -H "Host: $1" http://127.0.0.1:80/ 2>&1 | tail -8 | sed 's/^/    /'
+  k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o wide | sed 's/^/    /'
+  echo "  listening on ${CLUSTER_NAME}-worker:"
+  docker exec "${CLUSTER_NAME}-worker" sh -c 'ss -ltn | grep -E ":(80|443|9902) "' | sed 's/^/    /' || true
+  ep="$(ep_pod_on "${CLUSTER_NAME}-worker")"
+  if [ -n "$ep" ]; then
+    echo "  $ep listeners and clusters:"
+    envoy_config_dump "$ep" | jq -r '.configs[]? | (.dynamic_listeners[]? | "    listener \(.name) :\(.active_state.listener.address.socket_address.port_value // "?")"), (.dynamic_active_clusters[]? | "    cluster \(.cluster.name)")' 2>/dev/null | head -30
+    k -n edge logs "$ep" --tail=15 2>/dev/null | cut -c1-240 | sed 's/^/    /'
+  fi
+  k -n "$INFRA_NS" logs deploy/edge-control-plane --tail=15 2>/dev/null | cut -c1-240 | sed 's/^/    /'
+}
+
 # airgap_metric <pod> <series> — one auth-service pod's value of a series.
 airgap_metric() {
   kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward "pod/$1" 19092:9090 >/dev/null 2>&1 &
@@ -3200,17 +3221,33 @@ phase32_no_internet() {
   if [ ! -s "$AIRGAP_STATE_DIR/Corefile" ]; then
     k -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > "$AIRGAP_STATE_DIR/Corefile"
   fi
+  # The cluster's zones keep their server block, with no forward (and no loop
+  # check, which only guards a forward) and every query logged. Every other
+  # name gets NXDOMAIN from a catch-all block, as from an internal resolver that
+  # knows no name outside the cluster.
   awk '
+    NR == 1 && /^\.:53[[:space:]]*\{/ { print "cluster.local:53 in-addr.arpa:53 ip6.arpa:53 {"; next }
     /^[[:space:]]*forward[[:space:]]/ { skip = /\{[[:space:]]*$/; next }
     skip { if (/^[[:space:]]*\}[[:space:]]*$/) skip = 0; next }
     /^[[:space:]]*loop[[:space:]]*$/ { next }
     /^[[:space:]]*errors[[:space:]]*$/ { print; sub(/errors/, "log"); print; next }
-    { print }' "$AIRGAP_STATE_DIR/Corefile" > "$tdir/Corefile"
+    { print }
+    END {
+      print ".:53 {"
+      print "    errors"
+      print "    log"
+      print "    template ANY ANY {"
+      print "       rcode NXDOMAIN"
+      print "       authority \"{{ .Zone }} 60 IN SOA ns.offline. hostmaster.offline. (1 60 60 60 60)\""
+      print "    }"
+      print "}"
+    }' "$AIRGAP_STATE_DIR/Corefile" > "$tdir/Corefile"
   ! has "$(cat "$tdir/Corefile")" forward || die "PHASE32: the offline Corefile still forwards"
+  has "$(head -1 "$tdir/Corefile")" "cluster.local:53" || die "PHASE32: the Corefile does not start with the .:53 block this phase rewrites"
   k -n kube-system create configmap coredns --from-file=Corefile="$tdir/Corefile" --dry-run=client -o yaml | k replace -f - >/dev/null
   k -n kube-system rollout restart deploy/coredns >/dev/null
   k -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null || die "PHASE32: CoreDNS did not come back offline"
-  ok "CoreDNS restarted with no forward, logging every query"
+  ok "CoreDNS restarted with no upstream: cluster names served, every other name NXDOMAIN, every query logged"
 
   section "restart every Edge workload from cold, offline"
   wl=""
@@ -3254,14 +3291,14 @@ phase32_no_internet() {
     c="$(gw80_code "$sip")"; [ "$c" = 401 ] && break
     i=$((i + 1)); sleep 2
   done
-  [ "$c" = 401 ] || die "PHASE32 FAIL: no token got $c, want 401 (the route is not published, or not gated)"
+  [ "$c" = 401 ] || { airgap_gateway_diag "$sip"; die "PHASE32 FAIL: no token got $c, want 401 (the route is not published, or not gated)"; }
   ok "no token -> 401"
   itok="$(k -n tenant-secure exec minter -- curl -sk --max-time 6 -X POST "$ISS/login" \
     -H 'Content-Type: application/json' -d "{\"email\":\"$UMAIL\",\"password\":\"$UPASS\"}" 2>/dev/null \
     | jq -r '.access_token // empty' 2>/dev/null || true)"
   [ -n "$itok" ] || die "PHASE32 FAIL: the edge-issuer did not mint a token offline"
   c="$(gw80_code "$sip" -H "Authorization: Bearer $itok")"
-  [ "$c" = 200 ] || die "PHASE32 FAIL: an edge-issuer token got $c, want 200"
+  [ "$c" = 200 ] || { airgap_gateway_diag "$sip"; die "PHASE32 FAIL: an edge-issuer token got $c, want 200"; }
   ok "edge-issuer token -> 200"
   tok1="$(airgap_token "$tdir/corp-1.pem" corp-1 "$aud")"
   c="$(gw80_code "$sip" -H "Authorization: Bearer $tok1")"
