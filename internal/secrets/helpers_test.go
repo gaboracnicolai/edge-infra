@@ -130,7 +130,7 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 // --- fake store (no DB) -----------------------------------------------------
 
 type fakeStore struct {
-	upserts, deletes            int
+	upserts, deletes, reseals   int
 	lastCert, lastKey, lastKind string
 	metaFingerprint             string
 	deleteReturns               bool
@@ -147,6 +147,10 @@ func (f *fakeStore) Delete(_ context.Context, _ string) (bool, error) {
 }
 func (f *fakeStore) GetMeta(_ context.Context, name string) (*SecretMeta, error) {
 	return &SecretMeta{Name: name, Fingerprint: f.metaFingerprint, NotAfter: time.Now()}, nil
+}
+func (f *fakeStore) Reseal(_ context.Context) (ResealResult, error) {
+	f.reseals++
+	return ResealResult{KeyID: "kid-new", Resealed: 2, AlreadyCurrent: 1}, nil
 }
 func (f *fakeStore) Ping(_ context.Context) error { return nil }
 

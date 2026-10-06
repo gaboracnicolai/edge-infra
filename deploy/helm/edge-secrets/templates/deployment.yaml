@@ -60,6 +60,14 @@ spec:
                   key: SECRET_KEK
                   optional: true
                   optional: true
+            # Mid-rotation only: the old KEK(s), comma-separated, which open but
+            # never seal; `secrets reseal` moves every key off them (docs/kek-rotation.md).
+            - name: SECRET_KEK_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.existingSecret }}
+                  key: SECRET_KEK_PREVIOUS
+                  optional: true
           volumeMounts:
             - name: tls
               mountPath: {{ .Values.tls.mountPath }}

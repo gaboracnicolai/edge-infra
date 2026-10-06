@@ -29,6 +29,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /v1/secrets/{name}", s.requireAuth(s.handlePut))
 	mux.HandleFunc("DELETE /v1/secrets/{name}", s.requireAuth(s.handleDelete))
 	mux.HandleFunc("GET /v1/secrets/{name}", s.requireAuth(s.handleGetMeta))
+	mux.HandleFunc("POST /v1/reseal", s.requireAuth(s.handleReseal))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	return mux
@@ -144,6 +145,24 @@ func (s *Server) handleGetMeta(w http.ResponseWriter, r *http.Request) {
 		"name":        meta.Name,
 		"fingerprint": meta.Fingerprint,
 		"not_after":   meta.NotAfter.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleReseal re-seals every stored key under the current KEK — the step of a
+// KEK rotation between adding the new KEK and dropping the old one. The answer
+// names KEKs and counts only, never key bytes.
+func (s *Server) handleReseal(w http.ResponseWriter, r *http.Request) {
+	res, err := s.store.Reseal(r.Context())
+	if err != nil {
+		s.log.Error("re-seal failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "re-seal failed: "+err.Error())
+		return
+	}
+	s.log.Info("keys re-sealed", "key_id", res.KeyID, "resealed", res.Resealed, "already_current", res.AlreadyCurrent)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"key_id":          res.KeyID,
+		"resealed":        res.Resealed,
+		"already_current": res.AlreadyCurrent,
 	})
 }
 

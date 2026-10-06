@@ -56,14 +56,16 @@ func run(log *slog.Logger) error {
 
 	// Optional at-rest decryption key for SDS secret keys (must match the
 	// custodian's SECRET_KEK). Empty ⇒ plaintext keys; a sealed key read without
-	// it fails loudly at snapshot load (fail-closed).
-	kek, err := keycrypt.ParseKEK(os.Getenv("SECRET_KEK"))
+	// it fails loudly at snapshot load (fail-closed). During a KEK rotation
+	// SECRET_KEK_PREVIOUS (comma-separated) holds the old KEKs, so keys not yet
+	// re-sealed still open.
+	ring, err := keycrypt.ParseKeyring(os.Getenv("SECRET_KEK"), os.Getenv("SECRET_KEK_PREVIOUS"))
 	if err != nil {
-		return fmt.Errorf("SECRET_KEK: %w", err)
+		return fmt.Errorf("SECRET_KEK / SECRET_KEK_PREVIOUS: %w", err)
 	}
 
 	pgCtx, pgCancel := context.WithTimeout(rootCtx, 10*time.Second)
-	pgStore, err := store.NewPostgresStore(pgCtx, cfg.PostgresDSN, store.WithKEK(kek))
+	pgStore, err := store.NewPostgresStore(pgCtx, cfg.PostgresDSN, store.WithKeyring(ring))
 	pgCancel()
 	if err != nil {
 		return err

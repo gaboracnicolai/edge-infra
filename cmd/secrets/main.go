@@ -11,6 +11,11 @@
 //	secrets put    --name N --cert c.pem --key k.pem --server https://host:8082 \
 //	               [--client-cert op.pem --client-key op.key --ca admin-server-ca.pem] [--admin-key K]
 //	secrets delete --name N --server https://host:8082  [mTLS flags | --admin-key K]
+//	secrets reseal --server https://host:8082           [mTLS flags | --admin-key K]
+//
+// KEK rotation: give both the custodian and the control-plane the new KEK as
+// SECRET_KEK and the old one in SECRET_KEK_PREVIOUS, run `secrets reseal`, then
+// drop SECRET_KEK_PREVIOUS (docs/kek-rotation.md).
 //
 // The CLI is an mTLS HTTP CLIENT of the component — never a direct-DB writer — so
 // validation always runs at the component's write chokepoint.
@@ -54,8 +59,10 @@ func main() {
 		err = runPut(os.Args[2:])
 	case "delete":
 		err = runDelete(os.Args[2:])
+	case "reseal":
+		err = runReseal(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (want: serve | put | delete)", cmd)
+		err = fmt.Errorf("unknown command %q (want: serve | put | delete | reseal)", cmd)
 	}
 	if err != nil {
 		log.Error("secrets exited with error", "cmd", cmd, "err", err)
@@ -76,16 +83,17 @@ func runServe(log *slog.Logger) error {
 
 	// Encryption at rest is MANDATORY for the custodian (fail-closed): it must
 	// never write a key in plaintext. SECRET_KEK is a 32-byte base64 AES-256 key,
-	// shared with the control-plane (which decrypts on load).
-	kek, err := keycrypt.ParseKEK(os.Getenv("SECRET_KEK"))
+	// shared with the control-plane (which decrypts on load). During a rotation
+	// SECRET_KEK_PREVIOUS (comma-separated) holds the old KEKs, which only open.
+	ring, err := keycrypt.ParseKeyring(os.Getenv("SECRET_KEK"), os.Getenv("SECRET_KEK_PREVIOUS"))
 	if err != nil {
-		return fmt.Errorf("SECRET_KEK: %w", err)
+		return fmt.Errorf("SECRET_KEK / SECRET_KEK_PREVIOUS: %w", err)
 	}
-	if kek == nil {
+	if ring == nil {
 		return fmt.Errorf("SECRET_KEK is required (32-byte base64 AES-256 key): the custodian refuses to run without encryption at rest")
 	}
 
-	store, err := secrets.NewStore(ctx, cfg.DatabaseURL, secrets.WithKEK(kek))
+	store, err := secrets.NewStore(ctx, cfg.DatabaseURL, secrets.WithKeyring(ring))
 	if err != nil {
 		return err
 	}
@@ -99,7 +107,8 @@ func runServe(log *slog.Logger) error {
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Info("edge-secrets listening (mTLS)",
-			"addr", cfg.ListenAddr, "admin_ca", cfg.AdminCAFile != "", "admin_key", cfg.AdminAPIKey != "")
+			"addr", cfg.ListenAddr, "admin_ca", cfg.AdminCAFile != "", "admin_key", cfg.AdminAPIKey != "",
+			"kek_id", ring.KeyID())
 		// Cert/key are already in the TLSConfig.
 		if serveErr := httpSrv.ListenAndServeTLS("", ""); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			serverErr <- serveErr
@@ -260,5 +269,35 @@ func runDelete(args []string) error {
 		return fmt.Errorf("delete failed: %s", resp.Status)
 	}
 	fmt.Printf("secret %q deleted\n", *name)
+	return nil
+}
+
+// runReseal asks the custodian to re-seal every stored key under its current
+// KEK — the middle step of a KEK rotation.
+func runReseal(args []string) error {
+	fs := flag.NewFlagSet("reseal", flag.ContinueOnError)
+	cf := addClientFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	resp, err := cf.do(http.MethodPost, "/v1/reseal", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("reseal failed: %s %s", resp.Status, bytes.TrimSpace(body))
+	}
+	var res struct {
+		KeyID          string `json:"key_id"`
+		Resealed       int    `json:"resealed"`
+		AlreadyCurrent int    `json:"already_current"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return fmt.Errorf("reseal: unreadable answer: %w", err)
+	}
+	fmt.Printf("every key is sealed under KEK %s: %d re-sealed, %d already were\n",
+		res.KeyID, res.Resealed, res.AlreadyCurrent)
 	return nil
 }
