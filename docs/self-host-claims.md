@@ -117,3 +117,12 @@ connection Secret reaches Postgres, Redis and NATS) and `make kind-observability
 the `edge-observability` one (every component answers on its Service). `make
 kubeconform` validates everything the charts render, for every overlay, against
 the Kubernetes version kind runs.
+
+Phase 35 installs a Talyvor Edge licence ([licence.md](licence.md)), signed by a
+key made for the run and trusted through `licence.publicKeys`. Valid for a day,
+it reads `edge_licence_valid 1`. Replaced in its Secret by one that expired
+yesterday, with no restart, it reads `edge_licence_valid 0` with yesterday's
+`edge_licence_expiry_timestamp_seconds`, the control plane logs `licence
+EXPIRED`, and `tenant-a.local` and `tenant-b.local` still return 200. The control
+plane is then restarted with the expired licence and every edge-proxy rolled:
+both tenants are served 200 by a fresh Envoy, and the metric still reads 0.

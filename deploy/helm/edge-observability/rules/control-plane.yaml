@@ -123,3 +123,20 @@ groups:
             xDS version for 2m — the control-plane published but delivery is withheld
             (cf. the #47 version-collision class). New/changed routes are not live there.
           runbook: https://runbooks.internal/edge/config-divergence
+
+      # The Talyvor Edge licence (docs/licence.md) is missing, not signed by a
+      # trusted key, or expired. The licence is advisory — the control plane serves
+      # exactly as before — so this warns and never pages. The control plane's log
+      # says which; renew by updating the licence Secret.
+      - alert: EdgeLicenceNotValid
+        expr: edge_licence_valid == 0
+        for: 0m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "The Talyvor Edge licence is not valid"
+          description: >
+            edge_licence_valid is 0: no licence is installed, it is not signed by a
+            trusted key, or it has expired. Traffic is not affected. See
+            docs/licence.md to install or renew it.

@@ -57,6 +57,9 @@
 #  34  `helm test` passes for every release this run installed — each chart's
 #      own test pod reaches its service through the Service and the chart's
 #      NetworkPolicy (runs before 32, which cuts the image registry off)
+#  35  offline licence: a valid licence reads edge_licence_valid 1; replaced by an
+#      expired one it reads 0 and the control plane warns, and both tenants still
+#      return 200, through a cold restart and a fresh Envoy (runs last)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -3527,6 +3530,98 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
   ok "PHASE 33 — KEK rotated: every key re-sealed under $new_kid, $old_kid dropped, and a fresh Envoy is served $ROT_HOST's same cert over SDS"
 }
 
+# ---- Phase 35 — an expired licence warns and drops nothing (B28.238) --------
+# The Talyvor Edge licence is advisory (docs/licence.md): the control plane checks
+# it offline and exports edge_licence_valid, and nothing it serves depends on it.
+# The licences here are minted with openssl from a key made for this run (the
+# token format is docs/licence.md's), trusted through licence.publicKeys.
+licence_b64url() { openssl base64 -A | tr -d '=' | tr '+/' '-_'; }
+
+# mint_licence <key.pem> <id> <expires-unix> — a licence token signed by key.pem.
+mint_licence() {
+  local key="$1" id="$2" exp="$3" payload signed tmp
+  payload="$(jq -nc --arg id "$id" --argjson exp "$exp" \
+    '{id: $id, licensee: "Kind E2E", plan: "enterprise", issued_at: (now | floor | todate), expires_at: ($exp | todate)}' \
+    | tr -d '\n' | licence_b64url)"
+  signed="talyvor-edge-licence-v1.$payload"
+  tmp="$(mktemp)"
+  printf '%s' "$signed" > "$tmp"
+  printf '%s.%s' "$signed" "$(openssl pkeyutl -sign -inkey "$key" -rawin -in "$tmp" | licence_b64url)"
+  rm -f "$tmp"
+}
+
+# metric_of <metrics-text> <name> — the value of an unlabelled series.
+metric_of() { printf '%s\n' "$1" | awk -v n="$2" '$1 == n {print $2}' | tail -1; }
+
+phase35_licence() {
+  section "PHASE 35 — offline licence: an expired licence reads edge_licence_valid 0, is warned about, and traffic still returns 200"
+  local tdir pub now exp_at m v e i host
+  tdir="$(mktemp -d)"
+  openssl genpkey -algorithm ed25519 -out "$tdir/licence.pem" 2>/dev/null || die "PHASE35: openssl could not make an Ed25519 key"
+  pub="$(openssl pkey -in "$tdir/licence.pem" -pubout -outform DER | tail -c 32 | openssl base64 -A)"
+  now="$(date +%s)"
+
+  section "red-first: a licence valid for a day reads edge_licence_valid 1"
+  apply_secret "$INFRA_NS" generic edge-licence \
+    --from-literal=licence="$(mint_licence "$tdir/licence.pem" lic_kind_valid $((now + 86400)))" >/dev/null
+  h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
+    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
+    -f "$LOCAL_DIR/values/values-control-plane.yaml" \
+    --set licence.existingSecret=edge-licence --set "licence.publicKeys[0]=$pub" \
+    --wait --timeout 200s >/dev/null || die "PHASE35: the control plane did not upgrade with the licence"
+  i=0
+  while :; do
+    m="$(cp_scrape)"; v="$(metric_of "$m" edge_licence_valid)"
+    [ "$v" = 1 ] && break
+    i=$((i + 1)); [ "$i" -lt 10 ] || die "PHASE35 FAIL: a valid licence reads edge_licence_valid=${v:-<absent>}, not 1"
+    sleep 3
+  done
+  ok "edge_licence_valid 1 for lic_kind_valid"
+
+  section "the licence is replaced by one that expired yesterday — no restart"
+  exp_at=$((now - 86400))
+  apply_secret "$INFRA_NS" generic edge-licence \
+    --from-literal=licence="$(mint_licence "$tdir/licence.pem" lic_kind_expired "$exp_at")" >/dev/null
+  # The kubelet refreshes the mounted Secret within about a minute; each scrape re-reads it.
+  i=0
+  while :; do
+    m="$(cp_scrape)"; v="$(metric_of "$m" edge_licence_valid)"; e="$(metric_of "$m" edge_licence_expiry_timestamp_seconds)"
+    [ "$v" = 0 ] && awk -v a="$e" -v b="$exp_at" 'BEGIN{exit !(a == b)}' && break
+    i=$((i + 1)); [ "$i" -lt 60 ] || die "PHASE35 FAIL: 3 minutes after the expired licence went in, edge_licence_valid=${v:-<absent>} expiry=${e:-<absent>} (want 0 and $exp_at)"
+    sleep 3
+  done
+  ok "edge_licence_valid 0, edge_licence_expiry_timestamp_seconds $e (yesterday)"
+  for host in tenant-a.local tenant-b.local; do
+    [ "$(gw_code "$host")" = 200 ] || die "PHASE35 FAIL: $host did not return 200 with an expired licence"
+  done
+  ok "tenant-a.local and tenant-b.local still 200"
+  # Each replica re-checks once a minute and warns when the state changes.
+  cp_logs() { k -n "$INFRA_NS" logs -l app.kubernetes.io/name=edge-control-plane --tail=-1 --since=10m 2>/dev/null | grep -F 'licence EXPIRED' | grep -F lic_kind_expired; }
+  i=0
+  until cp_logs >/dev/null; do
+    i=$((i + 1)); [ "$i" -lt 60 ] || die "PHASE35 FAIL: the control plane logged no warning for the expired licence"
+    sleep 3
+  done
+  ok "the control plane warned: $(cp_logs | tail -1 | jq -r '.msg')"
+
+  section "a cold start with the expired licence: control plane restarted, edge-proxy rolled for a fresh xDS connection"
+  k -n "$INFRA_NS" rollout restart deploy/edge-control-plane >/dev/null
+  wait_rollout deploy/edge-control-plane "$INFRA_NS" 240s >/dev/null || die "PHASE35 FAIL: the control plane did not come back Ready with an expired licence"
+  k -n edge rollout restart ds/edge-proxy >/dev/null
+  wait_rollout ds/edge-proxy edge 240s >/dev/null || die "PHASE35: edge-proxy did not roll"
+  for host in tenant-a.local tenant-b.local; do
+    i=0
+    until [ "$(gw_code "$host")" = 200 ]; do
+      i=$((i + 1)); [ "$i" -lt 30 ] || die "PHASE35 FAIL: $host is not served by a fresh Envoy from a control plane holding an expired licence"
+      sleep 2
+    done
+  done
+  m="$(cp_scrape)"; v="$(metric_of "$m" edge_licence_valid)"
+  [ "$v" = 0 ] || die "PHASE35 FAIL: after the restart edge_licence_valid=${v:-<absent>}, not 0"
+  rm -rf "${tdir:?}"
+  ok "PHASE 35 — with an expired licence edge_licence_valid is 0 and the control plane warns, and both tenants return 200, through a cold restart and a fresh Envoy"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -3570,7 +3665,8 @@ main() {
   phase34_helm_test         # before 32: the test pods pull their image
   phase32_no_internet
   phase33_kek_rotation
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS + every release passing its own helm test."
+  phase35_licence
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS + every release passing its own helm test + an expired licence warned about with edge_licence_valid 0 and both tenants still served."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

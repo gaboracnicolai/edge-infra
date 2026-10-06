@@ -83,6 +83,11 @@ type Config struct {
 	// B28.228: each agent's rate limit through edge-egress, and the decision log.
 	EgressAgentRequestsPerMinute uint32 // EGRESS_AGENT_REQUESTS_PER_MINUTE: per agent, per edge-egress Envoy; 0 = no limit
 	EgressDecisionLog            bool   // EGRESS_DECISION_LOG: record every edge-egress decision in edge_decisions
+
+	// B28.238: the Talyvor Edge licence. Advisory — it is logged and exported as
+	// edge_licence_valid, and no traffic depends on it.
+	LicenceFile       string // EDGE_LICENCE_FILE: the installed licence token
+	LicencePublicKeys string // EDGE_LICENCE_PUBLIC_KEYS: keys trusted beside Talyvor's, comma-separated base64
 }
 
 func FromEnv() (*Config, error) {
@@ -153,6 +158,9 @@ func FromEnv() (*Config, error) {
 	c.EgressSystemCAFile = getenv("EGRESS_SYSTEM_CA_FILE", "/etc/ssl/certs/ca-certificates.crt")
 	c.EgressAgentRequestsPerMinute = getenvU32("EGRESS_AGENT_REQUESTS_PER_MINUTE", 0)
 	c.EgressDecisionLog = getenvBool("EGRESS_DECISION_LOG", true)
+
+	c.LicenceFile = getenv("EDGE_LICENCE_FILE", "/etc/edge-licence/licence")
+	c.LicencePublicKeys = os.Getenv("EDGE_LICENCE_PUBLIC_KEYS")
 
 	return c, nil
 }
