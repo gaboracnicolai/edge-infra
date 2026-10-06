@@ -34,16 +34,35 @@ tls:
 # ext_authz gRPC leg. This only MOUNTS the secret on the Envoy pod; the control
 # plane renders the ext_authz cluster and points at these files via its own
 # extAuthz.caFile/certFile/keyFile — whose directory MUST equal mountPath here.
-# Deploy order at cutover: apply k8s/certs/envoy-authz-client-cert.yaml FIRST (the
-# secret is cert-manager-issued, NOT ArgoCD-managed), then enable this + the
-# control-plane extAuthz together. The volume is required (not optional): if the
-# secret is absent the pod won't start — a loud, correct failure vs. silent
+# While this is enabled the chart issues the secret (certificate.*); enable it +
+# the control-plane extAuthz together. The volume is required (not optional): if
+# the secret is absent the pod won't start — a loud, correct failure vs. silent
 # plaintext. Keep in lockstep with edge-control-plane extAuthz.enabled.
 extAuthz:
   clientTLS:
     enabled: true
     existingSecret: envoy-authz-client-tls-secret
     mountPath: /etc/authz-client-tls
+
+# The certificates in the three Secrets above, issued by cert-manager when the
+# chart is installed, so no certificate is applied by hand: Envoy's xDS client
+# certificate (while xds.tls.enabled), its ext_authz client certificate (while
+# extAuthz.clientTLS.enabled) and its serving certificate (tls.existingSecret,
+# for serving.dnsNames). The issuer is the edge-pki chart's internal CA unless
+# issuerRef names your own; it must be the CA the control plane and the
+# auth-service trust. create: false to bring the Secrets yourself. edge-egress,
+# installed in this namespace, mounts the same two client Secrets.
+certificate:
+  create: true
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  duration: 2160h   # the two client certificates: 90 days
+  renewBefore: 360h # 15 days
+  serving:
+    dnsNames: ["*.edge.io"]   # [] = no serving certificate
+    duration: 12h
+    renewBefore: 4h
 
 # Pull secret(s) for private images, wired onto the ServiceAccount so pods (and
 # hook Jobs) can pull without a manual `kubectl patch sa`. e.g. [{name: ghcr}].

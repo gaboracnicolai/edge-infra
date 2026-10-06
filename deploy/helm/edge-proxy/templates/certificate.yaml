@@ -1,0 +1,73 @@
+{{- with .Values.certificate }}
+{{- if .create }}
+{{- if $.Values.xds.tls.enabled }}
+# Envoy's client identity to the control plane's xDS server, which requires one.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: envoy-xds-client-cert
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-proxy.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ $.Values.xds.tls.existingSecret }}
+  duration: {{ .duration }}
+  renewBefore: {{ .renewBefore }}
+  commonName: envoy-xds-client
+  dnsNames:
+    - envoy-xds-client
+  issuerRef:
+    {{- toYaml .issuerRef | nindent 4 }}
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+---
+{{- end }}
+{{- if $.Values.extAuthz.clientTLS.enabled }}
+# Envoy's client identity to the auth-service on the ext_authz leg. Its ca.crt
+# also lets Envoy verify the auth-service's serving certificate.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: envoy-authz-client-cert
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-proxy.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ $.Values.extAuthz.clientTLS.existingSecret }}
+  duration: {{ .duration }}
+  renewBefore: {{ .renewBefore }}
+  commonName: envoy-authz-client
+  dnsNames:
+    - envoy-authz-client
+  issuerRef:
+    {{- toYaml .issuerRef | nindent 4 }}
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+---
+{{- end }}
+{{- if and $.Values.tls.existingSecret .serving.dnsNames }}
+# Envoy's serving certificate.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: envoy-serving-cert
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-proxy.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ $.Values.tls.existingSecret }}
+  duration: {{ .serving.duration }}
+  renewBefore: {{ .serving.renewBefore }}
+  dnsNames:
+    {{- toYaml .serving.dnsNames | nindent 4 }}
+  issuerRef:
+    {{- toYaml .issuerRef | nindent 4 }}
+  usages:
+    - server auth
+{{- end }}
+{{- end }}
+{{- end }}

@@ -127,7 +127,7 @@ data:
           # from envoy-xds-client-tls-secret at xds.tls.mountPath) satisfies the
           # server's RequireAndVerifyClientCert; the server is verified by CA +
           # SAN. SAN is pinned to controlPlaneHost — the control-plane server
-          # cert SAN (k8s/certs/control-plane-cert.yaml dnsNames) MUST equal this
+          # cert SAN (edge-control-plane's certificate.yaml dnsNames) MUST equal this
           # host, or the handshake fails.
           transport_socket:
             name: envoy.transport_sockets.tls

@@ -1,0 +1,59 @@
+# The cluster's Edge certificate authorities, as cert-manager ClusterIssuers.
+# Install this chart once per cluster, after cert-manager and before the other
+# Edge charts: each of them asks the internal CA for its own certificate (their
+# certificate.* values), so a fresh install applies no certificate by hand.
+#
+#   helm install edge-pki deploy/helm/edge-pki -n cert-manager
+
+# cert-manager's cluster resource namespace (its --cluster-resource-namespace,
+# cert-manager by default): a ClusterIssuer of type ca reads its CA Secret from
+# there, so the CA certificates below are issued into it.
+clusterResourceNamespace: cert-manager
+
+# The CA every Edge component's certificate chains to: the control plane, the
+# issuer, the auth-service, the OSB broker and Envoy's client and serving
+# certificates. Each chart names it in certificate.issuerRef.
+internalCA:
+  issuerName: edge-internal-ca
+  secretName: edge-root-ca-secret
+  # true: a self-signed root, generated in the cluster and renewed by cert-manager.
+  # false: bring your own — put your CA's tls.crt and tls.key in secretName in
+  # clusterResourceNamespace before you install, and this chart only names it.
+  selfSigned: true
+  commonName: edge-internal-ca
+  duration: 87600h    # 10 years
+  renewBefore: 720h
+
+# The trust root of agent certificates (SVIDs), a CA of its own: an agent's
+# certificate must never be valid as an Edge component's, nor the reverse.
+# csi-driver-spiffe signs with the edge-spiffe ClusterIssuer
+# (k8s/spiffe/csi-driver-spiffe-values.yaml, docs/agent-certificates.md).
+agentCA:
+  enabled: true
+  issuerName: edge-spiffe
+  secretName: edge-spiffe-ca
+  commonName: talyvor-edge-agent-ca
+  duration: 87600h
+  renewBefore: 720h
+
+# Pull secret(s) for the helm test image. e.g. [{name: ghcr}].
+imagePullSecrets: []
+
+# The image `helm test <release>` runs (templates/tests/): curl, asking the API
+# server whether every ClusterIssuer above is Ready. global.imageRegistry applies
+# to it too, so mirror it with the others for an air-gapped install.
+tests:
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"  # pinned digest
+    pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  # Pull every image this chart runs from this registry instead of the one each
+  # image names: a mirror, or the local registry of an air-gapped install (e.g.
+  # registry.internal:5000). The path is kept, so mirror the images under it:
+  # curlimages/curl -> <registry>/curlimages/curl.  "" = each image's own registry.
+  imageRegistry: ""

@@ -1,0 +1,107 @@
+# `helm test <release>`: every ClusterIssuer this chart installs is Ready — so its
+# CA Secret exists and holds a CA, and a certificate asked of it will be signed.
+# The pod reads them from the API server with a ServiceAccount allowed exactly
+# that: get on these ClusterIssuers.
+{{- $issuers := list .Values.internalCA.issuerName }}
+{{- if .Values.agentCA.enabled }}
+{{- $issuers = append $issuers .Values.agentCA.issuerName }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "edge-pki.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-pki.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "edge-pki.fullname" . }}-test
+  labels:
+    {{- include "edge-pki.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: ["cert-manager.io"]
+    resources: ["clusterissuers"]
+    resourceNames:
+      {{- toYaml $issuers | nindent 6 }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "edge-pki.fullname" . }}-test
+  labels:
+    {{- include "edge-pki.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "edge-pki.fullname" . }}-test
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "edge-pki.fullname" . }}-test
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-pki.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-pki.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "edge-pki.fullname" . }}-test
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-pki.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -u
+          sa=/var/run/secrets/kubernetes.io/serviceaccount
+          api="https://kubernetes.default.svc/apis/cert-manager.io/v1/clusterissuers"
+          ready() { # <issuer>: its Ready condition is True
+            curl -sS --max-time 10 --cacert "$sa/ca.crt" -H "Authorization: Bearer $(cat "$sa/token")" \
+              "$api/$1?pretty=false" | grep -o '{[^{}]*"type":"Ready"[^{}]*}' | grep -q '"status":"True"'
+          }
+          for issuer in {{ join " " $issuers }}; do
+            i=0
+            until ready "$issuer"; do
+              i=$((i + 1))
+              [ "$i" -lt 20 ] || { echo "FAIL: ClusterIssuer $issuer is not Ready"; exit 1; }
+              sleep 3
+            done
+            echo "PASS: ClusterIssuer $issuer is Ready"
+          done

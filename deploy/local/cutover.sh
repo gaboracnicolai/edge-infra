@@ -246,8 +246,9 @@ EOF
   rm -rf "$src"
   kind load docker-image --name "$CLUSTER_NAME" "edge-control-plane:$PIN_TAG"
 
-  # k8s/certs/ is applied by hand on a real cluster (no ArgoCD app covers it), and
-  # the authz client cert is step 3 — so it does not exist before then.
+  # The edge-proxy chart issues the authz client cert only while
+  # extAuthz.clientTLS.enabled, which is step 3 — so it does not exist before then
+  # (these deletes matter only on a re-run over a cluster that got that far).
   section "withhold the ext_authz client cert until step 3"
   k -n edge delete certificate envoy-authz-client-cert --ignore-not-found
   k -n edge delete secret envoy-authz-client-tls-secret --ignore-not-found
@@ -345,11 +346,10 @@ step2_auth_service() {
 
 # ---- step 3: client certificate --------------------------------------------------
 step3_client_cert() {
-  section "STEP 3 — client certificate: issue envoy-authz-client-cert, mount it on every edge-proxy"
+  section "STEP 3 — client certificate: the edge-proxy chart issues envoy-authz-client-cert and mounts it on every edge-proxy"
   prober_start
-  k apply -f "$REPO_ROOT/k8s/certs/envoy-authz-client-cert.yaml"
-  k -n edge wait --for=condition=Ready certificate/envoy-authz-client-cert --timeout=120s
   proxy_release true
+  k -n edge wait --for=condition=Ready certificate/envoy-authz-client-cert --timeout=120s
   k -n edge rollout status ds/edge-proxy --timeout=180s
   sleep 3
   prober_stop "step 3" tolerate-unanswered

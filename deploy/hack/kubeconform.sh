@@ -47,7 +47,7 @@ everything() { # chart
 		--set autoscaling.targetCPUUtilizationPercentage=80)
 	local np=(--set networkPolicy.enabled=true --set 'networkPolicy.gatewayCIDRs[0]=10.0.0.0/8')
 	case "$1" in
-	edge-proxy) ;;
+	edge-proxy | edge-pki) ;;
 	edge-datastores) echo --set networkPolicy.enabled=true ;;
 	edge-observability) echo --set networkPolicy.enabled=true --set prometheusOperator.enabled=true ;;
 	edge-egress | edge-secrets) echo --set networkPolicy.enabled=true "${hpa[@]}" ;;

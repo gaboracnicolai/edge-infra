@@ -1,0 +1,32 @@
+{{- if .Values.certificate.create }}
+{{- with .Values.tls }}
+{{- if .existingSecret }}
+{{- $svc := include "edge-control-plane.fullname" $ }}
+# The control plane's xDS serving certificate, also its client identity.
+# Issued into tls.existingSecret from certificate.issuerRef (by default the
+# edge-pki chart's internal CA), when the chart is installed.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: edge-cp-tls
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-control-plane.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ .existingSecret }}
+  duration: {{ $.Values.certificate.duration }}
+  renewBefore: {{ $.Values.certificate.renewBefore }}
+  dnsNames:
+    {{- with $.Values.certificate.dnsNames }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - {{ $svc }}.{{ $.Release.Namespace }}.svc.cluster.local
+    {{- end }}
+  issuerRef:
+    {{- toYaml $.Values.certificate.issuerRef | nindent 4 }}
+  usages:
+    - server auth
+    - client auth
+{{- end }}
+{{- end }}
+{{- end }}

@@ -78,9 +78,22 @@ sharedHttpsPort: 443
 # cert-manager-issued secret and is told to use verify-full Postgres TLS and
 # mutual NATS TLS. Leave unset for local/plaintext dev.
 tls:
-  existingSecret: osb-client-tls-secret  # created by k8s/certs/osb-client-cert.yaml
+  existingSecret: osb-client-tls-secret  # issued by this chart (certificate.*)
   mountPath: /etc/osb-tls
   dbSslMode: verify-full
+
+# The certificate in tls.existingSecret, issued by cert-manager when the chart is
+# installed, so no certificate is applied by hand. The issuer is the edge-pki
+# chart's internal CA unless issuerRef names your own. create: false to bring the
+# Secret yourself. dnsNames: [] = the names of this chart's Service.
+certificate:
+  create: true
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  dnsNames: []
+  duration: 2160h   # 90 days
+  renewBefore: 360h # 15 days
 
 # Pull secret(s) for private images, wired onto the ServiceAccount so pods (and
 # hook Jobs) can pull without a manual `kubectl patch sa`. e.g. [{name: ghcr}].

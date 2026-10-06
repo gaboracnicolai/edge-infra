@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "edge-pki values",
+  "type": "object",
+  "properties": {
+    "clusterResourceNamespace": {
+      "type": "string",
+      "minLength": 1
+    },
+    "internalCA": {
+      "type": "object",
+      "properties": {
+        "selfSigned": {
+          "type": "boolean"
+        },
+        "issuerName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commonName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "duration": {
+          "type": "string",
+          "minLength": 1
+        },
+        "renewBefore": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "issuerName",
+        "secretName"
+      ],
+      "additionalProperties": false
+    },
+    "agentCA": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "issuerName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commonName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "duration": {
+          "type": "string",
+          "minLength": 1
+        },
+        "renewBefore": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "issuerName",
+        "secretName"
+      ],
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "tests": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": [
+                "string",
+                "number"
+              ]
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          },
+          "required": [
+            "repository",
+            "tag"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "global": {
+      "type": "object",
+      "properties": {
+        "imageRegistry": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

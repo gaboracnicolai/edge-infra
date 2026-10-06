@@ -113,7 +113,7 @@ kind-e2e` Phase 25 provisions such a service through the OSB broker on the fresh
 exactly that.
 
 What on-by-default needs on the same install: the `auth-service` and `edge-issuer` charts, and the
-`envoy-authz-client-tls-secret` that `edge-proxy` mounts (`k8s/certs/envoy-authz-client-cert.yaml`).
+`envoy-authz-client-tls-secret` that `edge-proxy` mounts (the chart issues it; `certificate.*`).
 Turning ext_authz **off** again while a `jwt` route exists still freezes the fleet on last-good —
 that is the guard working, and it is why rollback is a database mutation; see
 [docs/ext-authz-cutover-and-rollback.md](docs/ext-authz-cutover-and-rollback.md).
@@ -210,7 +210,8 @@ by CI; `osb-test.yaml` covers the same ground.
 | `internal/store`, `internal/migrate`, `migrations/` | Postgres store, migration runner, schemas |
 | `deploy/helm`, `deploy/envs`, `deploy/argocd` | charts, per-environment overlays, GitOps applications |
 | `deploy/local` | scripted kind standup (9 phases) and the security proofs |
-| `k8s/policies`, `k8s/certs` | Kyverno policies (GitOps-managed); cert-manager Certificates (**not** GitOps-managed) |
+| `k8s/policies` | Kyverno policies (GitOps-managed) |
+| `deploy/helm/edge-pki` | the cert-manager CAs; every other chart issues its own certificate from them (`certificate.*`) |
 
 ---
 

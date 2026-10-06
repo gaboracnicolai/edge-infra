@@ -15,7 +15,7 @@
 #   1  kind cluster (no default CNI) + Calico
 #   2  cluster deps: cert-manager, Kyverno, Postgres, NATS
 #   3  build local images (all 7 targets) + load into the cluster
-#   4  data-plane PKI (cert-manager Certificates)
+#   4  data-plane PKI (the edge-pki chart: the CAs; each chart issues its own certificate)
 #   5  admin PKI (bootstrap-pki.sh) + app secrets
 #   6  migrate the shared DB (control-plane + OSB schemas)
 #   7  deploy all charts with dev overlays, extAuthz at its chart default (ON)
@@ -273,40 +273,25 @@ verify_phase3() {
   ok "Phase 3 verified"
 }
 
-# ---- Phase 4 — data-plane PKI (cert-manager Certificates) -------------------
+# ---- Phase 4 — data-plane PKI (the edge-pki chart) ---------------------------
+# The CAs only. No certificate is applied by hand: each chart issues its own
+# from edge-internal-ca when Phase 7 installs it (B28.237).
 phase4_dataplane_pki() {
-  section "PHASE 4 — data-plane PKI (cert-manager Certificates)"
-  # Order matters: selfSigned root -> CA ClusterIssuer -> leaves.
-  section "root CA bootstrap (selfsigned-bootstrap -> edge-root-ca)"
-  k apply -f "$REPO_ROOT/k8s/certs/root-ca-bootstrap.yaml"
-  k -n cert-manager wait --for=condition=Ready certificate/edge-root-ca --timeout=180s
-
-  section "edge-internal-ca ClusterIssuer"
-  k apply -f "$REPO_ROOT/k8s/certs/cluster-issuer.yaml"
-  k wait --for=condition=Ready clusterissuer/edge-internal-ca --timeout=120s
-
-  section "leaf Certificates (4 in $INFRA_NS, 3 in edge)"
-  local c
-  for c in auth-service-cert control-plane-cert issuer-cert osb-client-cert \
-           envoy-serving-cert envoy-xds-client-cert envoy-authz-client-cert; do
-    k apply -f "$REPO_ROOT/k8s/certs/$c.yaml"
-  done
-  section "waiting for leaf Certificates Ready"
-  k -n "$INFRA_NS" wait --for=condition=Ready certificate --all --timeout=180s
-  k -n edge        wait --for=condition=Ready certificate --all --timeout=180s
-  ok "all Certificates issued"
+  section "PHASE 4 — data-plane PKI (helm install edge-pki: the internal CA and the agent CA)"
+  h upgrade --install edge-pki "$REPO_ROOT/deploy/helm/edge-pki" -n cert-manager \
+    --wait --timeout 180s
+  k wait --for=condition=Ready clusterissuer/edge-internal-ca clusterissuer/edge-spiffe --timeout=120s
+  ok "edge-internal-ca and edge-spiffe Ready"
 }
 
 verify_phase4() {
-  section "VERIFY Phase 4 — cert-manager minted every expected secret"
-  local s ok_all=1
-  for s in auth-service-tls-secret edge-cp-tls-secret issuer-tls-secret osb-client-tls-secret; do
-    if k -n "$INFRA_NS" get secret "$s" >/dev/null 2>&1; then ok "$INFRA_NS/$s"; else warn "MISSING $INFRA_NS/$s"; ok_all=0; fi
+  section "VERIFY Phase 4 — the CAs come from the edge-pki release"
+  local i rel
+  for i in edge-internal-ca edge-spiffe; do
+    rel="$(k get clusterissuer "$i" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')"
+    [ "$rel" = edge-pki ] || die "ClusterIssuer $i is not from the edge-pki release (release '$rel')"
+    ok "clusterissuer/$i <- helm release edge-pki"
   done
-  for s in envoy-serving-tls-secret envoy-xds-client-tls-secret envoy-authz-client-tls-secret; do
-    if k -n edge get secret "$s" >/dev/null 2>&1; then ok "edge/$s"; else warn "MISSING edge/$s"; ok_all=0; fi
-  done
-  [ "$ok_all" = 1 ] || die "some cert-manager secrets are missing"
   ok "Phase 4 verified"
 }
 
@@ -521,7 +506,36 @@ verify_phase7() {
       | jq -r '[.configs[]?.dynamic_active_clusters[]?]|length as $c|null|"    dynamic_active_clusters=\($c)"' 2>/dev/null || true
     kill "$pf" >/dev/null 2>&1 || true; wait "$pf" 2>/dev/null || true
   fi
+  verify_chart_certificates
   ok "Phase 7 verified (all required charts Ready via --wait)"
+}
+
+# Every certificate the stack serves or presents was issued by the chart that
+# uses it — nothing in infra or edge was applied by hand (B28.237).
+verify_chart_certificates() {
+  section "VERIFY — every Certificate is a chart's, Ready, and its Secret exists"
+  local ns s n=0 name rel ready
+  for ns in "$INFRA_NS" edge; do
+    k -n "$ns" wait --for=condition=Ready certificate --all --timeout=120s >/dev/null \
+      || die "a certificate in $ns was not issued"
+    while IFS='|' read -r name rel ready; do
+      [ -n "$name" ] || continue
+      [ -n "$rel" ] || die "certificate $ns/$name belongs to no helm release — applied by hand"
+      [ "$ready" = True ] || die "certificate $ns/$name (release $rel) is not Ready"
+      ok "certificate $ns/$name <- helm release $rel, Ready"
+      n=$((n + 1))
+    done < <(k -n "$ns" get certificate -o json | jq -r '.items[] | [.metadata.name,
+      (.metadata.annotations["meta.helm.sh/release-name"] // ""),
+      ((.status.conditions // [])[] | select(.type == "Ready") | .status)] | join("|")')
+  done
+  for s in auth-service-tls-secret edge-cp-tls-secret issuer-tls-secret; do
+    k -n "$INFRA_NS" get secret "$s" >/dev/null 2>&1 || die "MISSING $INFRA_NS/$s"
+  done
+  for s in envoy-serving-tls-secret envoy-xds-client-tls-secret envoy-authz-client-tls-secret; do
+    k -n edge get secret "$s" >/dev/null 2>&1 || die "MISSING edge/$s"
+  done
+  [ "$n" -ge 6 ] || die "expected at least 6 chart certificates, found $n"
+  ok "$n certificates, every one issued by the chart that uses it"
 }
 
 # ---- Phase 8 — seed two tenants (backends + gateway/route) -------------------
@@ -2268,7 +2282,7 @@ phase26_signed_images() {
 
 # ---- Phase 27 — agent certificates (SVIDs) from csi-driver-spiffe (B28.221) --
 # csi-driver-spiffe gives every agent pod that mounts its volume a short-lived
-# certificate for its SPIFFE ID, signed by the edge-spiffe CA (k8s/spiffe). That
+# certificate for its SPIFFE ID, signed by the edge-spiffe CA (the edge-pki chart). That
 # CA is the trust bundle: loaded through the edge-secrets custodian as a
 # validation_context, named by an mtls route, and served to Envoy over SDS. A pod
 # without a certificate from it never gets past the TLS handshake.
@@ -2343,7 +2357,7 @@ phase27_agent_svids() {
   tmp="$(mktemp -d)"
 
   section "the agent trust root (edge-spiffe CA) and csi-driver-spiffe $CSI_DRIVER_SPIFFE_VERSION, trust domain $SPIFFE_TRUST_DOMAIN"
-  k apply -f "$REPO_ROOT/k8s/spiffe/trust-root.yaml" >/dev/null
+  # The edge-pki chart (Phase 4) installed the agent CA; nothing to apply.
   k -n cert-manager wait --for=condition=Ready certificate/edge-spiffe-ca --timeout=120s >/dev/null
   k wait --for=condition=Ready clusterissuer/edge-spiffe --timeout=120s >/dev/null
   h upgrade --install cert-manager-csi-driver-spiffe cert-manager-csi-driver-spiffe \
@@ -3029,7 +3043,7 @@ phase34_helm_test() {
   local t rel ns
   for t in edge-control-plane:"$INFRA_NS" edge-issuer:"$INFRA_NS" auth-service:"$INFRA_NS" \
            edge-osb:"$INFRA_NS" edge-ratelimit:"$INFRA_NS" edge-secrets:"$INFRA_NS" \
-           edge-proxy:edge edge-egress:edge; do
+           edge-proxy:edge edge-egress:edge edge-pki:cert-manager; do
     rel="${t%%:*}"; ns="${t#*:}"
     section "helm test $rel -n $ns"
     h test "$rel" -n "$ns" --logs --timeout 300s \
@@ -3038,10 +3052,10 @@ phase34_helm_test() {
   done
   # Passed: clear them, so no later phase meets a Completed pod among a
   # release's (Phase 32 reads every auth-service pod's metrics).
-  for ns in "$INFRA_NS" edge; do
+  for ns in "$INFRA_NS" edge cert-manager; do
     k -n "$ns" delete pod -l app.kubernetes.io/component=helm-test --ignore-not-found --wait=true >/dev/null
   done
-  ok "PHASE 34 — every release passes its own helm test: each chart's test pod reached its service through the Service and the chart's NetworkPolicy"
+  ok "PHASE 34 — every release passes its own helm test: each chart's test pod reached its service through the Service and the chart's NetworkPolicy, and edge-pki's found its CAs Ready"
 }
 
 # ---- Phase 32 — no internet at run time (B28.231) -----------------------------

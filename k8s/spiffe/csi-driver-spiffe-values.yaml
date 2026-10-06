@@ -1,6 +1,6 @@
 # Values for jetstack's cert-manager-csi-driver-spiffe chart (v0.15.0), which
-# issues every agent pod its SVID from the edge-spiffe ClusterIssuer in
-# trust-root.yaml:
+# issues every agent pod its SVID from the edge-spiffe ClusterIssuer that the
+# edge-pki chart installs (agentCA):
 #
 #   helm upgrade --install cert-manager-csi-driver-spiffe cert-manager-csi-driver-spiffe \
 #     --repo https://charts.jetstack.io --version v0.15.0 \

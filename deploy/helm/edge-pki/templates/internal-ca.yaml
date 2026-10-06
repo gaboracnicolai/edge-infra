@@ -1,0 +1,45 @@
+{{- with .Values.internalCA }}
+{{- if .selfSigned }}
+# A self-signed issuer that mints exactly one certificate: the internal CA's root.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .issuerName }}-selfsigned
+  labels:
+    {{- include "edge-pki.labels" $ | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+# The root: its key pair lands in secretName, which the CA issuer below signs with.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .secretName }}
+  namespace: {{ $.Values.clusterResourceNamespace }}
+  labels:
+    {{- include "edge-pki.labels" $ | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ .commonName }}
+  secretName: {{ .secretName }}
+  duration: {{ .duration }}
+  renewBefore: {{ .renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ .issuerName }}-selfsigned
+    kind: ClusterIssuer
+---
+{{- end }}
+# The issuer every Edge chart's certificate.issuerRef names.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .issuerName }}
+  labels:
+    {{- include "edge-pki.labels" $ | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ .secretName }}
+{{- end }}
