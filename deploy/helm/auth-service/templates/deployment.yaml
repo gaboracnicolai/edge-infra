@@ -55,7 +55,7 @@ spec:
         # Refuses to let auth-service start unless a fresh attestation report
         # verifies; the reason lands in this container's termination message.
         - name: attest
-          image: "{{ .attestation.image.repository }}:{{ .attestation.image.tag }}"
+          image: {{ include "auth-service.image" (dict "image" .attestation.image "global" $.Values.global) | quote }}
           imagePullPolicy: {{ .attestation.image.pullPolicy }}
           args: ["gate"]
           env:
@@ -90,7 +90,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "auth-service.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: grpc

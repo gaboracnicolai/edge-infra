@@ -19,6 +19,11 @@ global:
     createSecret: true
   # Pull secrets for every pod here, e.g. [{name: ghcr}].
   imagePullSecrets: []
+  # Pull every image here (Postgres, Redis, NATS, the schema job) from this
+  # registry instead, the path kept: redis -> <registry>/library/redis,
+  # ghcr.io/gaboracnicolai/edge-migrate -> <registry>/gaboracnicolai/edge-migrate.
+  # "" = each image's own registry.
+  imageRegistry: ""
 
 # ---- bundled datastores (subcharts in charts/) -------------------------------
 postgres:

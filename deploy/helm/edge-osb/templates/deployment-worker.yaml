@@ -19,7 +19,7 @@ spec:
       serviceAccountName: {{ include "edge-osb.serviceAccountName" . }}
       containers:
         - name: worker
-          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          image: {{ include "edge-osb.image" (dict "image" .Values.worker.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
           command:
             - python

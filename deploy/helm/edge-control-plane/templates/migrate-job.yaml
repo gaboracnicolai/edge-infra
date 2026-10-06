@@ -24,7 +24,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: "{{ .Values.migrate.image.repository }}:{{ .Values.migrate.image.tag }}"
+          image: {{ include "edge-control-plane.image" (dict "image" .Values.migrate.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.migrate.image.pullPolicy }}
           env:
             # The SAME shared-DB DSN the control-plane uses (co-location).
