@@ -12,8 +12,8 @@ service it runs boots, serves and refreshes its keys from inside your cluster:
 | `edge-proxy` (Envoy) | the control plane and the routes' backends, in the cluster |
 | `edge-egress` | the control plane, and the outside hosts **you** list in `egress_destinations` |
 
-Edge makes no call to Talyvor: nothing phones home, and no licence check needs
-the network. The only outside names Edge ever looks up are the
+Edge makes no call to Talyvor: nothing phones home, and the licence check
+([licence.md](licence.md)) needs no network. The only outside names Edge ever looks up are the
 `egress_destinations` rows you add for your agents.
 
 Installing still needs the images: pull them from your own registry with

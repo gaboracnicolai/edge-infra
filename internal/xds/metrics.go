@@ -146,11 +146,13 @@ func (c *reconcilerCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // NewMetricsHandler returns an http.Handler serving the reconciler's observability
-// counters in Prometheus text format. It uses a dedicated registry (not the global
-// default) so the exposition is exactly these metrics — matching the per-service
-// registries the sibling services use (auth-service, osb).
-func NewMetricsHandler(src reconcilerCounters) http.Handler {
+// counters, and any extra collectors (the licence's), in Prometheus text format. It
+// uses a dedicated registry (not the global default) so the exposition is exactly
+// these metrics — matching the per-service registries the sibling services use
+// (auth-service, osb).
+func NewMetricsHandler(src reconcilerCounters, extra ...prometheus.Collector) http.Handler {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(newReconcilerCollector(src))
+	reg.MustRegister(extra...)
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }

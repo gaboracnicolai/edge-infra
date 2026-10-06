@@ -30,6 +30,7 @@ import (
 	"github.com/edge-infra/control-plane/internal/decisions"
 	"github.com/edge-infra/control-plane/internal/ha"
 	"github.com/edge-infra/control-plane/internal/keycrypt"
+	"github.com/edge-infra/control-plane/internal/licence"
 	"github.com/edge-infra/control-plane/internal/store"
 	"github.com/edge-infra/control-plane/internal/xds"
 	"github.com/edge-infra/control-plane/internal/xds/builders"
@@ -62,6 +63,11 @@ func run(log *slog.Logger) error {
 	ring, err := keycrypt.ParseKeyring(os.Getenv("SECRET_KEK"), os.Getenv("SECRET_KEK_PREVIOUS"))
 	if err != nil {
 		return fmt.Errorf("SECRET_KEK / SECRET_KEK_PREVIOUS: %w", err)
+	}
+
+	licenceKeys, err := licence.TrustedKeys(cfg.LicencePublicKeys)
+	if err != nil {
+		log.Warn("EDGE_LICENCE_PUBLIC_KEYS: a key was ignored", "err", err)
 	}
 
 	pgCtx, pgCancel := context.WithTimeout(rootCtx, 10*time.Second)
@@ -188,11 +194,17 @@ func run(log *slog.Logger) error {
 		errCh <- runHealthServer(rootCtx, healthSrv, log)
 	}()
 
+	// The Talyvor Edge licence (B28.238): checked offline, logged on every change
+	// and exported as edge_licence_valid. Advisory — nothing above depends on it,
+	// so an expired or missing licence never drops traffic.
+	lic := licence.NewWatcher(cfg.LicenceFile, licenceKeys, log)
+	go lic.Run(rootCtx, time.Minute)
+
 	// Metrics HTTP server (additive; read-only view of the reconciler's
 	// fail-static guard counters). Exposes xds_snapshots_blocked_total on :2112 —
 	// the port the edge-control-plane chart already declares and scrapes — so prod
 	// can alert on withheld snapshots.
-	metricsSrv := newMetricsServer(metricsAddr, xds.NewMetricsHandler(reconciler))
+	metricsSrv := newMetricsServer(metricsAddr, xds.NewMetricsHandler(reconciler, lic))
 	go func() {
 		errCh <- runMetricsServer(rootCtx, metricsSrv, log)
 	}()

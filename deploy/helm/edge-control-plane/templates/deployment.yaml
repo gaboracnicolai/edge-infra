@@ -136,6 +136,14 @@ spec:
               value: {{ .Values.egress.agentRequestsPerMinute | quote }}
             - name: EGRESS_DECISION_LOG
               value: {{ .Values.egress.decisionLog | quote }}
+            # The Talyvor Edge licence (docs/licence.md): read from the mounted
+            # Secret, checked offline, advisory — nothing served depends on it.
+            - name: EDGE_LICENCE_FILE
+              value: /etc/edge-licence/licence
+            {{- with .Values.licence.publicKeys }}
+            - name: EDGE_LICENCE_PUBLIC_KEYS
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
@@ -186,6 +194,11 @@ spec:
               mountPath: {{ .mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.licence.existingSecret }}
+            - name: licence
+              mountPath: /etc/edge-licence
+              readOnly: true
+            {{- end }}
           # Readiness gates traffic/rollout on the server having published its
           # first xDS snapshot (/readyz → 503 until then), so a replica that is
           # up but not yet serving config is held out of rotation.
@@ -214,6 +227,20 @@ spec:
         - name: xds-tls
           secret:
             secretName: {{ .existingSecret }}
+        {{- end }}
+        {{- with .Values.licence }}
+        {{- if .existingSecret }}
+        # A whole-directory mount (no subPath), so a renewed licence reaches the
+        # pod without a restart. optional: a missing Secret is a missing licence,
+        # which must never keep the control plane from starting.
+        - name: licence
+          secret:
+            secretName: {{ .existingSecret }}
+            optional: true
+            items:
+              - key: {{ .secretKey }}
+                path: licence
+        {{- end }}
         {{- end }}
       {{- with .Values.affinity }}
       affinity:

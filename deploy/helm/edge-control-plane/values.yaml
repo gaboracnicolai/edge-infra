@@ -126,6 +126,21 @@ egress:
   agentRequestsPerMinute: 0
   decisionLog: true
 
+# The Talyvor Edge licence (docs/licence.md). Put the licence Talyvor gave you in
+# a Secret and name it here:
+#   kubectl -n infra create secret generic edge-licence --from-file=licence=licence.txt
+# The control plane checks it offline, logs a warning while it is missing, cannot
+# be verified or has expired, and exports edge_licence_valid (1 or 0) and
+# edge_licence_expiry_timestamp_seconds. It is advisory: an expired or missing
+# licence never changes what Edge serves. To renew, update the Secret; the
+# metric reads the new licence within a minute or two, with no restart.
+licence:
+  existingSecret: ""   # Secret holding the licence; "" = none installed
+  secretKey: licence   # key within that Secret
+  # Public keys trusted beside the ones built into Edge (base64 of the raw 32
+  # bytes). Leave empty unless Talyvor tells you otherwise.
+  publicKeys: []
+
 # R4 CO-LOCATION: this DSN and the edge-osb DATABASE_URL must reference the SAME
 # Postgres database (both schemas applied there), so the OSB translator can write
 # derived data-plane rows in the same transaction as the services row.

@@ -230,6 +230,24 @@
       },
       "additionalProperties": false
     },
+    "licence": {
+      "type": "object",
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "secretKey": {
+          "type": "string"
+        },
+        "publicKeys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "postgres": {
       "type": "object",
       "properties": {
