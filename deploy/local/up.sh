@@ -3032,13 +3032,13 @@ AIRGAP_JWKS_FILE="/etc/auth-service/jwks/corp.json"
 AIRGAP_SERVICE="e2e-offline"
 AIRGAP_REFRESH_S=15
 AIRGAP_STATE_DIR="${TMPDIR:-/tmp}/edge-airgap-$CLUSTER_NAME"
-# Every workload the Edge charts run: <namespace> <kind/name>.
-AIRGAP_WORKLOADS="$INFRA_NS deploy/edge-control-plane
-$INFRA_NS deploy/edge-issuer
-$INFRA_NS deploy/auth-service
-$INFRA_NS deploy/edge-osb
-edge daemonset/edge-proxy
-edge deploy/edge-egress"
+# Every release of the Edge charts: <namespace> <release>.
+AIRGAP_RELEASES="$INFRA_NS edge-control-plane
+$INFRA_NS edge-issuer
+$INFRA_NS auth-service
+$INFRA_NS edge-osb
+edge edge-proxy
+edge edge-egress"
 
 b64url_e() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
@@ -3143,7 +3143,7 @@ phase32_no_internet() {
   section "PHASE 32 — no internet at run time: every node cut off, the stack restarted cold, and not one DNS query for a name outside the cluster"
   local UMAIL="dev@edge.local" UPASS="devpassword-abc12345"
   local ISS="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"
-  local tdir aud issuers r sip n ns w out c tok1 tok2 itok i pods p ext all ok_refresh fail_refresh
+  local tdir aud issuers r sip n ns rel w x wl out c tok1 tok2 itok i pods p ext all ok_refresh fail_refresh
   need xxd
   tdir="$(mktemp -d)"
   trap 'airgap_lift' EXIT
@@ -3194,14 +3194,21 @@ phase32_no_internet() {
   ok "CoreDNS restarted with no forward, logging every query"
 
   section "restart every Edge workload from cold, offline"
+  wl=""
+  while read -r ns rel; do
+    w="$(k -n "$ns" get deploy,daemonset -l "app.kubernetes.io/instance=$rel" -o name)"
+    [ -n "$w" ] || die "PHASE32: release $rel runs no workload in $ns"
+    for x in $w; do wl="$wl$ns $x"$'\n'; done
+  done <<<"$AIRGAP_RELEASES"
   while read -r ns w; do
-    k -n "$ns" rollout restart "$w" >/dev/null
-  done <<<"$AIRGAP_WORKLOADS"
+    [ -n "$w" ] && k -n "$ns" rollout restart "$w" >/dev/null
+  done <<<"$wl"
   while read -r ns w; do
+    [ -n "$w" ] || continue
     k -n "$ns" rollout status "$w" --timeout=240s >/dev/null \
       || { k -n "$ns" describe "$w" | tail -20; die "PHASE32 FAIL: $ns/$w did not come back with no internet"; }
     ok "$ns/$w Ready"
-  done <<<"$AIRGAP_WORKLOADS"
+  done <<<"$wl"
 
   section "auth-service loaded every issuer's keys from inside the cluster"
   out="$(k -n "$INFRA_NS" logs deploy/auth-service --tail=-1 2>/dev/null | grep '"trusting issuer"' || true)"
