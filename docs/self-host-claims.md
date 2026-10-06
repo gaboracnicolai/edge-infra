@@ -109,8 +109,9 @@ chart's NetworkPolicy, which lets exactly that pod in on exactly that port. For
 each release this run installed it must pass: the control plane's metrics report
 a reconcile, the issuer serves its JWKS over TLS, auth-service and the broker
 answer their health checks, the rate-limit service answers a gRPC call, the
-secrets custodian refuses a client that has no certificate, each node's Envoy is
-LIVE, and `edge-egress` refuses a destination off its allow-list with 403.
+secrets custodian refuses a client with neither an operator certificate nor the
+admin key, each node's Envoy is
+LIVE and connected to its control plane, and `edge-egress` refuses a destination off its allow-list with 403.
 `make kind-datastores` runs the `edge-datastores` test (a pod holding only the
 connection Secret reaches Postgres, Redis and NATS) and `make kind-observability`
 the `edge-observability` one (every component answers on its Service). `make

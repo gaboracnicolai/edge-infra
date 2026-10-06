@@ -4,9 +4,10 @@
 # CNI that enforces NetworkPolicy). Kubelet probes still pass — traffic from a
 # pod's own node is never blocked.
 # Operator access only: nothing in the cluster calls the custodian, so no ingress
-# is allowed but this chart's own `helm test` pod (which holds no client cert, and
-# passes only when the custodian refuses it) and what networkPolicy.extraIngress
-# names (kubectl port-forward is not network traffic and still works).
+# is allowed but what networkPolicy.extraIngress names and this chart's own
+# `helm test` pod, which holds neither a client cert nor the admin key and passes
+# only when the custodian refuses it (kubectl port-forward is not network traffic
+# and still works).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

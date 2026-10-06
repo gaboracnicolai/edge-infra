@@ -1,8 +1,10 @@
 {{- if .Values.hostNetwork }}
-# `helm test <release>`: the Envoy on the node this pod lands on is up and has
-# its configuration — its readiness listener (:9902, the bootstrap's static
-# health listener) answers LIVE on the node's own address, where the gateway
-# listens.
+# `helm test <release>`: the Envoy on the node this pod lands on is serving and
+# connected to its control plane — on the node's own address, where the gateway
+# listens. Its readiness listener (:9902) answers 200, and its stats (:9903,
+# proxied from the localhost-only admin) show the server LIVE and the xDS stream
+# up. The readiness listener alone would not do: it is static, and answers
+# before Envoy has any configuration.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -44,11 +46,13 @@ spec:
       args:
         - |
           set -eu
-          url="http://$HOST_IP:9902/ready"
-          body="$(curl -fsS --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "$url")"
-          echo "GET $url -> $body"
-          case "$body" in
-            LIVE*) echo "PASS: the node's Envoy is up and serving its configuration" ;;
-            *) echo "FAIL: the node's Envoy is not LIVE"; exit 1 ;;
-          esac
+          ready="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "http://$HOST_IP:9902/ready")"
+          echo "GET http://$HOST_IP:9902/ready -> $ready"
+          stats="$(curl -fsS --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "http://$HOST_IP:9903/stats/prometheus")"
+          state="$(printf '%s\n' "$stats" | awk '$1 == "envoy_server_state{}" { print $2 }')"
+          xds="$(printf '%s\n' "$stats" | awk '$1 == "envoy_control_plane_connected_state{}" { print $2 }')"
+          echo "envoy_server_state = ${state:-absent} (0 is LIVE), envoy_control_plane_connected_state = ${xds:-absent}"
+          [ "$ready" = 200 ] && [ "$state" = 0 ] && [ "$xds" = 1 ] \
+            || { echo "FAIL: the node's Envoy is not serving, not LIVE, or not connected to its control plane"; exit 1; }
+          echo "PASS: the node's Envoy is LIVE and connected to its control plane"
 {{- end }}

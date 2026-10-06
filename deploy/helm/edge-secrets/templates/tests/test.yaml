@@ -1,6 +1,8 @@
 # `helm test <release>`: the custodian is up on its Service AND refuses a client
-# with no certificate — its listener is mutual TLS, operator certs only. A refused
-# or timed-out connection fails the test; only the TLS refusal passes it.
+# that holds neither an operator certificate nor the admin key. It runs one of two
+# ways (internal/secrets/tls.go): mTLS only, where such a client is refused at the
+# TLS handshake; or with the admin-key fallback, where the handshake completes and
+# a key read answers 401. Either refusal passes; a dead or open custodian fails.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -37,15 +39,16 @@ spec:
       args:
         - |
           set -eu
-          url="https://{{ include "edge-secrets.fullname" . }}:{{ .Values.service.port }}/"
+          url="https://{{ include "edge-secrets.fullname" . }}:{{ .Values.service.port }}/v1/secrets/helm-test"
           out=""; i=0
           while [ "$i" -lt 10 ]; do
-            out="$(curl -sSk --max-time 10 "$url" 2>&1 || true)"
-            case "$out" in *"certificate required"*) break ;; esac
+            out="$(curl -sSk --max-time 10 -o /dev/null -w '%{http_code}' "$url" 2>&1 || true)"
+            case "$out" in *"certificate required"* | 401) break ;; esac
             i=$((i + 1)); sleep 3
           done
-          echo "GET $url with no client certificate -> $out"
+          echo "GET $url with no certificate and no admin key -> $out"
           case "$out" in
-            *"certificate required"*) echo "PASS: the custodian answers on its Service and refuses a client without a certificate" ;;
-            *) echo "FAIL: expected the TLS alert 'certificate required'"; exit 1 ;;
+            *"certificate required"*) echo "PASS: the custodian answers on its Service and refuses a client without an operator certificate at the handshake" ;;
+            401) echo "PASS: the custodian answers on its Service and refuses a key read without a certificate or the admin key" ;;
+            *) echo "FAIL: expected the TLS alert 'certificate required' or a 401"; exit 1 ;;
           esac
