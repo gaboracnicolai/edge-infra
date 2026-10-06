@@ -45,12 +45,38 @@ resources:
 
 podAnnotations: {}
 
+# PodDisruptionBudget: a voluntary disruption (a node drain, a cluster upgrade)
+# evicts at most maxUnavailable of these pods at once. Set minAvailable to keep a
+# floor instead; when it is set it is used in place of maxUnavailable.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# HorizontalPodAutoscaler (autoscaling/v2) on CPU, off by default. While it is on
+# it owns the replica count (replicaCount is not rendered), and it needs the
+# cluster's metrics API (metrics-server). There is no default ceiling: set
+# maxReplicas when you switch it on.
+#   minReplicas                     default: replicaCount
+#   targetCPUUtilizationPercentage  default: Kubernetes' own (80)
+autoscaling:
+  enabled: false
+
+# The image `helm test <release>` runs (templates/tests/): curl, checking that the
+# release answers through its Service. global.imageRegistry applies to it too, so
+# mirror it with the others for an air-gapped install.
+tests:
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"  # pinned digest
+    pullPolicy: IfNotPresent
+
 nameOverride: ""
 fullnameOverride: ""
 
 # NetworkPolicy (B27.33): when enabled, no ingress reaches the custodian except
-# what extraIngress names (kubectl port-forward is not network traffic and
-# still works). Enforced by Calico (or any CNI that enforces NetworkPolicy).
+# what extraIngress names and this chart's own `helm test` pod, which holds no
+# client cert (kubectl port-forward is not network traffic and still works).
+# Enforced by Calico (or any CNI that enforces NetworkPolicy).
 networkPolicy:
   enabled: false
   extraIngress: []

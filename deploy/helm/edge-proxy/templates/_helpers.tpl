@@ -65,3 +65,13 @@ Call with (dict "image" <an image: block> "global" $.Values.global).
 {{- end -}}
 {{- printf "%s:%s" $repo (toString .image.tag) -}}
 {{- end -}}
+
+{{/*
+Labels of this chart's `helm test` pod (templates/tests/). Deliberately not the
+selector labels, so the DaemonSet and the Service never pick the test pod up.
+*/}}
+{{- define "edge-proxy.testLabels" -}}
+app.kubernetes.io/name: {{ include "edge-proxy.name" . }}-test
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: helm-test
+{{- end -}}

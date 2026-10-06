@@ -1,0 +1,28 @@
+{{- if .Values.autoscaling.enabled }}
+# Scales the Deployment on CPU. While this is on it owns the replica count
+# (replicaCount is not rendered), and it needs the cluster's metrics API
+# (metrics-server) to scale at all.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "edge-control-plane.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-control-plane.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "edge-control-plane.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas | default .Values.replicaCount }}
+  maxReplicas: {{ required "autoscaling.maxReplicas is required when autoscaling.enabled: there is no default ceiling" .Values.autoscaling.maxReplicas }}
+  {{- with .Values.autoscaling.targetCPUUtilizationPercentage }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+  {{- end }}
+{{- end }}

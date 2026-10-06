@@ -102,3 +102,18 @@ API holds the 429s, `rl-beta`'s 200 and Phase 30's 407s, all from
 `edge-egress`, and `scripts/verify-decisions.sh` verifies the chain from its
 first record. Rewritten from `rate_limited` to `allowed` in one record, the same
 export no longer verifies.
+
+Phase 34 runs every chart's own `helm test`. Each chart carries a test pod that
+reaches what it installs the way a client does — through its Service, past the
+chart's NetworkPolicy, which lets exactly that pod in on exactly that port. For
+each release this run installed it must pass: the control plane's metrics report
+a reconcile, the issuer serves its JWKS over TLS, auth-service and the broker
+answer their health checks, the rate-limit service answers a gRPC call, the
+secrets custodian refuses a client with neither an operator certificate nor the
+admin key, each node's Envoy is
+LIVE and connected to its control plane, and `edge-egress` refuses a destination off its allow-list with 403.
+`make kind-datastores` runs the `edge-datastores` test (a pod holding only the
+connection Secret reaches Postgres, Redis and NATS) and `make kind-observability`
+the `edge-observability` one (every component answers on its Service). `make
+kubeconform` validates everything the charts render, for every overlay, against
+the Kubernetes version kind runs.

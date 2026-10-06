@@ -3,7 +3,8 @@
 # that is deleted afterwards whether the drill passed or failed.
 #
 #   1. INSTALL  edge-observability into ns/monitoring, as its values.yaml says;
-#               Prometheus, Loki, Tempo, the collector and Grafana all Ready.
+#               Prometheus, Loki, Tempo, the collector and Grafana all Ready,
+#               and the chart's own `helm test` passes.
 #   2. RULES    Prometheus, asked through Grafana, has loaded every rule group in
 #               the chart's rules/ and evaluated every rule without an error.
 #   3. GATEWAY  an Envoy labelled and annotated like edge-proxy, with its stats
@@ -102,6 +103,8 @@ for d in prometheus loki tempo otel-collector grafana; do
   k -n "$NS" rollout status "deploy/$d" --timeout 60s >/dev/null || die "INSTALL: deploy/$d is not Ready"
 done
 ok "prometheus, loki, tempo, otel-collector and grafana are Ready"
+h test "$RELEASE" -n "$NS" --logs --timeout 5m || die "INSTALL: helm test $RELEASE did not pass"
+ok "helm test $RELEASE: every component answers on its Service"
 GF_PASS="$(k -n "$NS" get secret "$RELEASE-grafana" -o jsonpath='{.data.admin-password}' | base64 -d)"
 [ -n "$GF_PASS" ] || die "INSTALL: the chart made no Grafana admin password"
 pf_start

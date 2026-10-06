@@ -7,7 +7,9 @@ metadata:
     {{- include "edge-osb.labels" . | nindent 4 }}
     component: worker
 spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
   replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "edge-osb.workerSelectorLabels" . | nindent 6 }}
@@ -17,8 +19,18 @@ spec:
         {{- include "edge-osb.workerSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "edge-osb.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532   # the distroless nonroot uid:gid, as the api
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-osb.image" (dict "image" .Values.worker.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
           command:

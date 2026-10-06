@@ -65,3 +65,15 @@ Call with (dict "image" <an image: block> "global" $.Values.global).
 {{- end -}}
 {{- printf "%s:%s" $repo (toString .image.tag) -}}
 {{- end -}}
+
+{{/*
+Labels of this chart's `helm test` pod (templates/tests/). Deliberately not the
+selector labels, so the Service, the PodDisruptionBudget and the NetworkPolicy's
+own podSelector never pick the test pod up; the NetworkPolicy lets exactly these
+labels in, to the port the test checks.
+*/}}
+{{- define "edge-ratelimit.testLabels" -}}
+app.kubernetes.io/name: {{ include "edge-ratelimit.name" . }}-test
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: helm-test
+{{- end -}}

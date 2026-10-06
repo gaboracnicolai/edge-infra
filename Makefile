@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup kind-observability observability-rules
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup kind-observability observability-rules kubeconform
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -50,6 +50,12 @@ helm-template-dry-run:
 	  --values deploy/envs/staging/values-issuer.yaml
 	helm template edge-ratelimit deploy/helm/edge-ratelimit \
 	  --values deploy/envs/staging/values-ratelimit.yaml
+
+# Every chart rendered for base, every env overlay, the kind overlays and with
+# every optional resource on, validated by kubeconform -strict against the
+# Kubernetes version kind runs (B28.236). Needs helm and kubeconform.
+kubeconform:
+	bash deploy/hack/kubeconform.sh
 
 # Invariant lock: assert the edge-proxy bootstrap renders xDS mutual TLS with
 # peer pinning (SNI + SAN==controlPlaneHost) for base + every env overlay.

@@ -1,3 +1,13 @@
 # Local overlay for edge-egress (Phase 28). One replica, so the Envoy whose
 # counters the phase reads is the one that served every request.
 replicaCount: 1
+
+# The chart's NetworkPolicy on, for the namespaces the phases call it from:
+# Phase 28's agent namespace, and Phase 29's locked one by name as well as by
+# the label Phase 29 gives it (it calls edge-egress before and after).
+networkPolicy:
+  enabled: true
+  clientNamespaceSelectors:
+    - matchLabels: { kubernetes.io/metadata.name: agents }
+    - matchLabels: { kubernetes.io/metadata.name: agents-locked }
+    - matchLabels: { talyvor.io/agents: "true" }

@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "edge-secrets.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "edge-secrets.selectorLabels" . | nindent 6 }}
@@ -20,8 +22,22 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "edge-secrets.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        # Numeric UID/GID is REQUIRED: the distroless image's user is the NAME
+        # "nonroot", which the kubelet cannot verify as non-root at admission —
+        # runAsNonRoot alone then yields CreateContainerConfigError and the pod
+        # never starts. 65532 is the distroless nonroot uid:gid.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-secrets.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
@@ -58,7 +74,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.config.existingSecret }}
                   key: SECRET_KEK
-                  optional: true
                   optional: true
             # Mid-rotation only: the old KEK(s), comma-separated, which open but
             # never seal; `secrets reseal` moves every key off them (docs/kek-rotation.md).

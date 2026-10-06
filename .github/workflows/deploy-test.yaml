@@ -1,8 +1,8 @@
 name: Deploy Test
 
-# Lints every Helm chart and proves the edge-proxy xDS mTLS invariant
-# (SNI + SAN peer pinning) renders for base and every env overlay — offline,
-# no cluster. Closes the gap where deploy/** changes ran no CI, so a revert of
+# Lints every Helm chart, validates everything the charts render with kubeconform
+# (B28.236), and proves the edge-proxy xDS mTLS invariant (SNI + SAN peer
+# pinning) renders for base and every env overlay — offline, no cluster. Closes the gap where deploy/** changes ran no CI, so a revert of
 # xds.tls.enabled back to plaintext would otherwise pass CI silently.
 on:
   # Nightly on main too: what drifts without a commit (a base image, a fetched
@@ -43,6 +43,27 @@ jobs:
           for chart in deploy/helm/*/; do
             helm lint --strict "$chart"
           done
+      - name: Install kubeconform (pinned + checksum-verified)
+        env:
+          KUBECONFORM_VERSION: v0.7.0
+          KUBECONFORM_SHA256: c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+      - name: Every chart renders valid Kubernetes (kubeconform -strict)
+        run: make kubeconform
+      - name: The kubeconform check can fail
+        run: |
+          set -uo pipefail
+          if CHARTS=edge-ratelimit bash deploy/hack/kubeconform.sh --set podAnnotations.broken=1 >/dev/null; then
+            echo "kubeconform passed a Deployment with a numeric annotation"
+            exit 1
+          fi
+          echo "kubeconform refused a Deployment with a numeric annotation"
       - name: Verify xDS mTLS invariant
         run: make verify-xds-mtls
       - name: No image on a floating tag

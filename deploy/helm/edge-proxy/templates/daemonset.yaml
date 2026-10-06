@@ -24,8 +24,22 @@ spec:
       hostNetwork: {{ .Values.hostNetwork }}
       dnsPolicy: {{ if .Values.hostNetwork }}ClusterFirstWithHostNet{{ else }}ClusterFirst{{ end }}
       terminationGracePeriodSeconds: 30
+      # Envoy as the image's own envoy user (101), the uid its entrypoint would
+      # otherwise su-exec to from root — so the same process, never started as
+      # root. With no capabilities it binds :443 only where the node allows
+      # unprivileged low ports, exactly as before.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: bootstrap
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-proxy.image" (dict "image" .Values.bootstrapImage "global" .Values.global) | quote }}
           command:
             - /bin/sh
@@ -46,6 +60,10 @@ spec:
               mountPath: /etc/envoy
       containers:
         - name: envoy
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-proxy.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:

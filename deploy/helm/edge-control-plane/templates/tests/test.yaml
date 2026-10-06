@@ -1,0 +1,45 @@
+# `helm test <release>`: the control plane answers on its Service, and its
+# reconcile loop has run — the metrics it serves carry a last-reconcile time.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-control-plane.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-control-plane.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-control-plane.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          url="http://{{ include "edge-control-plane.fullname" . }}:{{ .Values.service.metricsPort }}/metrics"
+          body="$(curl -fsS --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "$url")"
+          last="$(printf '%s\n' "$body" | awk '$1 == "edge_cp_last_reconcile_timestamp_seconds" { print $2 }')"
+          echo "edge_cp_last_reconcile_timestamp_seconds = ${last:-absent}"
+          [ -n "$last" ] && awk -v t="$last" 'BEGIN { exit !(t > 0) }' \
+            || { echo "FAIL: $url does not report a reconcile"; exit 1; }
+          echo "PASS: the control plane answers on its Service and its reconcile loop has run"

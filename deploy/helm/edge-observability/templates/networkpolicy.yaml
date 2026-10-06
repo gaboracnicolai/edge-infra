@@ -1,0 +1,59 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+Default-deny ingress for the stores and Grafana, each open only on the ports the
+stack itself uses. The OpenTelemetry collector gets no policy: every Edge
+workload exports to it, the hostNetwork Envoys from their node's address.
+*/}}
+{{- $test := include "edge-observability.testLabels" . }}
+{{- $rules := list }}
+{{- if .Values.prometheus.enabled }}
+{{- $rules = append $rules (dict "name" "prometheus" "from" (list (dict "app" "grafana" "port" "http"))) }}
+{{- end }}
+{{- if .Values.loki.enabled }}
+{{- $rules = append $rules (dict "name" "loki" "from" (list (dict "app" "otel-collector" "port" "http") (dict "app" "grafana" "port" "http"))) }}
+{{- end }}
+{{- if .Values.tempo.enabled }}
+{{- $rules = append $rules (dict "name" "tempo" "from" (list (dict "app" "otel-collector" "port" "otlp-grpc") (dict "app" "otel-collector" "port" "otlp-http") (dict "app" "grafana" "port" "http"))) }}
+{{- end }}
+{{- if .Values.grafana.enabled }}
+{{- $rules = append $rules (dict "name" "grafana" "from" list) }}
+{{- end }}
+{{- range $rules }}
+---
+# Default-deny ingress to {{ .name }}: when networkPolicy.enabled only the flows
+# listed reach it; everything else is dropped by Calico (or any CNI that enforces
+# NetworkPolicy). Kubelet probes still pass — traffic from a pod's own node is
+# never blocked, and kubectl port-forward is not network traffic.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-observability.labels" (dict "ctx" $ "component" .name) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "edge-observability.selectorLabels" (dict "ctx" $ "component" .name) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    {{- range .from }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "edge-observability.selectorLabels" (dict "ctx" $ "component" .app) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .port }} }
+    {{- end }}
+    # This chart's own `helm test` pod (templates/tests/), to the one port it checks.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- $test | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: http }
+    {{- with index $.Values.networkPolicy.extraIngress .name }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

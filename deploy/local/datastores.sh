@@ -4,8 +4,9 @@
 #
 #   bundled   the chart runs Postgres, Redis and NATS itself: all three reach
 #             Ready, every migration is recorded in the edge database, and a pod
-#             that knows only the connection Secret reaches all three. An upgrade
-#             keeps the generated credentials and the pod still gets in.
+#             that knows only the connection Secret reaches all three — and so
+#             do the chart's own `helm test` pods. An upgrade keeps the generated
+#             credentials and the pod still gets in.
 #   external  the same chart with all three switched off and pointed at
 #             datastores it did not create: it runs no datastore of its own, the
 #             schema lands in the external Postgres (empty before the install),
@@ -160,6 +161,8 @@ done
 ok "Postgres, Redis and NATS Ready, each on a bound volume"
 assert_migrated "$BUNDLED_NS" "app.kubernetes.io/name=postgres" edge
 client_check "$BUNDLED_NS"
+h test "$RELEASE" -n "$BUNDLED_NS" --logs --timeout 5m || die "helm test $RELEASE did not pass"
+ok "helm test $RELEASE: the chart's own test pods reached Postgres, Redis and NATS with the connection Secret"
 
 section "BUNDLED — an upgrade keeps the credentials"
 before="$(k -n "$BUNDLED_NS" get secret "$SECRET" -o json | jq -cS .data)"

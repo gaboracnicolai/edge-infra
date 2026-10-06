@@ -1,0 +1,44 @@
+# `helm test <release>`: the issuer serves its signing keys (the JWKS the gateway's
+# auth-service verifies tokens against) over TLS on its Service.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-issuer.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-issuer.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-issuer.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          url="https://{{ include "edge-issuer.fullname" . }}:{{ .Values.service.port }}/.well-known/jwks.json"
+          # -k: this checks the issuer is up and serving keys, not the cluster's PKI.
+          body="$(curl -fsSk --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "$url")"
+          echo "$body"
+          printf '%s' "$body" | grep -q '"kid"' || { echo "FAIL: $url served no key"; exit 1; }
+          echo "PASS: the issuer serves its JWKS over TLS on its Service"

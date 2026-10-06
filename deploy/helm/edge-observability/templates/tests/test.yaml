@@ -1,0 +1,55 @@
+# `helm test <release>`: every component switched on answers on its Service —
+# Prometheus, Loki and Tempo ready, Grafana healthy, and the OpenTelemetry
+# collector accepting an OTLP export, the call every Edge workload makes to it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-observability.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-observability.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        {{- include "edge-observability.containerSecurityContext" . | nindent 8 }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -u
+          fail=0
+          check() { # <what> <expected HTTP code> <curl args...>
+            what="$1"; want="$2"; shift 2
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "$@")"
+            if [ "$code" = "$want" ]; then echo "PASS  $what -> $code"; else echo "FAIL  $what -> $code, want $want"; fail=1; fi
+          }
+          {{- if .Values.prometheus.enabled }}
+          check "Prometheus /-/ready" 200 http://prometheus:9090/-/ready
+          {{- end }}
+          {{- if .Values.loki.enabled }}
+          check "Loki /ready" 200 http://loki:3100/ready
+          {{- end }}
+          {{- if .Values.tempo.enabled }}
+          check "Tempo /ready" 200 http://tempo:3200/ready
+          {{- end }}
+          {{- if .Values.grafana.enabled }}
+          check "Grafana /api/health" 200 http://grafana:{{ .Values.grafana.service.port }}/api/health
+          {{- end }}
+          {{- if .Values.otelCollector.enabled }}
+          check "OTel collector OTLP/HTTP export" 200 -X POST -H 'content-type: application/json' -d '{}' http://otel-collector:4318/v1/traces
+          {{- end }}
+          exit "$fail"

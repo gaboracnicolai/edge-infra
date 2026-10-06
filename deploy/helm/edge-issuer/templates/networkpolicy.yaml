@@ -40,6 +40,13 @@ spec:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.authServiceNamespace | default .Release.Namespace | quote }}
       ports:
         - { protocol: TCP, port: https }
+    # This chart's own `helm test` pod (templates/tests/), to the one port it checks.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "edge-issuer.testLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: https }
     {{- with .Values.networkPolicy.extraIngress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

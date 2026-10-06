@@ -106,3 +106,14 @@ Call with (dict "image" <an image: block> "global" $.Values.global).
 {{- end -}}
 {{- printf "%s:%s" $repo (toString .image.tag) -}}
 {{- end -}}
+
+{{/*
+Labels of this chart's `helm test` pod (templates/tests/). No component's selector
+labels, so no Service picks the test pod up; the NetworkPolicies let exactly these
+labels in, to the port the test checks.
+*/}}
+{{- define "edge-observability.testLabels" -}}
+app.kubernetes.io/name: edge-observability-test
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: helm-test
+{{- end -}}

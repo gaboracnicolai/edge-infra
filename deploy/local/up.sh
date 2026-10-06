@@ -54,6 +54,9 @@
 #      query for a name outside it
 #  33  KEK rotation: every key re-sealed under a new SECRET_KEK, the old one
 #      dropped, and a fresh Envoy still served the same cert over SDS
+#  34  `helm test` passes for every release this run installed — each chart's
+#      own test pod reaches its service through the Service and the chart's
+#      NetworkPolicy (runs before 32, which cuts the image registry off)
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -240,9 +243,10 @@ phase3_images() {
     *) die "IMAGE_SOURCE is '$IMAGE_SOURCE' — build (the default) or registry" ;;
   esac
 
-  section "pulling public images (envoy, busybox)"
+  section "pulling public images (envoy, busybox, the charts' test image)"
   docker pull "$ENVOY_IMAGE"
   docker pull "$BUSYBOX_IMAGE"
+  docker pull "$TEST_IMAGE"
 
   section "kind load — importing images onto the cluster nodes"
   local img
@@ -254,7 +258,7 @@ phase3_images() {
     kind load docker-image --name "$CLUSTER_NAME" "$img"
   done
   # Public images: best-effort (the node can still pull them at runtime).
-  for img in "$ENVOY_IMAGE" "$BUSYBOX_IMAGE"; do
+  for img in "$ENVOY_IMAGE" "$BUSYBOX_IMAGE" "$TEST_IMAGE"; do
     kind load docker-image --name "$CLUSTER_NAME" "$img" \
       || warn "kind load $img failed — node will pull it at runtime"
   done
@@ -3015,6 +3019,31 @@ phase31_agent_rate_limits() {
   ok "PHASE 31 — per-agent rate limits and the decision log: rl-alpha got 429 after $RL_PER_MINUTE (from both its pods) while rl-beta was served, edge-egress logged each decision with its agent, and the exported hash chain verifies — and stops verifying when one record is rewritten"
 }
 
+# ---- Phase 34 — every release passes its own `helm test` (B28.236) ----------------
+# Each chart carries a test pod (templates/tests/) that reaches what the chart
+# runs the way a client does: through its Service, past its NetworkPolicy, which
+# lets exactly that pod in. It runs here, with every release installed and
+# before Phase 32 takes the image registry away.
+phase34_helm_test() {
+  section "PHASE 34 — helm test, every release this run installed"
+  local t rel ns
+  for t in edge-control-plane:"$INFRA_NS" edge-issuer:"$INFRA_NS" auth-service:"$INFRA_NS" \
+           edge-osb:"$INFRA_NS" edge-ratelimit:"$INFRA_NS" edge-secrets:"$INFRA_NS" \
+           edge-proxy:edge edge-egress:edge; do
+    rel="${t%%:*}"; ns="${t#*:}"
+    section "helm test $rel -n $ns"
+    h test "$rel" -n "$ns" --logs --timeout 300s \
+      || { k -n "$ns" get pod "$rel-test" -o wide 2>/dev/null || true; die "PHASE34 FAIL: helm test $rel did not pass"; }
+    ok "$rel: helm test passed"
+  done
+  # Passed: clear them, so no later phase meets a Completed pod among a
+  # release's (Phase 32 reads every auth-service pod's metrics).
+  for ns in "$INFRA_NS" edge; do
+    k -n "$ns" delete pod -l app.kubernetes.io/component=helm-test --ignore-not-found --wait=true >/dev/null
+  done
+  ok "PHASE 34 — every release passes its own helm test: each chart's test pod reached its service through the Service and the chart's NetworkPolicy"
+}
+
 # ---- Phase 32 — no internet at run time (B28.231) -----------------------------
 # A customer's cluster may have no route to the internet once it is installed.
 # Cut it off: on every node every public address is unreachable, so neither a
@@ -3522,9 +3551,10 @@ main() {
   phase29_egress_lockdown
   phase30_keyless_agents
   phase31_agent_rate_limits
+  phase34_helm_test         # before 32: the test pods pull their image
   phase32_no_internet
   phase33_kek_rotation
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS."
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS + every release passing its own helm test."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

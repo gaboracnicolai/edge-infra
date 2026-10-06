@@ -134,6 +134,34 @@ grafana:
       cpu: "1"
       memory: 512Mi
 
+# The image `helm test <release>` runs (templates/tests/): curl, checking that
+# every component switched on answers through its Service. global.imageRegistry
+# applies to it too, so mirror it with the others for an air-gapped install.
+tests:
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"  # pinned digest
+    pullPolicy: IfNotPresent
+
+# NetworkPolicy: default-deny ingress to Prometheus, Loki, Tempo and Grafana,
+# each open only to the stack's own flows (Grafana's queries, the collector's
+# exports) and to this chart's `helm test` pod. The OpenTelemetry collector gets
+# none: every Edge workload exports to it, the hostNetwork Envoys from their
+# node's address. Enforced by Calico (or any CNI that enforces NetworkPolicy).
+# OFF in the base values, like every chart's.
+networkPolicy:
+  enabled: false
+  # More ingress rules per component, appended as written, e.g. an ingress
+  # controller in front of Grafana:
+  #   grafana:
+  #     - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}}]
+  #       ports: [{port: http}]
+  extraIngress:
+    prometheus: []
+    loki: []
+    tempo: []
+    grafana: []
+
 # For a cluster that already runs the Prometheus Operator (kube-prometheus-stack):
 # a PodMonitor per Edge component and a PrometheusRule per rules/ file, picked up
 # by the Prometheus whose podMonitorSelector / ruleSelector match `labels`.

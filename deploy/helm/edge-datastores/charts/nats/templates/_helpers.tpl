@@ -38,3 +38,14 @@ Call with (dict "image" <an image: block> "global" $.Values.global).
 {{- end -}}
 {{- printf "%s:%s" $repo (toString .image.tag) -}}
 {{- end -}}
+
+{{/*
+Labels of this chart's `helm test` pod (templates/tests/). Not the selector
+labels, so the Service never picks the test pod up; the parent chart's
+NetworkPolicy lets this release's pods in, the test pod among them.
+*/}}
+{{- define "nats.testLabels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}-test
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: helm-test
+{{- end -}}
