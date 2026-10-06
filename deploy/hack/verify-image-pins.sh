@@ -6,7 +6,8 @@
 # untagged (which pulls latest) or has an empty tag. A digest (@sha256:) or a
 # fixed tag passes. Images behind a switch are switched on for the render (the
 # auth-service attest init container, the issuer's required activeKid), so an
-# optional image is checked too, not only the default set.
+# optional image is checked too, not only the default set (edge-datastores'
+# backup images included).
 #
 # Extra args are passed to every `helm template` — `--set image.tag=latest`
 # must make this fail, which is how CI proves the check can go red.
@@ -33,6 +34,11 @@ switches() { # chart
 			--set confidential.attestation.trustedKey=verify-image-pins
 		;;
 	edge-issuer) echo --set config.activeKid=verify-image-pins ;;
+	edge-datastores)
+		echo --set backup.enabled=true \
+			--set backup.s3.bucket=verify-image-pins \
+			--set backup.s3.existingSecret=verify-image-pins
+		;;
 	esac
 }
 

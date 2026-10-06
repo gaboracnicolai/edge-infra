@@ -1,0 +1,125 @@
+{{- if .Values.backup.enabled }}
+{{- $b := .Values.backup -}}
+{{- $_ := required "backup.enabled: set backup.s3.bucket to the bucket backups go to" $b.s3.bucket -}}
+{{- $_ := required "backup.enabled: set backup.s3.existingSecret to a Secret holding AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY" $b.s3.existingSecret -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-backup-scripts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-datastores.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+data:
+  # Each database is DB_<i>_NAME / DB_<i>_DSN / DB_<i>_OPTIONAL, i < DB_COUNT.
+  dump.sh: |
+    set -eu
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    out="/backup/$stamp"
+    mkdir -p "$out"
+    i=0; dumped=""
+    while [ "$i" -lt "$DB_COUNT" ]; do
+      eval "name=\${DB_${i}_NAME} dsn=\${DB_${i}_DSN:-} optional=\${DB_${i}_OPTIONAL}"
+      i=$((i + 1))
+      if [ -z "$dsn" ]; then
+        [ "$optional" = true ] || { echo "backup: $name has no connection URL" >&2; exit 1; }
+        echo "backup: $name skipped (optional and not configured)"
+        continue
+      fi
+      pg_dump --format=custom --no-owner --no-privileges --dbname="$dsn" --file="$out/$name.dump"
+      echo "backup: $name dumped ($(wc -c <"$out/$name.dump") bytes)"
+      dumped="$dumped $name"
+    done
+    [ -n "$dumped" ] || { echo "backup: no database to back up" >&2; exit 1; }
+    (cd "$out" && sha256sum *.dump >MANIFEST)
+    echo "$stamp" >/backup/STAMP
+  upload.sh: |
+    set -eu
+    . /scripts/s3.sh
+    stamp="$(cat /backup/STAMP)"
+    dest="$(s3_url "$stamp/")"
+    aws s3 cp --recursive --only-show-errors "/backup/$stamp/" "$dest"
+    # LATEST last, so a backup that failed above is never the one a restore picks.
+    printf '%s\n' "$stamp" | aws s3 cp --only-show-errors - "$(s3_url LATEST)"
+    echo "backup: $stamp uploaded to $dest"
+  download.sh: |
+    set -eu
+    . /scripts/s3.sh
+    from="$RESTORE_FROM"
+    if [ "$from" = latest ]; then
+      from="$(aws s3 cp --only-show-errors "$(s3_url LATEST)" - | tr -d '[:space:]')"
+    fi
+    [ -n "$from" ] || { echo "restore: $(s3_url LATEST) is empty — no backup has finished" >&2; exit 1; }
+    aws s3 cp --recursive --only-show-errors "$(s3_url "$from/")" /backup/
+    [ -s /backup/MANIFEST ] || { echo "restore: $(s3_url "$from/") holds no MANIFEST — not a finished backup" >&2; exit 1; }
+    echo "$from" >/backup/STAMP
+    echo "restore: downloaded $(s3_url "$from/")"
+  restore.sh: |
+    set -eu
+    stamp="$(cat /backup/STAMP)"
+    cd /backup
+    # Every dump must be the one the backup wrote.
+    sha256sum -c MANIFEST
+    i=0
+    while [ "$i" -lt "$DB_COUNT" ]; do
+      eval "name=\${DB_${i}_NAME} dsn=\${DB_${i}_DSN:-} optional=\${DB_${i}_OPTIONAL}"
+      i=$((i + 1))
+      if [ -z "$dsn" ] || [ ! -f "$name.dump" ]; then
+        [ "$optional" = true ] || { echo "restore: $name has no connection URL or no dump in $stamp" >&2; exit 1; }
+        echo "restore: $name skipped (optional; not configured or not in $stamp)"
+        continue
+      fi
+      # One transaction per database: it is restored whole, or left as it was.
+      pg_restore --clean --if-exists --no-owner --no-privileges --single-transaction --exit-on-error \
+        --dbname="$dsn" "$name.dump"
+      echo "restore: $name restored from $stamp"
+    done
+  s3.sh: |
+    # Sourced by upload.sh and download.sh.
+    export HOME=/tmp
+    if [ "${S3_PATH_STYLE:-}" = true ]; then
+      printf '[default]\ns3 =\n  addressing_style = path\n' >/tmp/aws-config
+      export AWS_CONFIG_FILE=/tmp/aws-config
+    fi
+    s3_url() { printf 's3://%s/%s%s' "$S3_BUCKET" "$S3_PREFIX" "$1"; }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-datastores.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ $b.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ $b.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $b.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        {{- include "edge-datastores.backupPod" (dict "root" . "component" "backup" "first" "dump" "firstImage" "postgres" "then" "upload" "thenImage" "s3") | nindent 8 }}
+---
+# The restore Job, kept as a suspended CronJob so it only ever runs when you
+# create a Job from it (the schedule, 31 February, never comes):
+#   kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ .Release.Name }}-restore restore-$(date +%s)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-restore
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-datastores.labels" . | nindent 4 }}
+    app.kubernetes.io/component: restore
+spec:
+  schedule: "0 0 31 2 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        {{- include "edge-datastores.backupPod" (dict "root" . "component" "restore" "first" "download" "firstImage" "s3" "then" "restore" "thenImage" "postgres") | nindent 8 }}
+{{- end }}

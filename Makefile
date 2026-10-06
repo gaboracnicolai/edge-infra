@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -131,6 +131,15 @@ kind-rollback:
 # the cluster is deleted. Needs docker, kind, kubectl, helm and jq.
 kind-datastores:
 	bash deploy/local/datastores.sh
+
+# The backup and restore drill on a throwaway kind cluster: edge-datastores with
+# its backup on, pointed at MinIO; the edge, issuer and a stand-in Lens database
+# backed up; the namespace deleted and the chart installed again empty; then the
+# chart's restore Job run. Passes only if the control plane publishes the same
+# config hash as before the loss and every table matches the backup. Then the
+# cluster is deleted. Needs docker, kind, kubectl, helm and jq.
+kind-backup:
+	bash deploy/local/backup.sh
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:
