@@ -165,7 +165,7 @@ spec:
   template:
     metadata: { labels: { app: edge-control-plane } }
     spec:
-      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: server
           image: edge-control-plane:$IMAGE_TAG
