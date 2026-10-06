@@ -63,9 +63,10 @@ not parse keeps the last good keys and counts
 `make kind-e2e` Phase 32 (`phase32_no_internet` in `deploy/local/up.sh`) cuts
 the kind cluster off and checks the stack still works:
 
-1. Every node's default route is deleted, so no pod, no node and no
-   hostNetwork Envoy can send a packet outside the private ranges. CoreDNS loses
-   its upstream and logs every query it is asked.
+1. On every node, every public address is made unreachable (two
+   `unreachable` /1 routes; the private ranges still go via the gateway), so no
+   pod, no node and no hostNetwork Envoy can send a packet to the internet.
+   CoreDNS loses its upstream and logs every query it is asked.
 2. Every Edge workload is restarted from cold and must become Ready.
 3. `auth-service` must load all three issuers' keys from inside the cluster: the
    `edge-issuer`, the API server's ServiceAccount keys, and an outside IdP's keys

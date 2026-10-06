@@ -48,8 +48,8 @@
 #  29  egress lockdown: Kyverno default-denies egress in a namespace labelled
 #      talyvor.io/agents=true — the direct call dropped, the same call through
 #      edge-egress served, the deleted policy written back
-#  32  no internet at run time: no node has a default route and CoreDNS no
-#      upstream; every Edge workload restarts cold and serves, auth-service
+#  32  no internet at run time: no node has a route to a public address and
+#      CoreDNS no upstream; every Edge workload restarts cold and serves, auth-service
 #      reads every issuer's keys from inside the cluster, and CoreDNS logs no
 #      query for a name outside it
 #
@@ -3015,9 +3015,9 @@ phase31_agent_rate_limits() {
 
 # ---- Phase 32 — no internet at run time (B28.231) -----------------------------
 # A customer's cluster may have no route to the internet once it is installed.
-# Cut it off: every node loses its default route, so neither a pod nor the node
-# itself (nor hostNetwork Envoy) can send a packet outside the private ranges,
-# and CoreDNS loses its upstream and logs every query it is asked. Then restart
+# Cut it off: on every node every public address is unreachable, so neither a
+# pod nor the node itself (nor hostNetwork Envoy) can send a packet outside the
+# private ranges, and CoreDNS loses its upstream and logs every query it is asked. Then restart
 # every Edge workload from cold. They must come up and serve: auth-service
 # loads each issuer's keys from inside the cluster (the edge-issuer, the API
 # server's ServiceAccount keys, and the keys of an IdP outside the cluster, held
@@ -3059,42 +3059,46 @@ airgap_token() {
   printf '%s.%s.%s' "$hdr" "$pl" "$(printf '%s.%s' "$hdr" "$pl" | openssl dgst -sha256 -sign "$1" | b64url_e)"
 }
 
-# airgap_cut — every node's default routes saved, then deleted. What stays is
-# on-link (the node network), Calico's routes to other nodes' pods, and a route
-# for the Service range so a ClusterIP still has a route before it is DNATed.
+# airgap_cut — on every node, the internet made unreachable. Two unreachable
+# /1 routes cover every address more specifically than the default route, and
+# the private and link-local ranges go back via the node's gateway, so a pod,
+# the node itself and hostNetwork Envoy all fail to reach a public address. The
+# default route stays, as on a real air-gapped network: a Calico pod reaches
+# its gateway 169.254.1.1 through the node's proxy ARP, which answers only for
+# an address the node has a unicast route to.
+AIRGAP_PRIVATE4="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10"
 airgap_cut() {
   local n
-  mkdir -p "$AIRGAP_STATE_DIR"
   for n in $(kind get nodes --name "$CLUSTER_NAME"); do
-    if [ ! -s "$AIRGAP_STATE_DIR/$n" ]; then
-      docker exec "$n" sh -c 'ip -4 route show default; ip -6 route show default | sed "s/^/-6 /"' > "$AIRGAP_STATE_DIR/$n"
-    fi
     docker exec "$n" sh -c '
       gw="$(ip -4 route show default | awk "{print \$3; exit}")"
-      [ -z "$gw" ] || ip route replace 10.96.0.0/12 via "$gw"
-      while ip -4 route del default 2>/dev/null; do :; done
-      while ip -6 route del default 2>/dev/null; do :; done
-      ip -4 route show default; ip -6 route show default' \
-      | { ! grep -q .; } || die "PHASE32: $n still has a default route"
+      [ -n "$gw" ] || exit 1
+      for c in '"$AIRGAP_PRIVATE4"'; do ip route replace "$c" via "$gw"; done
+      ip route replace unreachable 0.0.0.0/1
+      ip route replace unreachable 128.0.0.0/1
+      gw6="$(ip -6 route show default | awk "{print \$3; exit}")"
+      if [ -n "$gw6" ]; then
+        ip -6 route replace fc00::/7 via "$gw6"
+        ip -6 route replace unreachable ::/1
+        ip -6 route replace unreachable 8000::/1
+      fi
+      ! ip route get 1.1.1.1 >/dev/null 2>&1' \
+      || die "PHASE32: could not cut $n off — it still has a route to 1.1.1.1, or no default route to keep"
   done
 }
 
-# airgap_lift — the saved default routes put back, and the Corefile restored.
+# airgap_lift — the routes airgap_cut added taken out, and the Corefile restored.
 airgap_lift() {
-  local n r
+  local n
   for n in $(kind get nodes --name "$CLUSTER_NAME"); do
-    [ -s "$AIRGAP_STATE_DIR/$n" ] || continue
-    while IFS= read -r r; do
-      case "$r" in
-        "-6 "*) docker exec "$n" sh -c "ip -6 route replace ${r#-6 }" || true ;;
-        *) docker exec "$n" sh -c "ip -4 route replace $r" || true ;;
-      esac
-    done < "$AIRGAP_STATE_DIR/$n"
-    rm -f "${AIRGAP_STATE_DIR:?}/${n:?}"
+    docker exec "$n" sh -c '
+      for c in '"$AIRGAP_PRIVATE4"' 0.0.0.0/1 128.0.0.0/1; do ip route del "$c" 2>/dev/null; done
+      for c in fc00::/7 ::/1 8000::/1; do ip -6 route del "$c" 2>/dev/null; done
+      true' || true
   done
   if [ -s "$AIRGAP_STATE_DIR/Corefile" ]; then
     k -n kube-system create configmap coredns --from-file=Corefile="$AIRGAP_STATE_DIR/Corefile" \
-      --dry-run=client -o yaml | k apply -f - >/dev/null
+      --dry-run=client -o yaml | k replace -f - >/dev/null
     k -n kube-system rollout restart deploy/coredns >/dev/null
     k -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null || true
     rm -f "${AIRGAP_STATE_DIR:?}/Corefile"
@@ -3168,11 +3172,12 @@ phase32_no_internet() {
   wait_rollout deploy/echo osb-stub 120s >/dev/null
   sip="$(k -n osb-stub get svc echo -o jsonpath='{.spec.clusterIP}')"
 
-  section "cut the internet: no default route on any node, CoreDNS with no upstream and every query logged"
+  section "cut the internet: every public address unreachable from every node, CoreDNS with no upstream and every query logged"
   airgap_cut
   for n in $(kind get nodes --name "$CLUSTER_NAME"); do
-    echo "  $n: $(docker exec "$n" ip -4 route | grep -c .) routes, none of them default"
+    echo "  $n: $(docker exec "$n" sh -c 'ip route get 1.1.1.1 2>&1 | head -1')"
   done
+  mkdir -p "$AIRGAP_STATE_DIR"
   if [ ! -s "$AIRGAP_STATE_DIR/Corefile" ]; then
     k -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > "$AIRGAP_STATE_DIR/Corefile"
   fi
@@ -3183,7 +3188,7 @@ phase32_no_internet() {
     /^[[:space:]]*errors[[:space:]]*$/ { print; sub(/errors/, "log"); print; next }
     { print }' "$AIRGAP_STATE_DIR/Corefile" > "$tdir/Corefile"
   ! has "$(cat "$tdir/Corefile")" forward || die "PHASE32: the offline Corefile still forwards"
-  k -n kube-system create configmap coredns --from-file=Corefile="$tdir/Corefile" --dry-run=client -o yaml | k apply -f - >/dev/null
+  k -n kube-system create configmap coredns --from-file=Corefile="$tdir/Corefile" --dry-run=client -o yaml | k replace -f - >/dev/null
   k -n kube-system rollout restart deploy/coredns >/dev/null
   k -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null || die "PHASE32: CoreDNS did not come back offline"
   ok "CoreDNS restarted with no forward, logging every query"
@@ -3276,13 +3281,13 @@ phase32_no_internet() {
   ! has "$out" "curl-exit=0" || die "PHASE32: a pod reached 1.1.1.1 — the cluster is not cut off"
   ok "curl http://1.1.1.1 from a pod, no DNS involved: $(printf '%s\n' "$out" | tail -1) — no way out"
 
-  section "lift: default routes and the Corefile put back; '$AIRGAP_SERVICE' deprovisioned"
+  section "lift: the routes and the Corefile put back; '$AIRGAP_SERVICE' deprovisioned"
   r="$(osb_call DELETE "/v1/services/$AIRGAP_SERVICE")"
   if [ "${r%% *}" = 202 ]; then osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"; fi
   trap - EXIT
   airgap_lift
   rm -rf "${tdir:?}"
-  ok "PHASE 32 — no internet at run time: with no route out and no upstream DNS, every Edge workload restarted cold and served; auth-service read the edge-issuer's, the API server's and an outside IdP's keys from inside the cluster (the IdP's rotated by a Secret update), and CoreDNS logged 0 queries for a name outside the cluster"
+  ok "PHASE 32 — no internet at run time: with no route to a public address and no upstream DNS, every Edge workload restarted cold and served; auth-service read the edge-issuer's, the API server's and an outside IdP's keys from inside the cluster (the IdP's rotated by a Secret update), and CoreDNS logged 0 queries for a name outside the cluster"
 }
 
 main() {
