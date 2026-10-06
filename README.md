@@ -47,6 +47,9 @@ confidential-node option is in
 for agent pods, so a route admits only your agents, are in
 [docs/agent-certificates.md](docs/agent-certificates.md). The egress gateway your agents call out
 through, which reaches only the hosts you list, is in [docs/agent-egress.md](docs/agent-egress.md).
+Once installed, Edge needs no internet: every service boots and serves from inside your cluster,
+and an identity provider outside it is trusted from a copy of its keys in a Secret — see
+[docs/no-internet-at-run-time.md](docs/no-internet-at-run-time.md).
 Every image is signed and carries an SBOM and SLSA provenance. To check all three before you install,
 run `make verify-images TAG=<release>` or see
 [docs/self-host-supply-chain.md](docs/self-host-supply-chain.md). Nothing is signed if trivy finds a
@@ -66,6 +69,7 @@ first. Several things that look ready are not.
 | Local rate limiting | Built and **on** by default. |
 | Per-agent rate limits on `edge-egress` | Built. **Off** by default (`egress.agentRequestsPerMinute: 0`); Phase 31 sets 5 a minute and shows one agent refused with 429 while another is served. [docs/agent-egress.md](docs/agent-egress.md#rate-limits-per-agent) |
 | `edge-egress` decision log | Built and **on** by default (`egress.decisionLog`): every decision in a hash chain, exported by the admin API as NDJSON and checked by `scripts/verify-decisions.sh` (Phase 31). |
+| No internet at run time | Built. Every service boots and serves with no route out; `auth-service` can read an outside IdP's keys from a Secret (`jwksFiles`). Phase 32 restarts the stack cold with every node's default route deleted and CoreDNS offline, and finds 0 DNS queries for a name outside the cluster. [docs/no-internet-at-run-time.md](docs/no-internet-at-run-time.md) |
 | Consuming UI | None. The suite's `/admin` area was **deleted** (`AdminRemoved.test.tsx` pins that it stays gone) because it rendered invented node identities, IPs, cert fingerprints and an issuer string for a service that is not deployed. |
 
 ---

@@ -3,16 +3,25 @@
 use serde::Deserialize;
 
 use crate::error::AppError;
+use crate::jwks::JwksSource;
 
 /// One more identity provider this gateway trusts (an entry of JWT_ISSUERS):
-/// tokens naming `issuer` must be signed by a key from `jwks_url`.
+/// tokens naming `issuer` must be signed by a key from `jwks_url`, or from
+/// `jwks_file` when the provider's keys are held in the cluster instead.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IssuerConfig {
     /// The `iss` claim this provider's tokens carry.
     pub issuer: String,
     /// HTTPS endpoint serving this provider's signing keys.
+    #[serde(default)]
     pub jwks_url: String,
+    /// A JWKS document in the pod (the chart mounts `jwksFiles.existingSecret`
+    /// at /etc/auth-service/jwks), used instead of `jwks_url` so an identity
+    /// provider outside an air-gapped cluster is trusted with no network call.
+    /// Re-read every JWKS_REFRESH_S, so updating the Secret rotates the keys.
+    #[serde(default)]
+    pub jwks_file: Option<String>,
     /// Expected `aud` for this provider's tokens; JWT_AUDIENCE when absent.
     #[serde(default)]
     pub audience: Option<String>,
@@ -132,11 +141,27 @@ impl Config {
             if idp.issuer.is_empty() {
                 return Err(AppError::Config("JWT_ISSUERS: an issuer is empty".to_string()));
             }
-            if !idp.jwks_url.starts_with("https://") {
-                return Err(AppError::Config(format!(
-                    "jwks_url for {} must use https://, got: {}",
-                    idp.issuer, idp.jwks_url
-                )));
+            match &idp.jwks_file {
+                Some(_) if !idp.jwks_url.is_empty() => {
+                    return Err(AppError::Config(format!(
+                        "issuer {} sets both jwks_url and jwks_file — keep one",
+                        idp.issuer
+                    )));
+                }
+                Some(path) if !path.starts_with('/') => {
+                    return Err(AppError::Config(format!(
+                        "jwks_file for {} must be an absolute path, got: {path:?}",
+                        idp.issuer
+                    )));
+                }
+                Some(_) => {}
+                None if !idp.jwks_url.starts_with("https://") => {
+                    return Err(AppError::Config(format!(
+                        "jwks_url for {} must use https://, got: {}",
+                        idp.issuer, idp.jwks_url
+                    )));
+                }
+                None => {}
             }
             if !seen.insert(idp.issuer.clone()) {
                 return Err(AppError::Config(format!(
@@ -154,6 +179,7 @@ impl Config {
         let primary = IssuerConfig {
             issuer: self.jwt_issuer.clone(),
             jwks_url: self.jwks_url.clone(),
+            jwks_file: None,
             audience: None,
             ca_file: None,
         };
@@ -167,6 +193,16 @@ impl Config {
                 idp
             })
             .collect()
+    }
+}
+
+impl IssuerConfig {
+    /// Where this issuer's keys are read from.
+    pub fn jwks_source(&self) -> JwksSource {
+        match &self.jwks_file {
+            Some(path) => JwksSource::File(path.clone()),
+            None => JwksSource::Url(self.jwks_url.clone()),
+        }
     }
 }
 
@@ -251,6 +287,43 @@ mod tests {
         let err = Config::from_env().unwrap_err();
         std::env::remove_var("JWT_ISSUERS");
         assert!(err.to_string().contains("https://"), "error was: {err}");
+    }
+
+    #[test]
+    fn test_jwt_issuers_jwks_file_reads_keys_from_the_cluster() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        base_env();
+        std::env::set_var(
+            "JWT_ISSUERS",
+            r#"[{"issuer":"https://idp.corp.example","jwks_file":"/etc/auth-service/jwks/corp.json"}]"#,
+        );
+        let issuers = Config::from_env().unwrap().issuers();
+        std::env::remove_var("JWT_ISSUERS");
+        assert_eq!(
+            issuers[1].jwks_source(),
+            JwksSource::File("/etc/auth-service/jwks/corp.json".to_string())
+        );
+        assert_eq!(
+            issuers[0].jwks_source(),
+            JwksSource::Url("https://auth.example.com/.well-known/jwks.json".to_string())
+        );
+
+        for (raw, want) in [
+            (
+                r#"[{"issuer":"https://idp.corp.example","jwks_url":"https://idp.corp.example/keys","jwks_file":"/etc/auth-service/jwks/corp.json"}]"#,
+                "keep one",
+            ),
+            (
+                r#"[{"issuer":"https://idp.corp.example","jwks_file":"corp.json"}]"#,
+                "absolute path",
+            ),
+            (r#"[{"issuer":"https://idp.corp.example"}]"#, "https://"),
+        ] {
+            std::env::set_var("JWT_ISSUERS", raw);
+            let err = Config::from_env().unwrap_err();
+            std::env::remove_var("JWT_ISSUERS");
+            assert!(err.to_string().contains(want), "{raw}: error was: {err}");
+        }
     }
 
     #[test]

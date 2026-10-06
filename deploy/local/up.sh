@@ -48,6 +48,10 @@
 #  29  egress lockdown: Kyverno default-denies egress in a namespace labelled
 #      talyvor.io/agents=true — the direct call dropped, the same call through
 #      edge-egress served, the deleted policy written back
+#  32  no internet at run time: no node has a default route and CoreDNS no
+#      upstream; every Edge workload restarts cold and serves, auth-service
+#      reads every issuer's keys from inside the cluster, and CoreDNS logs no
+#      query for a name outside it
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -3009,6 +3013,278 @@ phase31_agent_rate_limits() {
   ok "PHASE 31 — per-agent rate limits and the decision log: rl-alpha got 429 after $RL_PER_MINUTE (from both its pods) while rl-beta was served, edge-egress logged each decision with its agent, and the exported hash chain verifies — and stops verifying when one record is rewritten"
 }
 
+# ---- Phase 32 — no internet at run time (B28.231) -----------------------------
+# A customer's cluster may have no route to the internet once it is installed.
+# Cut it off: every node loses its default route, so neither a pod nor the node
+# itself (nor hostNetwork Envoy) can send a packet outside the private ranges,
+# and CoreDNS loses its upstream and logs every query it is asked. Then restart
+# every Edge workload from cold. They must come up and serve: auth-service
+# loads each issuer's keys from inside the cluster (the edge-issuer, the API
+# server's ServiceAccount keys, and the keys of an IdP outside the cluster, held
+# in a Secret it re-reads, so rotating them is a Secret update), the OSB broker
+# provisions a jwt route, and a token from each issuer is checked at the gateway.
+# Over the whole run CoreDNS must log no query for a name outside the cluster.
+# Two controls show the instruments can see: an outside name looked up on
+# purpose is logged, and a packet to a public address has no way out.
+AIRGAP_IDP="https://idp.corp.example"
+AIRGAP_SECRET="idp-jwks"
+AIRGAP_JWKS_FILE="/etc/auth-service/jwks/corp.json"
+AIRGAP_SERVICE="e2e-offline"
+AIRGAP_REFRESH_S=15
+AIRGAP_STATE_DIR="${TMPDIR:-/tmp}/edge-airgap-$CLUSTER_NAME"
+# Every workload the Edge charts run: <namespace> <kind/name>.
+AIRGAP_WORKLOADS="$INFRA_NS deploy/edge-control-plane
+$INFRA_NS deploy/edge-issuer
+$INFRA_NS deploy/auth-service
+$INFRA_NS deploy/edge-osb
+edge daemonset/edge-proxy
+edge deploy/edge-egress"
+
+b64url_e() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# airgap_jwk <key.pem> <kid> — the RSA public key as a JWKS document.
+airgap_jwk() {
+  local n
+  n="$(openssl rsa -in "$1" -noout -modulus 2>/dev/null | sed 's/^Modulus=//' | xxd -r -p | b64url_e)"
+  jq -cn --arg n "$n" --arg kid "$2" '{keys: [{kty: "RSA", use: "sig", alg: "RS256", kid: $kid, n: $n, e: "AQAB"}]}'
+}
+
+# airgap_token <key.pem> <kid> <aud> — an RS256 token from the outside IdP.
+airgap_token() {
+  local now hdr pl
+  now="$(date +%s)"
+  hdr="$(jq -cn --arg kid "$2" '{alg: "RS256", typ: "JWT", kid: $kid}' | b64url_e)"
+  pl="$(jq -cn --arg iss "$AIRGAP_IDP" --arg aud "$3" --argjson now "$now" \
+    '{iss: $iss, aud: $aud, sub: "alice@corp.example", email: "alice@corp.example", iat: $now, exp: ($now + 900)}' | b64url_e)"
+  printf '%s.%s.%s' "$hdr" "$pl" "$(printf '%s.%s' "$hdr" "$pl" | openssl dgst -sha256 -sign "$1" | b64url_e)"
+}
+
+# airgap_cut — every node's default routes saved, then deleted. What stays is
+# on-link (the node network), Calico's routes to other nodes' pods, and a route
+# for the Service range so a ClusterIP still has a route before it is DNATed.
+airgap_cut() {
+  local n
+  mkdir -p "$AIRGAP_STATE_DIR"
+  for n in $(kind get nodes --name "$CLUSTER_NAME"); do
+    if [ ! -s "$AIRGAP_STATE_DIR/$n" ]; then
+      docker exec "$n" sh -c 'ip -4 route show default; ip -6 route show default | sed "s/^/-6 /"' > "$AIRGAP_STATE_DIR/$n"
+    fi
+    docker exec "$n" sh -c '
+      gw="$(ip -4 route show default | awk "{print \$3; exit}")"
+      [ -z "$gw" ] || ip route replace 10.96.0.0/12 via "$gw"
+      while ip -4 route del default 2>/dev/null; do :; done
+      while ip -6 route del default 2>/dev/null; do :; done
+      ip -4 route show default; ip -6 route show default' \
+      | { ! grep -q .; } || die "PHASE32: $n still has a default route"
+  done
+}
+
+# airgap_lift — the saved default routes put back, and the Corefile restored.
+airgap_lift() {
+  local n r
+  for n in $(kind get nodes --name "$CLUSTER_NAME"); do
+    [ -s "$AIRGAP_STATE_DIR/$n" ] || continue
+    while IFS= read -r r; do
+      case "$r" in
+        "-6 "*) docker exec "$n" sh -c "ip -6 route replace ${r#-6 }" || true ;;
+        *) docker exec "$n" sh -c "ip -4 route replace $r" || true ;;
+      esac
+    done < "$AIRGAP_STATE_DIR/$n"
+    rm -f "${AIRGAP_STATE_DIR:?}/${n:?}"
+  done
+  if [ -s "$AIRGAP_STATE_DIR/Corefile" ]; then
+    k -n kube-system create configmap coredns --from-file=Corefile="$AIRGAP_STATE_DIR/Corefile" \
+      --dry-run=client -o yaml | k apply -f - >/dev/null
+    k -n kube-system rollout restart deploy/coredns >/dev/null
+    k -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null || true
+    rm -f "${AIRGAP_STATE_DIR:?}/Corefile"
+  fi
+}
+
+# airgap_queries — every name CoreDNS has been asked since it restarted
+# offline, one per line.
+airgap_queries() {
+  local p
+  for p in $(k -n kube-system get pod -l k8s-app=kube-dns -o jsonpath='{.items[*].metadata.name}'); do
+    k -n kube-system logs "$p" 2>/dev/null
+  done | sed -n 's/.*"[A-Z0-9]* IN \([^ ]*\) .*/\1/p'
+}
+
+# airgap_external — the names among stdin that are not the cluster's own: not
+# under cluster.local, and not the reverse lookup of a private address.
+airgap_external() {
+  awk '
+    /\.cluster\.local\.$/ { next }
+    /\.in-addr\.arpa\.$/ {
+      split($0, o, ".")
+      if (o[4] == "10" || o[4] == "127" || (o[4] == "192" && o[3] == "168") || (o[4] == "172" && o[3] >= 16 && o[3] <= 31)) next
+    }
+    { print }'
+}
+
+# airgap_metric <pod> <series> — one auth-service pod's value of a series.
+airgap_metric() {
+  kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward "pod/$1" 19092:9090 >/dev/null 2>&1 &
+  local pf=$! v="" i=0
+  while [ "$i" -lt 10 ]; do
+    v="$(curl -s --max-time 4 http://127.0.0.1:19092/metrics 2>/dev/null | awk -v s="$2" '$1 == s {print $2}')"
+    [ -n "$v" ] && break
+    i=$((i + 1)); sleep 1
+  done
+  kill "$pf" >/dev/null 2>&1 || true; wait "$pf" 2>/dev/null || true
+  printf '%s' "${v:-0}"
+}
+
+phase32_no_internet() {
+  section "PHASE 32 — no internet at run time: every node cut off, the stack restarted cold, and not one DNS query for a name outside the cluster"
+  local UMAIL="dev@edge.local" UPASS="devpassword-abc12345"
+  local ISS="https://edge-issuer.${INFRA_NS}.svc.cluster.local:8081"
+  local tdir aud issuers r sip n ns w out c tok1 tok2 itok i pods p ext all ok_refresh fail_refresh
+  need xxd
+  tdir="$(mktemp -d)"
+  trap 'airgap_lift' EXIT
+
+  section "an IdP outside the cluster: its keys held in Secret $AIRGAP_SECRET, auth-service told to read them from there"
+  openssl genrsa -out "$tdir/corp-1.pem" 2048 2>/dev/null
+  openssl genrsa -out "$tdir/corp-2.pem" 2048 2>/dev/null
+  airgap_jwk "$tdir/corp-1.pem" corp-1 > "$tdir/corp.json"
+  k -n "$INFRA_NS" create secret generic "$AIRGAP_SECRET" --from-file=corp.json="$tdir/corp.json" \
+    --dry-run=client -o yaml | k apply -f - >/dev/null
+  issuers="$(k -n "$INFRA_NS" get secret auth-service-secrets -o jsonpath='{.data.JWT_ISSUERS}' | openssl base64 -d -A 2>/dev/null || true)"
+  issuers="$(printf '%s' "${issuers:-[]}" | jq -c --arg iss "$AIRGAP_IDP" --arg f "$AIRGAP_JWKS_FILE" \
+    '[.[] | select(.issuer != $iss)] + [{issuer: $iss, jwks_file: $f}]')"
+  k -n "$INFRA_NS" patch secret auth-service-secrets --type merge \
+    -p "$(jq -cn --arg v "$issuers" '{stringData: {JWT_ISSUERS: $v}}')" >/dev/null
+  h upgrade auth-service "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" --reuse-values \
+    --set jwksFiles.existingSecret="$AIRGAP_SECRET" --set config.jwksRefreshSeconds="$AIRGAP_REFRESH_S" \
+    --wait --timeout 180s >/dev/null || die "PHASE32: auth-service did not upgrade with jwksFiles"
+  aud="$(k -n "$INFRA_NS" get secret auth-service-secrets -o jsonpath='{.data.JWT_AUDIENCE}' | openssl base64 -d -A)"
+  ok "JWT_ISSUERS now ends with {issuer: $AIRGAP_IDP, jwks_file: $AIRGAP_JWKS_FILE}; keys re-read every ${AIRGAP_REFRESH_S}s"
+
+  # The minter pod (Phase 25) asks the edge-issuer for a token from inside the cluster.
+  k apply -f "$LOCAL_DIR/manifests/secure-backend.yaml" >/dev/null
+  k -n tenant-secure wait --for=condition=Ready pod/minter --timeout=120s >/dev/null
+  k apply -f "$LOCAL_DIR/manifests/osb-stub.yaml" >/dev/null
+  wait_rollout deploy/echo osb-stub 120s >/dev/null
+  sip="$(k -n osb-stub get svc echo -o jsonpath='{.spec.clusterIP}')"
+
+  section "cut the internet: no default route on any node, CoreDNS with no upstream and every query logged"
+  airgap_cut
+  for n in $(kind get nodes --name "$CLUSTER_NAME"); do
+    echo "  $n: $(docker exec "$n" ip -4 route | grep -c .) routes, none of them default"
+  done
+  if [ ! -s "$AIRGAP_STATE_DIR/Corefile" ]; then
+    k -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > "$AIRGAP_STATE_DIR/Corefile"
+  fi
+  awk '
+    /^[[:space:]]*forward[[:space:]]/ { skip = /\{[[:space:]]*$/; next }
+    skip { if (/^[[:space:]]*\}[[:space:]]*$/) skip = 0; next }
+    /^[[:space:]]*loop[[:space:]]*$/ { next }
+    /^[[:space:]]*errors[[:space:]]*$/ { print; sub(/errors/, "log"); print; next }
+    { print }' "$AIRGAP_STATE_DIR/Corefile" > "$tdir/Corefile"
+  ! has "$(cat "$tdir/Corefile")" forward || die "PHASE32: the offline Corefile still forwards"
+  k -n kube-system create configmap coredns --from-file=Corefile="$tdir/Corefile" --dry-run=client -o yaml | k apply -f - >/dev/null
+  k -n kube-system rollout restart deploy/coredns >/dev/null
+  k -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null || die "PHASE32: CoreDNS did not come back offline"
+  ok "CoreDNS restarted with no forward, logging every query"
+
+  section "restart every Edge workload from cold, offline"
+  while read -r ns w; do
+    k -n "$ns" rollout restart "$w" >/dev/null
+  done <<<"$AIRGAP_WORKLOADS"
+  while read -r ns w; do
+    k -n "$ns" rollout status "$w" --timeout=240s >/dev/null \
+      || { k -n "$ns" describe "$w" | tail -20; die "PHASE32 FAIL: $ns/$w did not come back with no internet"; }
+    ok "$ns/$w Ready"
+  done <<<"$AIRGAP_WORKLOADS"
+
+  section "auth-service loaded every issuer's keys from inside the cluster"
+  out="$(k -n "$INFRA_NS" logs deploy/auth-service --tail=-1 2>/dev/null | grep '"trusting issuer"' || true)"
+  printf '%s\n' "$out" | jq -r '.fields | "    \(.issuer)  <-  \(.jwks)"' 2>/dev/null || printf '%s\n' "$out"
+  has "$out" "file:$AIRGAP_JWKS_FILE" || die "PHASE32 FAIL: auth-service did not load $AIRGAP_IDP's keys from $AIRGAP_JWKS_FILE"
+  has "$out" "edge-issuer.${INFRA_NS}.svc.cluster.local" || die "PHASE32 FAIL: auth-service did not load the edge-issuer's keys"
+
+  section "the OSB broker provisions '$AIRGAP_SERVICE' (jwt by default), and the gateway checks each issuer's token"
+  r="$(osb_call DELETE "/v1/services/$AIRGAP_SERVICE")"
+  if [ "${r%% *}" = 202 ]; then osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"; fi
+  r="$(osb_call POST /v1/services \
+    "{\"name\":\"$AIRGAP_SERVICE\",\"team\":\"$OSB_TEAM\",\"host\":\"$sip\",\"port\":5678,\"protocol\":\"HTTP\"}")"
+  [ "${r%% *}" = 202 ] || die "PHASE32 FAIL: the broker did not accept the service offline (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  i=0; c=""
+  while [ "$i" -lt 30 ]; do
+    c="$(gw80_code "$sip")"; [ "$c" = 401 ] && break
+    i=$((i + 1)); sleep 2
+  done
+  [ "$c" = 401 ] || die "PHASE32 FAIL: no token got $c, want 401 (the route is not published, or not gated)"
+  ok "no token -> 401"
+  itok="$(k -n tenant-secure exec minter -- curl -sk --max-time 6 -X POST "$ISS/login" \
+    -H 'Content-Type: application/json' -d "{\"email\":\"$UMAIL\",\"password\":\"$UPASS\"}" 2>/dev/null \
+    | jq -r '.access_token // empty' 2>/dev/null || true)"
+  [ -n "$itok" ] || die "PHASE32 FAIL: the edge-issuer did not mint a token offline"
+  c="$(gw80_code "$sip" -H "Authorization: Bearer $itok")"
+  [ "$c" = 200 ] || die "PHASE32 FAIL: an edge-issuer token got $c, want 200"
+  ok "edge-issuer token -> 200"
+  tok1="$(airgap_token "$tdir/corp-1.pem" corp-1 "$aud")"
+  c="$(gw80_code "$sip" -H "Authorization: Bearer $tok1")"
+  [ "$c" = 200 ] || die "PHASE32 FAIL: a token from $AIRGAP_IDP (key corp-1, held in the Secret) got $c, want 200"
+  ok "$AIRGAP_IDP token (corp-1) -> 200, its keys read from the Secret"
+
+  section "rotate $AIRGAP_IDP's key by updating the Secret alone: corp-2 in, corp-1 out"
+  airgap_jwk "$tdir/corp-2.pem" corp-2 > "$tdir/corp.json"
+  k -n "$INFRA_NS" create secret generic "$AIRGAP_SECRET" --from-file=corp.json="$tdir/corp.json" \
+    --dry-run=client -o yaml | k apply -f - >/dev/null
+  tok2="$(airgap_token "$tdir/corp-2.pem" corp-2 "$aud")"
+  i=0; c=""
+  while [ "$i" -lt 60 ]; do
+    c="$(gw80_code "$sip" -H "Authorization: Bearer $tok2")"
+    [ "$c" = 200 ] && [ "$(gw80_code "$sip" -H "Authorization: Bearer $tok1")" = 401 ] && break
+    i=$((i + 1)); sleep 3
+  done
+  [ "$c" = 200 ] || die "PHASE32 FAIL: a corp-2 token still got $c after the Secret was updated"
+  [ "$(gw80_code "$sip" -H "Authorization: Bearer $tok1")" = 401 ] || die "PHASE32 FAIL: the rotated-out corp-1 key is still trusted"
+  ok "corp-2 -> 200 and corp-1 -> 401 after ~$((i * 3))s — rotated with no restart and no network"
+
+  section "every key refresh since the cold start succeeded, offline"
+  pods="$(k -n "$INFRA_NS" get pod -l app.kubernetes.io/instance=auth-service -o jsonpath='{.items[*].metadata.name}')"
+  for p in $pods; do
+    ok_refresh="$(airgap_metric "$p" 'jwks_refresh_total{result="success"}')"
+    fail_refresh="$(airgap_metric "$p" 'jwks_refresh_total{result="failure"}')"
+    echo "  $p: jwks_refresh_total success=$ok_refresh failure=$fail_refresh"
+    [ "${ok_refresh%%.*}" -ge 3 ] || die "PHASE32 FAIL: $p refreshed its issuers' keys $ok_refresh times, want at least one round of all three"
+    [ "${fail_refresh%%.*}" = 0 ] || die "PHASE32 FAIL: $p failed $fail_refresh key refreshes with no internet"
+  done
+
+  section "THE VERDICT — every name CoreDNS was asked since it went offline"
+  all="$(airgap_queries | grep . || true)"
+  ext="$(printf '%s\n' "$all" | grep . | airgap_external | sort | uniq -c | sort -rn || true)"
+  echo "  $(printf '%s\n' "$all" | grep -c .) queries, $(printf '%s\n' "$all" | grep . | sort -u | wc -l | tr -d ' ') distinct names; the most asked:"
+  printf '%s\n' "$all" | grep . | sort | uniq -c | sort -rn | head -5 | sed 's/^/    /'
+  [ "$(printf '%s\n' "$all" | grep -c .)" -gt 0 ] || die "PHASE32 FAIL: CoreDNS logged no queries at all, so its silence proves nothing"
+  [ -z "$ext" ] || { echo "  names outside the cluster:"; printf '%s\n' "$ext" | sed 's/^/    /'; die "PHASE32 FAIL: with no internet, a workload still looked up a name outside the cluster"; }
+  ok "0 queries for a name outside the cluster"
+
+  section "CONTROL — the instruments see: an outside name is logged, a public address has no route"
+  out="$(k -n tenant-secure exec minter -- curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://api.openai.com/ 2>&1 || true)"
+  i=0
+  until has "$(airgap_queries | airgap_external)" "api.openai.com."; do
+    i=$((i + 1)); [ "$i" -lt 10 ] || die "PHASE32: CoreDNS did not log a lookup of api.openai.com — the verdict above could not have seen one"
+    sleep 1
+  done
+  ok "curl https://api.openai.com from a pod: no answer (HTTP ${out:-000}), and CoreDNS logged api.openai.com. as outside the cluster"
+  out="$(k -n tenant-secure exec minter -- sh -c 'curl -s -o /dev/null --max-time 5 http://1.1.1.1/; echo "curl-exit=$?"' 2>&1 || true)"
+  ! has "$out" "curl-exit=0" || die "PHASE32: a pod reached 1.1.1.1 — the cluster is not cut off"
+  ok "curl http://1.1.1.1 from a pod, no DNS involved: $(printf '%s\n' "$out" | tail -1) — no way out"
+
+  section "lift: default routes and the Corefile put back; '$AIRGAP_SERVICE' deprovisioned"
+  r="$(osb_call DELETE "/v1/services/$AIRGAP_SERVICE")"
+  if [ "${r%% *}" = 202 ]; then osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"; fi
+  trap - EXIT
+  airgap_lift
+  rm -rf "${tdir:?}"
+  ok "PHASE 32 — no internet at run time: with no route out and no upstream DNS, every Edge workload restarted cold and served; auth-service read the edge-issuer's, the API server's and an outside IdP's keys from inside the cluster (the IdP's rotated by a Secret update), and CoreDNS logged 0 queries for a name outside the cluster"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -3049,7 +3325,8 @@ main() {
   phase29_egress_lockdown
   phase30_keyless_agents
   phase31_agent_rate_limits
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies."
+  phase32_no_internet
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order
