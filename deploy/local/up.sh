@@ -52,6 +52,8 @@
 #      CoreDNS no upstream; every Edge workload restarts cold and serves, auth-service
 #      reads every issuer's keys from inside the cluster, and CoreDNS logs no
 #      query for a name outside it
+#  33  KEK rotation: every key re-sealed under a new SECRET_KEK, the old one
+#      dropped, and a fresh Envoy still served the same cert over SDS
 #
 # One command for the whole thing, cluster created and deleted:  make kind-e2e
 #
@@ -3366,6 +3368,120 @@ phase32_no_internet() {
   ok "PHASE 32 — no internet at run time: with no route to a public address and no upstream DNS, every Edge workload restarted cold and served; auth-service read the edge-issuer's, the API server's and an outside IdP's keys from inside the cluster (the IdP's rotated by a Secret update), and CoreDNS logged 0 queries for a name outside the cluster"
 }
 
+# ---- Phase 33 — KEK rotation: SDS still serves the cert (B28.234) -------------
+# The custodian seals every key under SECRET_KEK (enc:v2:<kid>:...). Rotating it:
+# both services get the new KEK as SECRET_KEK and the old one as
+# SECRET_KEK_PREVIOUS, `secrets reseal` moves every key onto the new KEK, and the
+# old one is dropped. Measured on a cert written through the custodian and served
+# by SNI on Phase 20's shared port: once the old KEK is gone, a restarted control
+# plane (Ready only after its first publish, which opens every key) serves a
+# fresh Envoy the same cert. Real-cluster steps: docs/kek-rotation.md.
+ROT_HOST="rotate.local"
+
+# custodian_reseal — POST /v1/reseal on edge-secrets as the operator from Phase
+# 5's admin PKI. Echoes the JSON answer, then "http=<code>" on its own line.
+custodian_reseal() {
+  local pki="$LOCAL_DIR/.pki-bootstrap" pf out
+  kubectl --context "$KUBE_CONTEXT" -n "$INFRA_NS" port-forward svc/edge-secrets 18082:8082 >/dev/null 2>&1 &
+  pf=$!
+  sleep 4
+  out="$(curl -s -w '\nhttp=%{http_code}' --max-time 30 -X POST \
+    --cacert "$pki/admin-ca.crt" --cert "$pki/operator.crt" --key "$pki/operator.key" \
+    "https://localhost:18082/v1/reseal" 2>/dev/null || true)"
+  kill "$pf" >/dev/null 2>&1 || true
+  wait "$pf" 2>/dev/null || true
+  printf '%s' "$out"
+}
+
+phase33_kek_rotation() {
+  section "PHASE 33 — KEK rotation: every key re-sealed under a new KEK, the old one dropped, and SDS still serves the cert"
+  local pki="$LOCAL_DIR/.pki-bootstrap" tmp node ip pgpod body code out res old_kek new_kek old_kid new_kid left start_before old_pod new_pod i=0 s
+  node="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].spec.nodeName}')"
+  ip="$(k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  [ -n "$ip" ] || die "PHASE33: no edge-proxy node IP"
+  pgpod="$(k get pod -n "$INFRA_NS" -l app=postgres -o jsonpath='{.items[0].metadata.name}')"
+  psql_edge() { k exec -i -n "$INFRA_NS" "$pgpod" -- psql -U postgres -d edge -v ON_ERROR_STOP=1 -qtA -c "$1"; }
+  # rot_served — the HTTPS answer for $ROT_HOST on the shared port, retried until
+  # it presents its own cert and reaches its backend.
+  rot_served() {
+    local out n=0
+    while :; do
+      out="$(sni_get "$ip" "$ROT_HOST")"
+      has "$out" "CN=$ROT_HOST" && has "$out" "TENANT-A-BACKEND" && { printf '%s' "$out"; return; }
+      n=$((n + 1)); [ "$n" -lt 30 ] || { printf '%s\n' "$out" | tail -15 >&2; die "PHASE33 FAIL: $ROT_HOST was not served its cert ($1)"; }
+      sleep 2
+    done
+  }
+  restart_kek_holders() {
+    k -n "$INFRA_NS" rollout restart deploy/edge-control-plane deploy/edge-secrets >/dev/null
+    wait_rollout deploy/edge-control-plane "$INFRA_NS" 240s >/dev/null || die "PHASE33 FAIL: the control plane did not come back Ready ($1)"
+    wait_rollout deploy/edge-secrets "$INFRA_NS" 240s >/dev/null || die "PHASE33 FAIL: the custodian did not come back Ready ($1)"
+  }
+
+  section "a cert for $ROT_HOST written through the custodian, routed on the shared SNI port :$SNI_PORT"
+  tmp="$(mktemp -d)"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$ROT_HOST" \
+    -keyout "$tmp/rot.key" -out "$tmp/rot.crt" >/dev/null 2>&1 || die "openssl could not mint $ROT_HOST's cert"
+  body="$(jq -n --rawfile c "$tmp/rot.crt" --rawfile k "$tmp/rot.key" '{kind: "tls_certificate", cert_pem: $c, key_pem: $k}')"
+  rm -rf "$tmp"
+  code="$(custodian_put rotate-cert "$body")"
+  [ "$code" = 200 ] || die "PHASE33: the custodian did not accept $ROT_HOST's cert (HTTP $code)"
+  psql_edge "INSERT INTO routes (id,name,gateway_id,hosts,path_prefix,cluster_name,timeout_seconds,auth_policy,tls_secret_name,deleted_at)
+VALUES ('rotate','rotate','sni-shared-https',ARRAY['$ROT_HOST']::text[],'/','tenant-a',30,'none','rotate-cert',NULL)
+ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.hosts,tls_secret_name=EXCLUDED.tls_secret_name,
+  cluster_name=EXCLUDED.cluster_name,auth_policy=EXCLUDED.auth_policy,updated_at=now(),deleted_at=NULL;" >/dev/null
+  old_kid="$(psql_edge "SELECT split_part(key_pem, ':', 3) FROM secrets WHERE name='rotate-cert' AND key_pem LIKE 'enc:v2:%'")"
+  [ -n "$old_kid" ] || die "PHASE33 FAIL: rotate-cert's key is not sealed enc:v2:<kid>:... at rest"
+  out="$(rot_served "before the rotation")"
+  start_before="$(printf '%s\n' "$out" | grep -m1 'start date:' | sed 's/^[* ]*//')"
+  ok "rotate-cert sealed under KEK $old_kid; $ROT_HOST served CN=$ROT_HOST ($start_before) -> TENANT-A-BACKEND"
+
+  section "rotate: a new SECRET_KEK, the old one as SECRET_KEK_PREVIOUS, in both services' Secrets; both restarted"
+  old_kek="$(k -n "$INFRA_NS" get secret edge-secrets-config -o jsonpath='{.data.SECRET_KEK}' | base64 -d)"
+  new_kek="$(openssl rand -base64 32)"
+  for s in edge-control-plane-postgres edge-secrets-config; do
+    k -n "$INFRA_NS" patch secret "$s" --type merge \
+      -p "$(jq -nc --arg n "$new_kek" --arg o "$old_kek" '{stringData: {SECRET_KEK: $n, SECRET_KEK_PREVIOUS: $o}}')" >/dev/null
+  done
+  restart_kek_holders "holding the new KEK and the old"
+  rot_served "mid-rotation" >/dev/null
+  ok "mid-rotation: both services hold the new KEK and the old; $ROT_HOST still served"
+
+  section "re-seal through the custodian: every key moved onto the new KEK"
+  res="$(custodian_reseal)"
+  has "$res" "http=200" || die "PHASE33 FAIL: the re-seal was refused: $res"
+  res="$(printf '%s\n' "$res" | sed '$d')"
+  new_kid="$(printf '%s' "$res" | jq -r '.key_id')"
+  echo "  POST /v1/reseal -> $res"
+  [ -n "$new_kid" ] && [ "$new_kid" != "$old_kid" ] || die "PHASE33 FAIL: the re-seal answered KEK '$new_kid', not a new one"
+  [ "$(printf '%s' "$res" | jq -r '.resealed')" -ge 1 ] || die "PHASE33 FAIL: the re-seal moved no key"
+  left="$(psql_edge "SELECT count(*) FROM secrets WHERE key_pem IS NOT NULL AND key_pem <> '' AND key_pem NOT LIKE 'enc:v2:$new_kid:%'")"
+  [ "$left" = 0 ] || die "PHASE33 FAIL: $left key(s) are not sealed under the new KEK $new_kid"
+  ok "every key at rest is enc:v2:$new_kid:... — rotate-cert moved from $old_kid"
+
+  section "drop the old KEK: SECRET_KEK_PREVIOUS removed from both Secrets; both restarted"
+  for s in edge-control-plane-postgres edge-secrets-config; do
+    k -n "$INFRA_NS" patch secret "$s" --type json -p '[{"op":"remove","path":"/data/SECRET_KEK_PREVIOUS"}]' >/dev/null
+  done
+  # Phase 5 re-applies the KEK from this file on a re-run: keep it the live one.
+  printf '%s' "$new_kek" > "$pki/secret_kek.b64"
+  restart_kek_holders "holding the new KEK alone"
+  ok "the control plane and the custodian are Ready holding only KEK $new_kid"
+
+  section "a fresh Envoy on $node is served the cert by a control plane that holds only the new KEK"
+  old_pod="$(ep_pod_on "$node")"
+  k -n edge delete pod "$old_pod" --wait=true >/dev/null
+  while :; do
+    new_pod="$(ep_pod_on "$node")"
+    [ -n "$new_pod" ] && [ "$new_pod" != "$old_pod" ] && k -n edge wait --for=condition=Ready "pod/$new_pod" --timeout=10s >/dev/null 2>&1 && break
+    i=$((i + 1)); [ "$i" -lt 30 ] || die "PHASE33: no new edge-proxy became Ready on $node"
+    sleep 3
+  done
+  out="$(rot_served "after the rotation, fresh Envoy $new_pod")"
+  has "$out" "$start_before" || { printf '%s\n' "$out" | tail -15; die "PHASE33 FAIL: $ROT_HOST was served a different cert after the rotation"; }
+  ok "PHASE 33 — KEK rotated: every key re-sealed under $new_kid, $old_kid dropped, and a fresh Envoy is served $ROT_HOST's same cert over SDS"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -3407,7 +3523,8 @@ main() {
   phase30_keyless_agents
   phase31_agent_rate_limits
   phase32_no_internet
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster."
+  phase33_kek_rotation
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

@@ -147,6 +147,14 @@ spec:
                   name: {{ .Values.postgres.existingSecret }}
                   key: SECRET_KEK
                   optional: true
+            # Mid-rotation only: the old KEK(s), comma-separated, so keys not yet
+            # re-sealed still open (docs/kek-rotation.md). MUST equal the custodian's.
+            - name: SECRET_KEK_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: SECRET_KEK_PREVIOUS
+                  optional: true
             - name: POD_NAME
               valueFrom:
                 fieldRef:

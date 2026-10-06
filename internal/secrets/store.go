@@ -31,13 +31,23 @@ type SecretStore interface {
 	Upsert(ctx context.Context, name, certPEM, keyPEM, kind string) error
 	Delete(ctx context.Context, name string) (bool, error)
 	GetMeta(ctx context.Context, name string) (*SecretMeta, error)
+	// Reseal re-seals every stored key under the current KEK (KEK rotation).
+	Reseal(ctx context.Context) (ResealResult, error)
 	Ping(ctx context.Context) error
+}
+
+// ResealResult reports a re-seal: the KEK every key is now sealed under, how
+// many keys were re-sealed, and how many already were under it.
+type ResealResult struct {
+	KeyID          string
+	Resealed       int
+	AlreadyCurrent int
 }
 
 // Store is the SOLE production writer of the shared `secrets` table.
 type Store struct {
 	pool *pgxpool.Pool
-	kek  []byte // nil ⇒ encryption disabled (key_pem stored as plaintext)
+	ring *keycrypt.Keyring // nil ⇒ encryption disabled (key_pem stored as plaintext)
 }
 
 // StoreOption configures a Store.
@@ -45,7 +55,11 @@ type StoreOption func(*Store)
 
 // WithKEK seals key material at rest under kek (AES-256-GCM). A nil kek leaves
 // keys as plaintext (encryption disabled).
-func WithKEK(kek []byte) StoreOption { return func(s *Store) { s.kek = kek } }
+func WithKEK(kek []byte) StoreOption { return WithKeyring(keycrypt.NewKeyring(kek)) }
+
+// WithKeyring seals under the keyring's current KEK and opens keys sealed
+// under any KEK it holds — what Reseal needs during a rotation.
+func WithKeyring(r *keycrypt.Keyring) StoreOption { return func(s *Store) { s.ring = r } }
 
 // NewStore opens a pgxpool against the shared DB and verifies connectivity.
 func NewStore(ctx context.Context, dsn string, opts ...StoreOption) (*Store, error) {
@@ -83,7 +97,7 @@ func (s *Store) Upsert(ctx context.Context, name, certPEM, keyPEM, kind string) 
 	// Seal a real key at rest (AES-256-GCM under the KEK); a CA bundle's empty key
 	// is left empty so NULLIF stores SQL NULL. A nil KEK is passthrough (plaintext).
 	if keyPEM != "" {
-		sealed, sErr := keycrypt.Seal(s.kek, keyPEM)
+		sealed, sErr := s.ring.Seal(keyPEM)
 		if sErr != nil {
 			return fmt.Errorf("seal key: %w", sErr)
 		}
@@ -110,6 +124,64 @@ func (s *Store) Delete(ctx context.Context, name string) (bool, error) {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// Reseal re-seals every stored key under the current KEK, in one transaction.
+// A key under a previous KEK, in the legacy enc:v1 format, or still plaintext
+// from before encryption is opened with the keyring and sealed again; a key
+// already under the current KEK is left alone. The key itself never changes, so
+// SDS serves the same material throughout; afterwards the previous KEKs can be
+// dropped. A key no KEK held can open aborts the whole re-seal, naming it.
+func (s *Store) Reseal(ctx context.Context) (ResealResult, error) {
+	if s.ring == nil {
+		return ResealResult{}, errors.New("no KEK configured to re-seal under")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ResealResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx,
+		`SELECT name, key_pem FROM secrets WHERE key_pem IS NOT NULL AND key_pem <> '' ORDER BY name FOR UPDATE`)
+	if err != nil {
+		return ResealResult{}, err
+	}
+	type row struct{ name, key string }
+	var keys []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.name, &r.key); err != nil {
+			rows.Close()
+			return ResealResult{}, err
+		}
+		keys = append(keys, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return ResealResult{}, err
+	}
+
+	res := ResealResult{KeyID: s.ring.KeyID()}
+	for _, r := range keys {
+		if s.ring.IsCurrent(r.key) {
+			res.AlreadyCurrent++
+			continue
+		}
+		pt, err := s.ring.Open(r.key)
+		if err != nil {
+			return ResealResult{}, fmt.Errorf("secret %q: %w", r.name, err)
+		}
+		sealed, err := s.ring.Seal(pt)
+		if err != nil {
+			return ResealResult{}, fmt.Errorf("secret %q: seal: %w", r.name, err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE secrets SET key_pem = $2 WHERE name = $1`, r.name, sealed); err != nil {
+			return ResealResult{}, err
+		}
+		res.Resealed++
+	}
+	return res, tx.Commit(ctx)
 }
 
 // GetMeta returns metadata (fingerprint + notAfter) — NEVER the key material.

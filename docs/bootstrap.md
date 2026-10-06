@@ -33,6 +33,7 @@ Run the printed `kubectl create secret` commands:
   `edge-control-plane-postgres` — the **same value** both sides, so the
   control-plane can decrypt what the custodian sealed. The custodian **refuses to
   start** without SECRET_KEK (encryption at rest is mandatory).
+  To change it later without taking SDS down, see [kek-rotation.md](kek-rotation.md).
 
 ## 3. Migrate the shared DB
 Apply both schemas (control-plane + OSB) **before** the services start — the

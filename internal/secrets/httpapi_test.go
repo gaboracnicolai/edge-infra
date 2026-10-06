@@ -2,8 +2,10 @@ package secrets
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -140,5 +142,38 @@ func TestServer_GetReturnsMetadataOnly(t *testing.T) {
 	}
 	if strings.Contains(body, "PRIVATE KEY") || strings.Contains(body, "cert_pem") || strings.Contains(body, "key_pem") {
 		t.Error("GET must NEVER return cert/key material")
+	}
+}
+
+// POST /v1/reseal is operator-only, and answers with the KEK and counts.
+func TestServer_Reseal(t *testing.T) {
+	fake := &fakeStore{}
+	srv := NewServer(fake, "s3cret", discardLog())
+	reseal := func(adminKey string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/reseal", nil)
+		if adminKey != "" {
+			req.Header.Set("X-Admin-Key", adminKey)
+		}
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := reseal(""); rec.Code != http.StatusUnauthorized || fake.reseals != 0 {
+		t.Fatalf("unauthenticated re-seal: want 401 and no store call; got %d, %d calls", rec.Code, fake.reseals)
+	}
+	rec := reseal("s3cret")
+	if rec.Code != http.StatusOK || fake.reseals != 1 {
+		t.Fatalf("operator re-seal: want 200 and one store call; got %d, %d calls", rec.Code, fake.reseals)
+	}
+	var got struct {
+		KeyID          string `json:"key_id"`
+		Resealed       int    `json:"resealed"`
+		AlreadyCurrent int    `json:"already_current"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.KeyID != "kid-new" || got.Resealed != 2 || got.AlreadyCurrent != 1 {
+		t.Errorf("re-seal answer = %+v; want kid-new, 2 re-sealed, 1 already current", got)
 	}
 }

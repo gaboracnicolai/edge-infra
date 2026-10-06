@@ -33,7 +33,7 @@ type querier interface {
 // PostgresStore is a Store backed by a PostgreSQL connection pool.
 type PostgresStore struct {
 	pool pgxDB
-	kek  []byte // nil ⇒ secret keys read as plaintext (encryption disabled)
+	ring *keycrypt.Keyring // nil ⇒ secret keys read as plaintext (encryption disabled)
 }
 
 // Option configures a PostgresStore.
@@ -41,7 +41,11 @@ type Option func(*PostgresStore)
 
 // WithKEK decrypts sealed secret key material on load (AES-256-GCM under kek).
 // A nil kek reads keys as-is; a sealed value with no/wrong kek fails loudly.
-func WithKEK(kek []byte) Option { return func(s *PostgresStore) { s.kek = kek } }
+func WithKEK(kek []byte) Option { return WithKeyring(keycrypt.NewKeyring(kek)) }
+
+// WithKeyring decrypts keys sealed under any KEK the keyring holds — the
+// current one or, mid-rotation, a previous one.
+func WithKeyring(r *keycrypt.Keyring) Option { return func(s *PostgresStore) { s.ring = r } }
 
 // NewPostgresStore opens a pgxpool and verifies connectivity.
 func NewPostgresStore(ctx context.Context, dsn string, opts ...Option) (*PostgresStore, error) {
@@ -132,7 +136,7 @@ func (s *PostgresStore) LoadSnapshot(ctx context.Context) (*Snapshot, error) {
 	if snap.Endpoints, err = loadEndpoints(ctx, tx); err != nil {
 		return nil, fmt.Errorf("load endpoints: %w", err)
 	}
-	if snap.Secrets, err = loadSecrets(ctx, tx, s.kek); err != nil {
+	if snap.Secrets, err = loadSecrets(ctx, tx, s.ring); err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
 	}
 	if snap.EgressDestinations, err = loadEgressDestinations(ctx, tx); err != nil {
@@ -372,7 +376,7 @@ func loadEgressDestinations(ctx context.Context, q querier) ([]EgressDestination
 	return out, rows.Err()
 }
 
-func loadSecrets(ctx context.Context, q querier, kek []byte) ([]Secret, error) {
+func loadSecrets(ctx context.Context, q querier, ring *keycrypt.Keyring) ([]Secret, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, name, cert_pem, COALESCE(key_pem, ''), COALESCE(kind, 'tls_certificate')
 		FROM secrets
@@ -392,7 +396,7 @@ func loadSecrets(ctx context.Context, q querier, kek []byte) ([]Secret, error) {
 		// Decrypt a sealed key so BuildSecrets inlines valid PEM. Plaintext
 		// (pre-encryption) keys pass through; a sealed key with no/wrong KEK errors
 		// LOUDLY so a bad snapshot is never served.
-		key, err := keycrypt.Open(kek, s.KeyPEM)
+		key, err := ring.Open(s.KeyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("open secret %q key: %w", s.Name, err)
 		}
