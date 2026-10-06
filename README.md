@@ -20,6 +20,18 @@ allowed to make.
 This repository is Talyvor Edge: the Envoy xDS control plane, the Rust `ext_authz` auth-service,
 the Open Service Broker (OSB), and the token issuer for a multi-tenant edge.
 
+## Customer documentation
+
+| | |
+|---|---|
+| [Installing Talyvor Edge](docs/install.md) | from an empty cluster to a request refused without a token and answered with one — every command run by `make kind-install-guide` |
+| [Sizing and high availability](docs/sizing-and-ha.md) | what each part needs, and what keeps serving when a part fails |
+| [Air-gapped install](docs/air-gap.md) | installing from your own registry, with no route to the internet |
+| [Upgrading](docs/upgrade.md) | moving to a new release, and back — run by the same test |
+| [Backup and restore](docs/backup.md) | what to keep, and the restore drill (`make kind-backup`) |
+| [Threat model](docs/threat-model.md) | what Edge defends, against whom, and what it does not yet |
+| [Data flow](docs/data-flow.md) | where every request, key and answer goes, the answer pool included |
+
 ---
 
 ## Status: kind-only today
@@ -174,6 +186,7 @@ manifests, Kubernetes API deprecations, dependency CVEs).
 | `issuer-test.yaml` | issuer suite against a real DB |
 | `deploy-test.yaml` | Helm lint + xDS mTLS render proof for base and every overlay; `promtool check rules` on edge-observability's rules |
 | `policy-test.yaml` | Kyverno policy tests |
+| `kind-install-guide.yaml` | every `sh` block of `docs/install.md`, then of `docs/upgrade.md`, run as written on kind |
 
 ### Integration tests are opted into CI by name — and that is guarded now
 
