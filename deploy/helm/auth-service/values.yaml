@@ -12,6 +12,20 @@ service:
 
 config:
   existingSecret: auth-service-secrets
+  # How often each issuer's signing keys are re-read (JWKS_REFRESH_S).
+  jwksRefreshSeconds: 300
+
+# Signing keys held in the cluster, for an identity provider the gateway cannot
+# reach at run time (an air-gapped cluster trusting your own IdP). Put each
+# provider's JWKS document in this Secret, one key per provider, e.g.
+#   kubectl -n infra create secret generic idp-jwks --from-file=corp.json=<(curl -s https://idp.corp.example/keys)
+# and point its JWT_ISSUERS entry at the file instead of a URL:
+#   {"issuer":"https://idp.corp.example","jwks_file":"/etc/auth-service/jwks/corp.json"}
+# The keys are re-read every jwksRefreshSeconds, so updating the Secret rotates
+# them with no restart and no network call. "" = no Secret mounted.
+jwksFiles:
+  existingSecret: ""
+  mountPath: /etc/auth-service/jwks
 
 tls:
   existingSecret: auth-service-tls-secret  # created by k8s/certs/auth-service-cert.yaml

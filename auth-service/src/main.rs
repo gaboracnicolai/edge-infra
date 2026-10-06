@@ -45,15 +45,12 @@ async fn main() -> Result<(), AppError> {
     let metrics = Metrics::new()?;
     let mut issuers = HashMap::new();
     for idp in cfg.issuers() {
-        let jwks = JwksCache::new(&idp.jwks_url, idp.ca_file.as_deref()).await?;
-        Arc::clone(&jwks).start_refresh(
-            idp.jwks_url.clone(),
-            cfg.jwks_refresh_s,
-            Arc::clone(&metrics),
-        );
+        let source = idp.jwks_source();
+        let jwks = JwksCache::load(&source, idp.ca_file.as_deref()).await?;
+        Arc::clone(&jwks).start_refresh(source.clone(), cfg.jwks_refresh_s, Arc::clone(&metrics));
         // issuers() always resolves the audience.
         let audience = idp.audience.unwrap_or_default();
-        info!(issuer = %idp.issuer, jwks_url = %idp.jwks_url, audience = %audience, "trusting issuer");
+        info!(issuer = %idp.issuer, jwks = %source, audience = %audience, "trusting issuer");
         issuers.insert(
             idp.issuer.clone(),
             TrustedIssuer::new(&idp.issuer, &audience, jwks),

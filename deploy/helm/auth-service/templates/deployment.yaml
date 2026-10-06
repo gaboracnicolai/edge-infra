@@ -104,6 +104,8 @@ spec:
               value: "0.0.0.0:{{ .Values.service.grpcPort }}"
             - name: METRICS_ADDR
               value: "0.0.0.0:{{ .Values.service.metricsPort }}"
+            - name: JWKS_REFRESH_S
+              value: {{ .Values.config.jwksRefreshSeconds | quote }}
             - name: JWKS_URL
               valueFrom:
                 secretKeyRef:
@@ -150,6 +152,11 @@ spec:
               mountPath: {{ .mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.jwksFiles.existingSecret }}
+            - name: jwks-files
+              mountPath: {{ .Values.jwksFiles.mountPath }}
+              readOnly: true
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: grpc
@@ -164,6 +171,11 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
+        {{- if .Values.jwksFiles.existingSecret }}
+        - name: jwks-files
+          secret:
+            secretName: {{ .Values.jwksFiles.existingSecret }}
+        {{- end }}
         {{- with .Values.tls }}
         - name: auth-tls
           secret:
