@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup kind-observability observability-rules kubeconform
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup kind-install-guide kind-observability observability-rules kubeconform
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -146,6 +146,14 @@ kind-datastores:
 # cluster is deleted. Needs docker, kind, kubectl, helm and jq.
 kind-backup:
 	bash deploy/local/backup.sh
+
+# docs/install.md, run as written, on a throwaway kind cluster: every sh block of
+# the guide in order, in one shell, against kind with Calico and the release's
+# images built from the working tree. Passes only if every block runs and every
+# check in it holds (the route answers 401 without a token and the backend with
+# one); then the cluster is deleted. Same tools and host ports as kind-e2e, plus git.
+kind-install-guide:
+	bash deploy/local/install-guide.sh
 
 # The edge-observability chart on a throwaway kind cluster: installed as its
 # values.yaml says, every rule file loaded and evaluated by Prometheus, then
