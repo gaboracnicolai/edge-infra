@@ -117,7 +117,7 @@ want_rules="$(grep -hE '^ +- (alert|record):' "$CHART"/rules/*.yaml | wc -l | tr
 rules_ok() {
   local r
   r="$(graf /api/datasources/proxy/uid/prometheus/api/v1/rules)" || return 1
-  RULES_SEEN="$(jq -r '[.data.groups | length, ([.data.groups[].rules[]] | length), ([.data.groups[].rules[] | select(.health == "ok")] | length)] | @tsv' <<<"$r")"
+  RULES_SEEN="$(jq -r '[(.data.groups | length), ([.data.groups[].rules[]] | length), ([.data.groups[].rules[] | select(.health == "ok")] | length)] | @tsv' <<<"$r")"
   RULES_ERR="$(jq -r '[.data.groups[].rules[] | select(.health == "err") | "\(.name): \(.lastError)"] | join("; ")' <<<"$r")"
   [ -z "$RULES_ERR" ] || return 1
   [ "$RULES_SEEN" = "$want_groups	$want_rules	$want_rules" ]
