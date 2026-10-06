@@ -121,7 +121,9 @@ served_within() {  # <host> <expected-code> <tries> — poll the gateway every 2
 }
 # fleet_live <label> — NOT frozen on last-good: a route written now is published,
 # acked by every connected edge-proxy (one stream per proxy pod, none behind) and
-# served; removing it is published too.
+# served; removing it is published too. The ack wait is 90s: after the
+# control-plane pod moves node, each proxy reconnects on Envoy's xDS retry
+# backoff, which grows to about 30s (the chart sets no retry policy).
 fleet_live() {
   local host="canary-$1.local" nodes="" want got="" i=0
   canary add "$host"
@@ -129,7 +131,7 @@ fleet_live() {
   want="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o json \
     | jq '[.items[] | select(.metadata.deletionTimestamp == null)
            | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length')"
-  while [ "$i" -lt 10 ]; do
+  while [ "$i" -lt 45 ]; do
     nodes="$(admin_get /admin/v1/nodes)"
     got="$(printf '%s' "$nodes" | jq -r '.published_version as $v
       | "\(.active_streams) \(.nodes_behind) \([.nodes[] | select(.acked_version != $v)] | length)"' 2>/dev/null || true)"
@@ -185,8 +187,11 @@ prober_stop() {
 # authz_probe <with-cert|no-cert> — a TLS client to the auth-service gRPC port
 # from the edge namespace; echoes "code=<http> exit=<curl exit>". with-cert
 # presents envoy-authz-client-tls-secret and verifies the server against its CA.
+# The pod runs detached and its result is read from its log once it has finished:
+# `kubectl run --rm -i` lost the output whenever the container exited before
+# kubectl attached, and that empty string then read as a refusal.
 authz_probe() {
-  local name="authz-probe-$1" url="https://auth-service.${INFRA_NS}.svc.cluster.local:50051/" cmd spec
+  local name="authz-probe-$1" url="https://auth-service.${INFRA_NS}.svc.cluster.local:50051/" cmd spec phase log out
   if [ "$1" = with-cert ]; then
     cmd="curl -s --max-time 6 --cacert /c/ca.crt --cert /c/tls.crt --key /c/tls.key -o /dev/null -w code=%{http_code} $url; echo \" exit=\$?\""
   else
@@ -197,8 +202,16 @@ authz_probe() {
               + (if $mode == "with-cert" then {volumeMounts: [{name: "c", mountPath: "/c", readOnly: true}]} else {} end))]}
             + (if $mode == "with-cert" then {volumes: [{name: "c", secret: {secretName: "envoy-authz-client-tls-secret"}}]} else {} end))}')"
   k -n edge delete pod "$name" --ignore-not-found >/dev/null 2>&1 || true
-  k -n edge run "$name" --rm -i --restart=Never --image="$ATTACKER_IMAGE" --pod-running-timeout=120s \
-    --overrides="$spec" 2>/dev/null | grep -o 'code=[0-9]* exit=[0-9]*' | tail -1 || true
+  k -n edge run "$name" --restart=Never --image="$ATTACKER_IMAGE" --overrides="$spec" >/dev/null
+  # The command ends in `echo`, so a probe that ran exits 0 whatever curl got.
+  k -n edge wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$name" --timeout=120s >/dev/null 2>&1 || true
+  phase="$(k -n edge get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  log="$(k -n edge logs "$name" 2>/dev/null || true)"
+  k -n edge delete pod "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  [ "$phase" = Succeeded ] || die "authz probe pod $name did not finish within 120s (phase=${phase:-unknown}): ${log}"
+  out="$(printf '%s' "$log" | grep -o 'code=[0-9]* exit=[0-9]*' | tail -1 || true)"
+  [ -n "$out" ] || die "authz probe produced no output (pod $name finished, log: '${log}')"
+  printf '%s\n' "$out"
 }
 
 # ---- setup: the cluster and everything that is not part of the cutover ----------
