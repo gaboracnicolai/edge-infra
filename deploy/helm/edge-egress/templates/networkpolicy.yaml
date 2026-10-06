@@ -1,0 +1,40 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny ingress: when networkPolicy.enabled, edge-egress accepts only the
+# flows listed; everything else is dropped by Calico (or any CNI that enforces
+# NetworkPolicy). Kubelet probes still pass — traffic from a pod's own node is
+# never blocked.
+{{- if not .Values.networkPolicy.clientNamespaceSelectors }}
+{{- fail "networkPolicy.clientNamespaceSelectors is required when networkPolicy.enabled: the namespaces whose agents send their calls through edge-egress" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "edge-egress.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-egress.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "edge-egress.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # The agents: pods in the namespaces selected, to the proxy port only.
+    - from:
+        {{- range .Values.networkPolicy.clientNamespaceSelectors }}
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: proxy }
+    # This chart's own `helm test` pod (templates/tests/), to the one port it checks.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "edge-egress.testLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: proxy }
+    {{- with .Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

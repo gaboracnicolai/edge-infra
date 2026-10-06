@@ -5,6 +5,13 @@ api:
     tag: "447ceb18980fc02fdc7e28db16354c62e3018850"  # pin to the SHA you pushed
     pullPolicy: IfNotPresent
   port: 8080
+  # HorizontalPodAutoscaler (autoscaling/v2) on CPU for the api, off by default.
+  # While it is on it owns api.replicaCount, and it needs the cluster's metrics
+  # API (metrics-server). There is no default ceiling: set maxReplicas when you
+  # switch it on. minReplicas defaults to replicaCount, and
+  # targetCPUUtilizationPercentage to Kubernetes' own (80).
+  autoscaling:
+    enabled: false
   resources:
     requests:
       cpu: 100m
@@ -15,6 +22,13 @@ api:
 
 worker:
   replicaCount: 2
+  # HorizontalPodAutoscaler (autoscaling/v2) on CPU for the worker, off by default.
+  # While it is on it owns worker.replicaCount, and it needs the cluster's metrics
+  # API (metrics-server). There is no default ceiling: set maxReplicas when you
+  # switch it on. minReplicas defaults to replicaCount, and
+  # targetCPUUtilizationPercentage to Kubernetes' own (80).
+  autoscaling:
+    enabled: false
   image:
     repository: ghcr.io/gaboracnicolai/edge-osb
     tag: "447ceb18980fc02fdc7e28db16354c62e3018850"  # pin to the SHA you pushed
@@ -100,6 +114,23 @@ metricsAuth:
 podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: "8080"
+
+# PodDisruptionBudgets, one for the api and one for the worker: a voluntary
+# disruption (a node drain, a cluster upgrade) evicts at most maxUnavailable of
+# each at once. Set minAvailable to keep a floor instead; when it is set it is
+# used in place of maxUnavailable.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# The image `helm test <release>` runs (templates/tests/): curl, checking that the
+# release answers through its Service. global.imageRegistry applies to it too, so
+# mirror it with the others for an air-gapped install.
+tests:
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"  # pinned digest
+    pullPolicy: IfNotPresent
 
 nameOverride: ""
 fullnameOverride: ""

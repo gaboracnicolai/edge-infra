@@ -1,0 +1,24 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $component := list "api" "worker" }}
+---
+# A voluntary disruption (a node drain, a cluster upgrade) evicts the {{ $component }}
+# pods only as far as this budget allows. A node that dies is not voluntary:
+# replicas, not this budget, cover that.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "edge-osb.fullname" $ }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-osb.labels" $ | nindent 4 }}
+spec:
+  {{- with $.Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ . }}
+  {{- else }}
+  maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include (printf "edge-osb.%sSelectorLabels" $component) $ | nindent 6 }}
+{{- end }}
+{{- end }}

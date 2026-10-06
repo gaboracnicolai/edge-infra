@@ -60,6 +60,31 @@ nats:
     size: 1Gi
     storageClass: ""
 
+# NetworkPolicy: default-deny ingress to the bundled Postgres, Redis and NATS,
+# each open on its own port to this release's own pods (the migration, the
+# backups, `helm test`) and to the clients below. Enforced by Calico (or any CNI
+# that enforces NetworkPolicy). OFF in the base values, like every chart's.
+networkPolicy:
+  enabled: false
+  # NetworkPolicy peers that may reach all three. The default is Talyvor Edge's
+  # own services, and their schema migrations, in this namespace; running them in
+  # another, add a namespaceSelector to the entry.
+  clients:
+    - podSelector:
+        matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+              - edge-control-plane
+              - edge-control-plane-migrate
+              - edge-osb
+              - edge-issuer
+              - edge-issuer-migrate
+              - edge-secrets
+              - edge-ratelimit
+  # More ingress rules, appended to each store's policy as written.
+  extraIngress: []
+
 # ---- external datastores (used for any store whose enabled is false) ---------
 external:
   postgres:

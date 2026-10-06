@@ -32,6 +32,8 @@ CSI_DRIVER_SPIFFE_VERSION="${CSI_DRIVER_SPIFFE_VERSION:-v0.15.0}"   # jetstack c
 # cluster in Phase 3 to avoid docker-hub pull limits at pod-creation time.
 ENVOY_IMAGE="${ENVOY_IMAGE:-envoyproxy/envoy:v1.39.2@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85}"
 BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}"
+# The charts' `helm test` image (tests.image in each chart's values.yaml).
+TEST_IMAGE="${TEST_IMAGE:-curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}"
 # Trivial echo backend for the two tenants (Phase 8). Kept in sync with
 # deploy/local/manifests/tenants.yaml.
 ECHO_IMAGE="${ECHO_IMAGE:-hashicorp/http-echo:0.2.3}"

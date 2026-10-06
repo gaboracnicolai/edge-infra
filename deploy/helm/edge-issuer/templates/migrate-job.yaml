@@ -15,13 +15,26 @@ spec:
   backoffLimit: 3
   template:
     metadata:
+      # Not the Deployment's selector labels: a migrate pod serves nothing, so the
+      # Service and the PodDisruptionBudget must not select it.
       labels:
-        {{- include "edge-issuer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ include "edge-issuer.name" . }}-migrate
+        app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ include "edge-issuer.serviceAccountName" . }}
       restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532   # the distroless nonroot uid:gid, as the Deployment
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: migrate
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-issuer.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["migrate"]

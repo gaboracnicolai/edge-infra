@@ -1,0 +1,54 @@
+{{- if .Values.hostNetwork }}
+# `helm test <release>`: the Envoy on the node this pod lands on is up and has
+# its configuration — its readiness listener (:9902, the bootstrap's static
+# health listener) answers LIVE on the node's own address, where the gateway
+# listens.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-proxy.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-proxy.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-proxy.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          url="http://$HOST_IP:9902/ready"
+          body="$(curl -fsS --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "$url")"
+          echo "GET $url -> $body"
+          case "$body" in
+            LIVE*) echo "PASS: the node's Envoy is up and serving its configuration" ;;
+            *) echo "FAIL: the node's Envoy is not LIVE"; exit 1 ;;
+          esac
+{{- end }}

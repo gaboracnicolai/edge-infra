@@ -1,0 +1,32 @@
+{{- range $component := list "api" "worker" }}
+{{- $values := index $.Values $component }}
+{{- if $values.autoscaling.enabled }}
+---
+# Scales the {{ $component }} Deployment on CPU. While this is on it owns that replica
+# count ({{ $component }}.replicaCount is not rendered), and it needs the cluster's
+# metrics API (metrics-server) to scale at all.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "edge-osb.fullname" $ }}-{{ $component }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-osb.labels" $ | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "edge-osb.fullname" $ }}-{{ $component }}
+  minReplicas: {{ $values.autoscaling.minReplicas | default $values.replicaCount }}
+  maxReplicas: {{ required (printf "%s.autoscaling.maxReplicas is required when %s.autoscaling.enabled: there is no default ceiling" $component $component) $values.autoscaling.maxReplicas }}
+  {{- with $values.autoscaling.targetCPUUtilizationPercentage }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}

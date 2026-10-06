@@ -1,0 +1,54 @@
+# `helm test <release>`: a client holding only the connection Secret reaches NATS
+# through its Service and is let in with the token in NATS_URL — a CONNECT and a
+# PING, answered PONG (a wrong token is answered 'Authorization Violation').
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "nats.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nats.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000   # as the StatefulSet
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "nats.image" (dict "image" .Values.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      # Only what any client of the datastores gets: the connection Secret.
+      envFrom:
+        - secretRef:
+            name: {{ .Values.global.datastores.secretName }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -u
+          u="${NATS_URL#nats://}"; tok=""
+          case "$u" in *@*) tok="${u%%@*}"; u="${u#*@}" ;; esac
+          i=0; r=""
+          while [ "$i" -lt 10 ]; do
+            r="$(printf 'CONNECT {"verbose":false,"auth_token":"%s"}\r\nPING\r\n' "$tok" | nc -w 3 "${u%%:*}" "${u##*:}" 2>&1)"
+            case "$r" in *PONG*) break ;; esac
+            i=$((i + 1)); sleep 3
+          done
+          echo "NATS $u -> $(printf '%s' "$r" | tr -d '\r' | grep -v '^INFO' | tr '\n' ' ')"
+          case "$r" in *PONG*) ;; *) echo "FAIL: the connection Secret does not get into NATS"; exit 1 ;; esac
+          echo "PASS: the connection Secret reaches NATS"

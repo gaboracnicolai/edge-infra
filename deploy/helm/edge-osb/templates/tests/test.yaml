@@ -1,0 +1,43 @@
+# `helm test <release>`: the broker's API answers its health check on its Service
+# — the address the gateway routes OSB calls to.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-osb.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-osb.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-osb.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          url="http://{{ include "edge-osb.fullname" . }}:{{ .Values.api.port }}/healthz"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors "$url")"
+          echo "GET $url -> $code"
+          [ "$code" = 200 ] || { echo "FAIL: the broker API is not healthy"; exit 1; }
+          echo "PASS: the broker API answers on its Service"

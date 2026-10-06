@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "edge-egress.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "edge-egress.selectorLabels" . | nindent 6 }}
@@ -21,10 +23,23 @@ spec:
     spec:
       serviceAccountName: {{ include "edge-egress.serviceAccountName" . }}
       terminationGracePeriodSeconds: 30
+      # Envoy as the image's own envoy user (101), the uid its entrypoint would
+      # otherwise su-exec to from root — so the same process, never started as
+      # root. Its ports are all above 1024, so it needs no capability.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         # The xDS node id is edge-egress/<pod name>: the control plane serves a
         # node with that prefix the egress snapshot and nothing else.
         - name: bootstrap
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-egress.image" (dict "image" .Values.bootstrapImage "global" .Values.global) | quote }}
           command:
             - /bin/sh
@@ -45,6 +60,10 @@ spec:
               mountPath: /etc/envoy
       containers:
         - name: envoy
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           image: {{ include "edge-egress.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:

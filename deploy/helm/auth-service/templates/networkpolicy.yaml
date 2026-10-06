@@ -31,6 +31,13 @@ spec:
         {{- end }}
       ports:
         - { protocol: TCP, port: grpc }
+    # This chart's own `helm test` pod (templates/tests/), to the one port it checks.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "auth-service.testLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: metrics }
     {{- with .Values.networkPolicy.extraIngress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

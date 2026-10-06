@@ -1,0 +1,46 @@
+# `helm test <release>`: edge-egress answers as a proxy on its Service and refuses
+# a destination that is not on the allow-list — the 403 comes from its own rules,
+# so it has its configuration from the control plane.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-egress.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-egress.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-egress.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          proxy="http://{{ include "edge-egress.fullname" . }}:{{ .Values.proxy.port }}"
+          out="$(curl -sS -i --max-time 10 --retry 10 --retry-delay 3 --retry-all-errors -x "$proxy" http://helm-test.invalid/ 2>&1 || true)"
+          echo "$out"
+          case "$out" in
+            *"HTTP/1.1 403"*"destination not allowed"*) echo "PASS: edge-egress answers on its Service and refuses an unlisted destination" ;;
+            *) echo "FAIL: expected 403 'destination not allowed' for an unlisted host through $proxy"; exit 1 ;;
+          esac

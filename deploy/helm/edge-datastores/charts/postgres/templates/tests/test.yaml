@@ -1,0 +1,58 @@
+# `helm test <release>`: a client holding only the connection Secret reaches
+# Postgres through its Service — the edge database, and the issuer's when the
+# Secret names one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "postgres.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 70   # as the StatefulSet
+    runAsGroup: 70
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "postgres.image" (dict "image" .Values.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      # Only what any client of the datastores gets: the connection Secret.
+      envFrom:
+        - secretRef:
+            name: {{ .Values.global.datastores.secretName }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -u
+          q() { # <dsn> — the database it reaches, retried while the pod's network comes up
+            i=0
+            while [ "$i" -lt 10 ]; do
+              out="$(psql "$1" -tAc 'select current_database()' 2>&1)" && { echo "$out"; return 0; }
+              i=$((i + 1)); sleep 3
+            done
+            echo "$out" >&2; return 1
+          }
+          db="$(q "$POSTGRES_DSN")" || { echo "FAIL: POSTGRES_DSN does not reach Postgres"; exit 1; }
+          echo "POSTGRES_DSN -> database $db"
+          if [ -n "${ISSUER_DATABASE_URL:-}" ]; then
+            db="$(q "$ISSUER_DATABASE_URL")" || { echo "FAIL: ISSUER_DATABASE_URL does not reach Postgres"; exit 1; }
+            echo "ISSUER_DATABASE_URL -> database $db"
+          fi
+          echo "PASS: the connection Secret reaches Postgres"

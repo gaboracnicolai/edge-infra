@@ -1,0 +1,51 @@
+# `helm test <release>`: a client holding only the connection Secret reaches
+# Redis through its Service and is let in with the password it holds.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "redis.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "redis.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.global.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999   # as the StatefulSet
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "redis.image" (dict "image" .Values.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      # Only what any client of the datastores gets: the connection Secret.
+      envFrom:
+        - secretRef:
+            name: {{ .Values.global.datastores.secretName }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -u
+          i=0; r=""
+          while [ "$i" -lt 10 ]; do
+            r="$(REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h "${REDIS_ADDR%:*}" -p "${REDIS_ADDR##*:}" ping 2>&1)"
+            [ "$r" = PONG ] && break
+            i=$((i + 1)); sleep 3
+          done
+          echo "REDIS_ADDR $REDIS_ADDR, PING -> $r"
+          [ "$r" = PONG ] || { echo "FAIL: the connection Secret does not get into Redis"; exit 1; }
+          echo "PASS: the connection Secret reaches Redis"

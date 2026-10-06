@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "auth-service.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "auth-service.selectorLabels" . | nindent 6 }}

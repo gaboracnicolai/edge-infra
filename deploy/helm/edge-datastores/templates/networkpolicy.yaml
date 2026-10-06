@@ -1,0 +1,38 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- range $store := list (dict "name" "postgres" "port" 5432) (dict "name" "redis" "port" 6379) (dict "name" "nats" "port" 4222) }}
+{{- if (index $.Values $store.name).enabled }}
+---
+# Default-deny ingress to the bundled {{ $store.name }}: when networkPolicy.enabled
+# only this release's own pods (the schema migration, the backups, `helm test`)
+# and networkPolicy.clients reach it, on its port; everything else is dropped by
+# Calico (or any CNI that enforces NetworkPolicy). Kubelet probes still pass —
+# traffic from a pod's own node is never blocked.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $.Release.Name }}-{{ $store.name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-datastores.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $store.name }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Release.Name }}
+        {{- with $.Values.networkPolicy.clients }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ $store.port }} }
+    {{- with $.Values.networkPolicy.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

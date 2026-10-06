@@ -20,7 +20,9 @@ metadata:
     {{- include "edge-osb.labels" . | nindent 4 }}
     component: api
 spec:
+  {{- if not .Values.api.autoscaling.enabled }}
   replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "edge-osb.apiSelectorLabels" . | nindent 6 }}

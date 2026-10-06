@@ -1,0 +1,48 @@
+# `helm test <release>`: the rate-limit service answers a gRPC call on its
+# Service, the way Envoy calls it — a ShouldRateLimit with an empty request.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "edge-ratelimit.fullname" . }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "edge-ratelimit.testLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    # Kept after a run, so `helm test --logs` can read it; the next run replaces it.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100   # the curl image's curl_user:curl_group
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: {{ include "edge-ratelimit.image" (dict "image" .Values.tests.image "global" .Values.global) | quote }}
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -eu
+          url="http://{{ include "edge-ratelimit.fullname" . }}:{{ .Values.service.grpcPort }}/envoy.service.ratelimit.v3.RateLimitService/ShouldRateLimit"
+          # One gRPC frame holding an empty message: flag 0, length 0. From a file,
+          # not stdin, so a retry can send it again.
+          printf '\0\0\0\0\0' > /tmp/frame
+          hdrs="$(curl -sS --http2-prior-knowledge -D - -o /dev/null --max-time 10 \
+            --retry 10 --retry-delay 3 --retry-all-errors \
+            -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @/tmp/frame "$url")"
+          echo "$hdrs"
+          printf '%s' "$hdrs" | grep -qi '^grpc-status:' || { echo "FAIL: no gRPC answer from $url"; exit 1; }
+          echo "PASS: the rate-limit service answers gRPC on its Service"

@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "edge-issuer.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "edge-issuer.selectorLabels" . | nindent 6 }}
