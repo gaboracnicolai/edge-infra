@@ -85,3 +85,70 @@ migrate:
   # How long the Job may take, retries included.
   activeDeadlineSeconds: 600
   resources: {}
+
+# ---- backup and restore -------------------------------------------------------
+# A CronJob dumps every database below (pg_dump, custom format) and uploads the
+# dumps, with a sha256 MANIFEST, to your S3 bucket under <prefix><timestamp>/,
+# then points <prefix>LATEST at it — so a backup that failed halfway is never the
+# one a restore picks. Works with AWS S3, MinIO or any S3-compatible store, and
+# with bundled and external Postgres alike. Expire old backups with a lifecycle
+# rule on the bucket.
+#
+# Restoring is one command; the chart renders the restore Job as a suspended
+# CronJob, so nothing restores until you ask:
+#
+#   kubectl -n <ns> create job --from=cronjob/<release>-restore restore-$(date +%s)
+#
+# It downloads the backup named by backup.restoreFrom, checks every dump against
+# the MANIFEST, and restores each database in one transaction (all of it or none
+# of it). Back up now, outside the schedule:
+#
+#   kubectl -n <ns> create job --from=cronjob/<release>-backup backup-$(date +%s)
+#
+# The backup holds SDS keys as they are stored: sealed under SECRET_KEK when you
+# set one. Keep that key apart from the bucket — a restore without it serves
+# nothing that is sealed. See README.md.
+backup:
+  enabled: false
+  schedule: "0 3 * * *"
+  # The databases each backup holds, read from the connection Secret
+  # (global.datastores.secretName) unless an entry names its own secretName.
+  # optional: skipped when that Secret has no such key.
+  databases:
+    - name: edge                    # control plane + OSB
+      key: POSTGRES_DSN
+    - name: issuer                  # edge-issuer
+      key: ISSUER_DATABASE_URL
+      optional: true
+  # More databases in the same backup — e.g. Lens's own, so one restore brings
+  # back both. Each from a Secret key holding its postgres:// URL:
+  #   - name: lens
+  #     secretName: lens-database
+  #     key: DATABASE_URL
+  extraDatabases: []
+  s3:
+    endpoint: ""                    # "" = AWS S3; e.g. http://minio.backup.svc:9000
+    region: us-east-1
+    bucket: ""                      # required
+    prefix: "edge/"
+    # A Secret you create with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Required.
+    existingSecret: ""
+    # Path-style URLs (endpoint/bucket/key). MinIO and most S3-compatible stores
+    # need it; AWS S3 accepts it.
+    forcePathStyle: true
+  # What the restore Job restores: latest, or a timestamp a backup printed (and
+  # the folder name under the prefix), e.g. 20261006T030000Z.
+  restoreFrom: latest
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  # pg_dump and pg_restore must be at least your Postgres server's major version.
+  images:
+    postgres:
+      repository: postgres
+      tag: "16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea"
+      pullPolicy: IfNotPresent
+    s3:
+      repository: amazon/aws-cli
+      tag: "2.37.9@sha256:92de75724b6a746951f0e8b915d86bbccd7cb55aff96cd0cb4f7017272160780"
+      pullPolicy: IfNotPresent
+  resources: {}
