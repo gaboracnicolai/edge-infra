@@ -13,8 +13,8 @@ runbook to do so.
   `disallow-public-backend-services` ClusterPolicy is inert — the ClusterIP
   guarantee is **not enforced** until Kyverno is running and the `edge-policies`
   Application is synced.
-- cert-manager with the `edge-internal-ca` ClusterIssuer (issues the issuer's
-  serving cert via `k8s/certs/issuer-cert.yaml`).
+- cert-manager with the `edge-internal-ca` ClusterIssuer from the `edge-pki`
+  chart (the edge-issuer chart issues its own serving cert from it).
 - An external Postgres for the issuer (its **own** database, separate from the
   control-plane DB).
 

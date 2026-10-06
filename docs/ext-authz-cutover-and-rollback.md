@@ -52,8 +52,8 @@ environments), enable it first. Flipping auth on with no way to observe the resu
 
 1. Control-plane image carries the fail-close reconciler — **see above; this is the one that bites.**
 2. `auth-service` deployed and reachable on `:50051`, JWKS + mTLS verified.
-3. `envoy-authz-client-cert` applied. **No ArgoCD application covers `k8s/certs/`** (only
-   `k8s/policies`, via `edge-policies`), so this is a manual `kubectl apply`. Without the mounted
+3. `envoy-authz-client-cert` issued. The edge-proxy chart issues it while
+   `extAuthz.clientTLS.enabled` is on (the default), with the `edge-pki` chart's CA. Without the mounted
    client cert the ext_authz cluster renders plaintext, the fail-closed auth-service rejects it, and
    the gateway denies everything.
 

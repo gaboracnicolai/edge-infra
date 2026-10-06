@@ -22,16 +22,16 @@ that node, asks the `edge-spiffe` ClusterIssuer to sign a certificate for the
 pod's service account, and writes `tls.crt` and `tls.key` into the volume. The key never leaves the node. The certificate lives an hour and is
 renewed in place before it expires.
 
-`edge-spiffe` is a CA of its own (`k8s/spiffe/trust-root.yaml`), separate from
+`edge-spiffe` is a CA of its own (the `edge-pki` chart's `agentCA`), separate from
 `edge-internal-ca`, so an agent's certificate is never valid as an Edge
 component's, and an Edge component's is never accepted as an agent's.
 
 ## Install
 
-You need cert-manager. Then:
+You need cert-manager and the `edge-pki` chart. Then:
 
 ```bash
-kubectl apply -f k8s/spiffe/trust-root.yaml
+helm upgrade --install edge-pki deploy/helm/edge-pki -n cert-manager --wait
 kubectl -n cert-manager wait --for=condition=Ready certificate/edge-spiffe-ca
 
 helm upgrade --install cert-manager-csi-driver-spiffe cert-manager-csi-driver-spiffe \

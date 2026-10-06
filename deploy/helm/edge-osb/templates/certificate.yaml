@@ -1,0 +1,37 @@
+{{- if .Values.certificate.create }}
+{{- with .Values.tls }}
+{{- if .existingSecret }}
+{{- $svc := include "edge-osb.fullname" $ }}
+# The OSB broker's certificate: its client identity to Postgres and NATS, and
+# its serving certificate.
+# Issued into tls.existingSecret from certificate.issuerRef (by default the
+# edge-pki chart's internal CA), when the chart is installed.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: osb-client-cert
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-osb.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ .existingSecret }}
+  duration: {{ $.Values.certificate.duration }}
+  renewBefore: {{ $.Values.certificate.renewBefore }}
+  commonName: {{ $svc }}
+  dnsNames:
+    {{- with $.Values.certificate.dnsNames }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - {{ $svc }}
+    - {{ $svc }}.{{ $.Release.Namespace }}.svc.cluster.local
+    {{- end }}
+  issuerRef:
+    {{- toYaml $.Values.certificate.issuerRef | nindent 4 }}
+  usages:
+    - client auth
+    - server auth
+    - digital signature
+    - key encipherment
+{{- end }}
+{{- end }}
+{{- end }}

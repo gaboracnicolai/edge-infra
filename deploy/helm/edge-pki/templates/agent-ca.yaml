@@ -1,0 +1,46 @@
+{{- with .Values.agentCA }}
+{{- if .enabled }}
+# The agent trust root. Its CA certificate (ca.crt of secretName) is the trust
+# bundle: load it into edge-secrets as a validation_context and name it as an
+# mtls route's client_ca_secret_name (docs/agent-certificates.md).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .issuerName }}-selfsigned
+  labels:
+    {{- include "edge-pki.labels" $ | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .secretName }}
+  namespace: {{ $.Values.clusterResourceNamespace }}
+  labels:
+    {{- include "edge-pki.labels" $ | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ .commonName }}
+  secretName: {{ .secretName }}
+  duration: {{ .duration }}
+  renewBefore: {{ .renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: {{ .issuerName }}-selfsigned
+    kind: ClusterIssuer
+---
+# The issuer csi-driver-spiffe asks for every agent's certificate.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .issuerName }}
+  labels:
+    {{- include "edge-pki.labels" $ | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ .secretName }}
+{{- end }}
+{{- end }}

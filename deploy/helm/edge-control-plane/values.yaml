@@ -60,9 +60,8 @@ rateLimit:
 #
 # Needs, on the same install: the auth-service and edge-issuer charts (the
 # auth-service fetches the issuer's JWKS before it listens) and the
-# envoy-authz-client-tls-secret that edge-proxy mounts (k8s/certs/
-# envoy-authz-client-cert.yaml; edge-proxy extAuthz.clientTLS.enabled is on by
-# default). A cluster that turns this off again with a jwt route present freezes
+# envoy-authz-client-tls-secret that edge-proxy mounts (the edge-proxy chart
+# issues it while its extAuthz.clientTLS.enabled is on, the default). A cluster that turns this off again with a jwt route present freezes
 # on last-good — docs/ext-authz-cutover-and-rollback.md.
 extAuthz:
   enabled: true
@@ -144,8 +143,21 @@ redis:
   secretKey: password
 
 tls:
-  existingSecret: edge-cp-tls-secret  # created by k8s/certs/control-plane-cert.yaml
+  existingSecret: edge-cp-tls-secret  # issued by this chart (certificate.*)
   mountPath: /etc/xds-tls
+
+# The certificate in tls.existingSecret, issued by cert-manager when the chart is
+# installed, so no certificate is applied by hand. The issuer is the edge-pki
+# chart's internal CA unless issuerRef names your own. create: false to bring the
+# Secret yourself. dnsNames: [] = the names of this chart's Service.
+certificate:
+  create: true
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  dnsNames: []
+  duration: 24h
+  renewBefore: 8h
 
 # Pull secret(s) for private images, wired onto the ServiceAccount so pods (and
 # hook Jobs) can pull without a manual `kubectl patch sa`. e.g. [{name: ghcr}].

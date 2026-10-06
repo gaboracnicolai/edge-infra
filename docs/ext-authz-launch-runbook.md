@@ -48,10 +48,10 @@ the window between step 1 and step 4, in which provisioning must stay frozen.
    kubectl -n infra create secret generic edge-cp-admin --from-literal=admin-api-key="$(openssl rand -hex 24)"
    ```
    Then add `adminApi: {existingSecret: edge-cp-admin}` to `values-control-plane.yaml` in the step 1 PR.
-4. **Apply the certificates by hand. Leave out the authz client cert.** No ArgoCD app covers
-   `k8s/certs/`. Apply `root-ca-bootstrap.yaml`, `cluster-issuer.yaml`, `control-plane-cert.yaml`,
-   `envoy-xds-client-cert.yaml`, `envoy-serving-cert.yaml`, `auth-service-cert.yaml`, `issuer-cert.yaml`
-   and `osb-client-cert.yaml`. **Do not apply `envoy-authz-client-cert.yaml` yet**: it is step 3.
+4. **Install the CAs.** `helm upgrade --install edge-pki deploy/helm/edge-pki -n cert-manager --wait`.
+   Every other chart issues its own certificate from it when it syncs (`certificate.*`). The
+   edge-proxy chart issues the authz client cert only while `extAuthz.clientTLS.enabled` is on,
+   so it does not exist until step 3.
 5. **Let edge-proxy start without the authz client cert.** The chart mounts that cert as a required
    volume, so a proxy synced before step 3 never starts. In `values-proxy.yaml`, set:
    ```yaml
@@ -148,13 +148,12 @@ Then TENANTS and FLEET-LIVE.
 ## Step 3: client certificate
 
 **Do:**
+Open a PR to `values-proxy.yaml` that **removes** the launch-window `clientTLS.enabled: false`.
+The chart default issues the cert and mounts it. Merge it. The DaemonSet rolls 10% of nodes at a
+time, and your load balancer has to drain each node as it rolls. Once synced:
 ```bash
-kubectl apply -f k8s/certs/envoy-authz-client-cert.yaml
 kubectl -n edge wait --for=condition=Ready certificate/envoy-authz-client-cert --timeout=120s
 ```
-Then open a PR to `values-proxy.yaml` that **removes** the launch-window `clientTLS.enabled: false`.
-The chart default mounts the cert. Merge it. The DaemonSet rolls 10% of nodes at a time, and your load
-balancer has to drain each node as it rolls.
 
 **Check:**
 ```bash

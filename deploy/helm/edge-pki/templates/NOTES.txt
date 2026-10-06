@@ -1,0 +1,11 @@
+The Edge certificate authorities are cert-manager ClusterIssuers:
+
+  {{ .Values.internalCA.issuerName }}  — every Edge chart's certificate.issuerRef
+{{- if .Values.agentCA.enabled }}
+  {{ .Values.agentCA.issuerName }}  — agent certificates (csi-driver-spiffe)
+{{- end }}
+
+Ready when:  kubectl get clusterissuer {{ .Values.internalCA.issuerName }}{{ if .Values.agentCA.enabled }} {{ .Values.agentCA.issuerName }}{{ end }}
+Check with:  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Now install the other Edge charts: each issues its own certificate from {{ .Values.internalCA.issuerName }}.

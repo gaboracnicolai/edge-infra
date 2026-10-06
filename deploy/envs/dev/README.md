@@ -12,8 +12,9 @@ plus `deploy/argocd/applications-dev/` provide a single-node lane.
   --docker-username=<user> --docker-password=<token>`), so no manual `kubectl patch sa`.
 
 ## Prerequisites the overlay can't set (operator-provided)
-- **cert-manager** installed, plus `k8s/certs/root-ca-bootstrap.yaml` + `cluster-issuer.yaml`
-  applied (the root CA and issuer).
+- **cert-manager** installed, plus the `edge-pki` chart (the root CA and issuer):
+  `helm install edge-pki deploy/helm/edge-pki -n cert-manager`. Each chart then issues
+  its own certificate (`certificate.*`).
 - **Postgres** + a DSN secret `edge-control-plane-postgres` (key `dsn`); for local dev use
   `sslmode=disable`. Prod uses `verify-full`.
 - **NATS** for edge-osb.

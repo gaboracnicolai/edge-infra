@@ -28,8 +28,21 @@ jwksFiles:
   mountPath: /etc/auth-service/jwks
 
 tls:
-  existingSecret: auth-service-tls-secret  # created by k8s/certs/auth-service-cert.yaml
+  existingSecret: auth-service-tls-secret  # issued by this chart (certificate.*)
   mountPath: /etc/auth-tls
+
+# The certificate in tls.existingSecret, issued by cert-manager when the chart is
+# installed, so no certificate is applied by hand. The issuer is the edge-pki
+# chart's internal CA unless issuerRef names your own. create: false to bring the
+# Secret yourself. dnsNames: [] = the names of this chart's Service.
+certificate:
+  create: true
+  issuerRef:
+    name: edge-internal-ca
+    kind: ClusterIssuer
+  dnsNames: []
+  duration: 2160h   # 90 days
+  renewBefore: 360h # 15 days
 
 # Pull secret(s) for private images, wired onto the ServiceAccount so pods (and
 # hook Jobs) can pull without a manual `kubectl patch sa`. e.g. [{name: ghcr}].
