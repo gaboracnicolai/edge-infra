@@ -1642,11 +1642,13 @@ CC_ATTESTER="http://mock-attester.edge-attest.svc.cluster.local:8006/aa/evidence
 
 # cc_install <release> <trusted-key> <evidence-url> [helm args...] — the
 # auth-service chart with its confidential-node option on. No --wait: a refused
-# pod never becomes Ready.
+# pod never becomes Ready. It mounts the auth-service release's certificate, so
+# it does not issue one of its own (certificate.create=false).
 cc_install() {
   local rel="$1" key="$2" url="$3"; shift 3
   h upgrade --install "$rel" "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" \
     -f "$REPO_ROOT/deploy/envs/dev/values-auth-service.yaml" -f "$LOCAL_DIR/values/values-auth-service.yaml" \
+    --set certificate.create=false \
     --set confidential.enabled=true --set confidential.runtimeClassName=confidential-mock \
     --set confidential.attestation.image.repository=edge-attest --set "confidential.attestation.image.tag=$IMAGE_TAG" \
     --set "confidential.attestation.evidenceURL=$url" --set "confidential.attestation.trustedKey=$key" \
