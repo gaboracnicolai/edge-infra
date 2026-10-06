@@ -58,7 +58,7 @@ teardown() {
     kind delete cluster --name "$CLUSTER_NAME" || warn "teardown failed — delete it with: kind delete cluster --name $CLUSTER_NAME"
   fi
   if [ "$rc" = 0 ]; then
-    ok "kind-observability PASSED in $(( ($(date +%s) - started) / 60 )) min — Grafana showed Envoy's request rate, cluster removed"
+    ok "kind-observability PASSED in $(( ($(date +%s) - started) / 60 )) min — Grafana showed Envoy's request rate"
   else
     printf '%s  X kind-observability FAILED (exit %s)%s\n' "$C_RED" "$rc" "$C_RST" >&2
   fi

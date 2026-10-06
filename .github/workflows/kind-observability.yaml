@@ -117,8 +117,11 @@ jobs:
               const ctx = await browser.newContext({ viewport: { width: w, height: h }, extraHTTPHeaders: { Authorization: auth } });
               const page = await ctx.newPage();
               await page.goto('http://127.0.0.1:13000/d/edge-request-traffic?orgId=1&from=now-15m&to=now&kiosk', { waitUntil: 'networkidle' });
-              await page.waitForTimeout(5000);
-              await page.screenshot({ path: `request-traffic-${w}.png`, fullPage: true });
+              await page.getByText('RPS by cluster').first().waitFor({ timeout: 30000 });
+              await page.waitForTimeout(3000);
+              // The viewport only: Grafana scrolls inside its own container, so a
+              // full-page capture comes out blank.
+              await page.screenshot({ path: `request-traffic-${w}.png` });
             }
             await browser.close();
           })().catch((e) => { console.error(e); process.exit(1); });
