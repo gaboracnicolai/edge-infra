@@ -1,0 +1,159 @@
+# Prometheus, Loki, Tempo, an OpenTelemetry collector and Grafana for Talyvor
+# Edge, in one release. Install it into `monitoring`, the namespace the other
+# charts already send to:
+#
+#   helm install edge-observability deploy/helm/edge-observability \
+#     -n monitoring --create-namespace
+#
+# edge-control-plane's telemetry.otel.address default
+# (otel-collector.monitoring.svc.cluster.local) is this chart's collector, and
+# every Edge chart's pods carry the prometheus.io/* annotations this chart's
+# Prometheus scrapes. Already run the Prometheus Operator? Switch the bundled
+# Prometheus off and turn on prometheusOperator below instead.
+
+global:
+  # Pull every image this chart runs from this registry instead of the one each
+  # image names: a mirror, or the local registry of an air-gapped install (e.g.
+  # registry.internal:5000). The path is kept, so mirror the images under it:
+  # prom/prometheus -> <registry>/prom/prometheus. "" = each image's own registry.
+  imageRegistry: ""
+
+# Added to every series and alert Prometheus stores (external_labels). "" = left out.
+cluster: ""
+environment: ""
+
+prometheus:
+  enabled: true
+  image:
+    repository: prom/prometheus
+    tag: "v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996"  # pinned digest
+  retention: 15d
+  scrapeInterval: 15s
+  evaluationInterval: 30s
+  # Namespaces whose pods are scraped. [] = every namespace. A pod is scraped
+  # when it carries prometheus.io/scrape: "true", on prometheus.io/port at
+  # prometheus.io/path (default /metrics) — what edge-proxy, edge-egress,
+  # edge-control-plane, auth-service and edge-osb set out of the box.
+  namespaces: []
+  # More scrape_configs, appended as written.
+  extraScrapeConfigs: []
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+loki:
+  enabled: true
+  image:
+    repository: grafana/loki
+    tag: "3.5.3@sha256:3165cecce301ce5b9b6e3530284b080934a05cd5cafac3d3d82edcb887b45ecd"  # pinned digest
+  retention: 336h
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+tempo:
+  enabled: true
+  image:
+    repository: grafana/tempo
+    tag: "2.8.2@sha256:0ef775495967cd5d7a6b2e146b6ea695d624803c8db8349fb8ce4164f719f9b7"  # pinned digest
+  retention: 336h
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+# Receives OTLP (gRPC 4317, HTTP 4318) and sends traces to Tempo, logs to Loki
+# and metrics to Prometheus.
+otelCollector:
+  enabled: true
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.102.0@sha256:26bce721ca2f83db1c2c4e8873514dfe5b3973401fe88a1208efdc74e32840c1"  # pinned digest
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+grafana:
+  enabled: true
+  image:
+    repository: grafana/grafana
+    tag: "12.1.1@sha256:a1701c2180249361737a99a01bc770db39381640e4d631825d38ff4535efa47d"  # pinned digest
+  admin:
+    # A Secret with keys admin-user and admin-password. "" = the chart makes one
+    # (user admin, a random password kept across upgrades):
+    #   kubectl -n monitoring get secret edge-observability-grafana \
+    #     -o jsonpath='{.data.admin-password}' | base64 -d
+    existingSecret: ""
+  # Where each datasource points. "" = this release's own Prometheus, Loki or
+  # Tempo; set one when that component is switched off and you run your own.
+  datasources:
+    prometheusUrl: ""
+    lokiUrl: ""
+    tempoUrl: ""
+  service:
+    type: ClusterIP
+    port: 3000
+  # Dashboards and datasources are provisioned from this chart on every start,
+  # so only users, stars and dashboards made in the UI live on this volume.
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# For a cluster that already runs the Prometheus Operator (kube-prometheus-stack):
+# a PodMonitor per Edge component and a PrometheusRule per rules/ file, picked up
+# by the Prometheus whose podMonitorSelector / ruleSelector match `labels`.
+prometheusOperator:
+  enabled: false
+  # e.g. {release: kube-prometheus-stack}
+  labels: {}
+  podMonitors:
+    - name: edge-proxy
+      port: stats
+      path: /stats/prometheus
+    - name: edge-egress
+      port: stats
+      path: /stats/prometheus
+    - name: edge-control-plane
+      port: metrics
+      path: /metrics
+    - name: auth-service
+      port: metrics
+      path: /metrics
+    - name: edge-osb
+      port: http
+      path: /metrics

@@ -1,0 +1,159 @@
+{{- if .Values.otelCollector.enabled }}
+{{- $labels := include "edge-observability.labels" (dict "ctx" $ "component" "otel-collector") }}
+{{- $config := include "edge-observability.otelConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+data:
+  collector.yaml: |
+    {{- $config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "edge-observability.selectorLabels" (dict "ctx" $ "component" "otel-collector") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $labels | nindent 8 }}
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otel-collector
+          image: {{ include "edge-observability.image" (dict "image" .Values.otelCollector.image "global" .Values.global) | quote }}
+          args:
+            - --config=/etc/otelcol/collector.yaml
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: metrics
+              containerPort: 8888
+            - name: health
+              containerPort: 13133
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 5
+          securityContext:
+            {{- include "edge-observability.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.otelCollector.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "edge-observability.selectorLabels" (dict "ctx" $ "component" "otel-collector") | nindent 4 }}
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: metrics
+      port: 8888
+      targetPort: metrics
+{{- end }}
+
+{{- define "edge-observability.otelConfig" -}}
+{{- $ns := .Release.Namespace -}}
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  batch: {}
+
+exporters:
+  {{- if .Values.tempo.enabled }}
+  otlp/tempo:
+    endpoint: tempo.{{ $ns }}.svc.cluster.local:4317
+    tls:
+      insecure: true
+  {{- end }}
+  {{- if .Values.loki.enabled }}
+  # Loki takes OTLP logs natively.
+  otlphttp/loki:
+    endpoint: http://loki.{{ $ns }}.svc.cluster.local:3100/otlp
+  {{- end }}
+  {{- if .Values.prometheus.enabled }}
+  prometheusremotewrite:
+    endpoint: http://prometheus.{{ $ns }}.svc.cluster.local:9090/api/v1/write
+    resource_to_telemetry_conversion:
+      enabled: true
+  {{- end }}
+  # Keeps every pipeline valid when its store is switched off.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [{{ if .Values.tempo.enabled }}otlp/tempo{{ else }}debug{{ end }}]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [{{ if .Values.loki.enabled }}otlphttp/loki{{ else }}debug{{ end }}]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [{{ if .Values.prometheus.enabled }}prometheusremotewrite{{ else }}debug{{ end }}]
+{{- end -}}

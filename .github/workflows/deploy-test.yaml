@@ -67,3 +67,16 @@ jobs:
           echo "verify-image-registry refused images not from the override registry"
       - name: A release tag is the packaged chart version
         run: make release-version-test
+      - name: Install promtool (pinned + checksum-verified)
+        env:
+          PROM_VERSION: 3.5.0
+          PROM_SHA256: e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a
+        run: |
+          set -euo pipefail
+          curl -fsSL -o prometheus.tar.gz "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  prometheus.tar.gz" | sha256sum -c -
+          tar -xzf prometheus.tar.gz "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+          sudo install -m 0755 "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+      - name: The edge-observability alert and recording rules pass promtool
+        run: make observability-rules

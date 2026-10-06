@@ -1,0 +1,22 @@
+{{- if .Values.grafana.enabled }}
+Grafana opens on the gateway's Request Traffic dashboard (folder "Talyvor Edge"):
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/grafana 3000:{{ .Values.grafana.service.port }}
+  open http://localhost:3000
+
+{{- if not .Values.grafana.admin.existingSecret }}
+User admin; the password:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Release.Name }}-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+{{- end }}
+{{- end }}
+{{- if .Values.otelCollector.enabled }}
+
+Traces, logs and metrics over OTLP: otel-collector.{{ .Release.Namespace }}.svc.cluster.local:4317 (gRPC) or :4318 (HTTP).
+{{- end }}
+{{- if .Values.prometheus.enabled }}
+
+Prometheus scrapes every pod annotated prometheus.io/scrape: "true". With an Edge
+chart's networkPolicy.enabled, open its metrics port to this namespace through
+that chart's networkPolicy.extraIngress.
+{{- end }}

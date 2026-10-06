@@ -1,0 +1,132 @@
+{{- if .Values.tempo.enabled }}
+{{- $labels := include "edge-observability.labels" (dict "ctx" $ "component" "tempo") }}
+{{- $config := include "edge-observability.tempoConfig" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+data:
+  tempo.yaml: |
+    {{- $config | nindent 4 }}
+---
+{{- with (include "edge-observability.pvc" (dict "ctx" $ "component" "tempo" "persistence" .Values.tempo.persistence)) }}
+{{ . }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "edge-observability.selectorLabels" (dict "ctx" $ "component" "tempo") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $labels | nindent 8 }}
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "edge-observability.podSecurityContext" 10001 | nindent 8 }}
+      containers:
+        - name: tempo
+          image: {{ include "edge-observability.image" (dict "image" .Values.tempo.image "global" .Values.global) | quote }}
+          args:
+            - -config.file=/etc/tempo/tempo.yaml
+          ports:
+            - name: http
+              containerPort: 3200
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+          securityContext:
+            {{- include "edge-observability.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.tempo.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: tmp
+          emptyDir: {}
+        {{- include "edge-observability.dataVolume" (dict "name" "tempo-data" "persistence" .Values.tempo.persistence) | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "edge-observability.selectorLabels" (dict "ctx" $ "component" "tempo") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3200
+      targetPort: http
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+{{- end }}
+
+{{- define "edge-observability.tempoConfig" -}}
+# One process, traces on the data volume.
+stream_over_http_enabled: true
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+ingester:
+  max_block_duration: 5m
+compactor:
+  compaction:
+    block_retention: {{ .Values.tempo.retention }}
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+# Nothing leaves the cluster.
+usage_report:
+  reporting_enabled: false
+{{- end -}}

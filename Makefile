@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup kind-observability observability-rules
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -140,6 +140,21 @@ kind-datastores:
 # cluster is deleted. Needs docker, kind, kubectl, helm and jq.
 kind-backup:
 	bash deploy/local/backup.sh
+
+# The edge-observability chart on a throwaway kind cluster: installed as its
+# values.yaml says, every rule file loaded and evaluated by Prometheus, then
+# requests through an Envoy set up like edge-proxy. Passes only if Grafana's
+# Request Traffic dashboard shows that Envoy's request rate (none before the
+# requests, above zero after, the counter equal to the requests sent), and a
+# log record and a span sent to the collector come back out of Loki and Tempo.
+# Then the cluster is deleted. Needs docker, kind, kubectl, helm, jq and curl.
+kind-observability:
+	bash deploy/local/observability.sh
+
+# Every alert and recording rule edge-observability loads (its rules/ directory,
+# mounted into Prometheus and turned into PrometheusRules) passes promtool.
+observability-rules:
+	promtool check rules deploy/helm/edge-observability/rules/*.yaml
 
 # Install Argo CD itself, then register the AppProject and all Applications.
 argocd-apply:
