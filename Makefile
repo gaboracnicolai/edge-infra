@@ -1,4 +1,4 @@
-.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores
+.PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores
 
 # Apply the unified observability stack to the active kubeconfig context.
 # Generates the grafana-dashboards ConfigMap from the JSON files on disk so
@@ -61,6 +61,11 @@ verify-xds-mtls:
 # :latest or no tag. Pin images to the SHA you pushed, as the server does.
 verify-image-pins:
 	bash deploy/hack/verify-image-pins.sh
+
+# Every chart rendered with global.imageRegistry set pulls every image it runs
+# from that registry (a mirror, or an air-gapped install's local registry).
+verify-image-registry:
+	IMAGE_REGISTRY=registry.internal:5000 bash deploy/hack/verify-image-pins.sh
 
 # Before you install: every image the charts pull at :$(TAG) (a release such as
 # 1.2.3, or a commit sha) carries a cosign signature, an SPDX SBOM and SLSA

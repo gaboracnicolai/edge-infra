@@ -22,7 +22,7 @@ spec:
       serviceAccountName: {{ include "edge-secrets.serviceAccountName" . }}
       containers:
         - name: secrets
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "edge-secrets.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
           ports:

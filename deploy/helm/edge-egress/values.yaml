@@ -12,6 +12,11 @@ image:
   tag: v1.39.2@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85  # pinned digest
   pullPolicy: IfNotPresent
 
+# The init container that writes this node's id into the Envoy bootstrap.
+bootstrapImage:
+  repository: busybox
+  tag: "1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"  # pinned digest
+
 replicaCount: 2
 
 proxy:
@@ -66,3 +71,12 @@ podAnnotations:
 
 nameOverride: ""
 fullnameOverride: ""
+
+global:
+  # Pull every image this chart runs from this registry instead of the one each
+  # image names: a mirror, or the local registry of an air-gapped install (e.g.
+  # registry.internal:5000). The path is kept, so mirror the images under it:
+  # ghcr.io/gaboracnicolai/edge-osb -> <registry>/gaboracnicolai/edge-osb,
+  # envoyproxy/envoy -> <registry>/envoyproxy/envoy,
+  # redis -> <registry>/library/redis.  "" = each image's own registry.
+  imageRegistry: ""

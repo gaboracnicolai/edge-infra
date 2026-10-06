@@ -11,11 +11,18 @@
 # Extra args are passed to every `helm template` — `--set image.tag=latest`
 # must make this fail, which is how CI proves the check can go red.
 #
+# With IMAGE_REGISTRY set, every chart is rendered with
+# global.imageRegistry=$IMAGE_REGISTRY and it also fails if any rendered image
+# is not pulled from that registry (B28.229).
+#
 # Run: make verify-image-pins    (or: bash deploy/hack/verify-image-pins.sh)
+#      make verify-image-registry
 set -uo pipefail
 
 REPO="$(git rev-parse --show-toplevel)"
 EXTRA=("$@")
+REGISTRY="${IMAGE_REGISTRY:-}"
+[ -n "$REGISTRY" ] && EXTRA=(--set "global.imageRegistry=$REGISTRY" ${EXTRA[@]+"${EXTRA[@]}"})
 
 # Values that make a chart render every image it can run.
 switches() { # chart
@@ -30,6 +37,7 @@ switches() { # chart
 }
 
 fail=0
+offreg=0
 checked=0
 check() { # chart label overlay-relpath(optional)
 	local chart="$1" label="$2" overlay="${3:-}"
@@ -53,6 +61,11 @@ check() { # chart label overlay-relpath(optional)
 	fi
 	while IFS= read -r img; do
 		checked=$((checked + 1))
+		if [ -n "$REGISTRY" ] && [[ "$img" != "$REGISTRY"/* ]]; then
+			bad+=("$img (not from $REGISTRY)")
+			offreg=1
+			continue
+		fi
 		case "$img" in *@sha256:*) continue ;; esac
 		local name="${img##*/}"
 		case "$name" in
@@ -64,7 +77,7 @@ check() { # chart label overlay-relpath(optional)
 	if [ ${#bad[@]} -eq 0 ]; then
 		echo "PASS  $chart $label  ($(wc -l <<<"$images" | tr -d ' ') image(s))"
 	else
-		echo "FAIL  $chart $label  floating: ${bad[*]}"
+		echo "FAIL  $chart $label  $([ "$offreg" -eq 1 ] && echo refused || echo floating): ${bad[*]}"
 		fail=1
 	fi
 }
@@ -83,6 +96,10 @@ done
 echo
 if [ "$fail" -eq 0 ]; then
 	echo "OK: $checked rendered image reference(s), none on a floating tag."
+	[ -z "$REGISTRY" ] || echo "OK: every one is pulled from $REGISTRY."
+elif [ "$offreg" -eq 1 ]; then
+	echo "IMAGE NOT FROM $REGISTRY: render it through the chart's <chart>.image helper."
+	exit 1
 else
 	echo "FLOATING IMAGE: pin the image(s) above to a SHA tag or digest."
 	exit 1

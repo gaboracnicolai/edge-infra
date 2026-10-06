@@ -65,7 +65,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: nats
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "nats.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

@@ -173,7 +173,39 @@ image, which nothing signs, is denied with `no signatures found`, so is the same
 `ghcr.io:443/…`, and a signed `edge-osb` build from main is admitted, pinned to
 its digest.
 
+## From your own registry
+
+Every chart takes `global.imageRegistry`. Set it and every image the chart
+runs, init containers and the schema jobs included, is pulled from that
+registry instead of the one it names, with its path kept:
+
+```sh
+helm install edge-osb deploy/helm/edge-osb --set global.imageRegistry=registry.internal:5000
+```
+
+| The chart names | Pulled as |
+| --- | --- |
+| `ghcr.io/gaboracnicolai/edge-osb:<tag>` | `registry.internal:5000/gaboracnicolai/edge-osb:<tag>` |
+| `envoyproxy/envoy:<tag>@sha256:…` | `registry.internal:5000/envoyproxy/envoy:<tag>@sha256:…` |
+| `redis:<tag>@sha256:…` | `registry.internal:5000/library/redis:<tag>@sha256:…` |
+
+Tags and digests are unchanged, so copy each image under its path with its
+digest intact (e.g. `crane copy` or `skopeo copy --all`). To list what a chart
+will pull:
+
+```sh
+helm template x deploy/helm/edge-osb --set global.imageRegistry=registry.internal:5000 | grep 'image:'
+```
+
+`make verify-image-registry` renders every chart, for its defaults and every
+env overlay, and fails if any image is not from the override; CI runs it.
+
 ## What this does not cover yet
+
+- **Admission does not check images pulled from your own registry.** The
+  Kyverno policy matches `ghcr.io/gaboracnicolai/*` as written, so with
+  `global.imageRegistry` set it no longer applies. Run `make verify-images`
+  against the originals before you copy them.
 
 - **Admission checks the signature, not the SBOM or the provenance.** Those are
   checked by `make verify-images`.

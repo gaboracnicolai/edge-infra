@@ -55,5 +55,15 @@ jobs:
             exit 1
           fi
           echo "verify-image-pins refused :latest"
+      - name: Every image from the override registry
+        run: make verify-image-registry
+      - name: The registry check can fail
+        run: |
+          set -uo pipefail
+          if IMAGE_REGISTRY=registry.internal:5000 bash deploy/hack/verify-image-pins.sh --set global.imageRegistry= >/dev/null; then
+            echo "verify-image-registry passed charts rendered without the override"
+            exit 1
+          fi
+          echo "verify-image-registry refused images not from the override registry"
       - name: A release tag is the packaged chart version
         run: make release-version-test

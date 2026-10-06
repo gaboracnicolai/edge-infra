@@ -36,7 +36,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "edge-ratelimit.image" (dict "image" .Values.image "global" .Values.global) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: grpc
