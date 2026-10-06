@@ -1,0 +1,169 @@
+# The gateway deploy/local/observability.sh measures: Envoy at edge-proxy's
+# pinned image, labelled app: edge-proxy with the same prometheus.io/*
+# annotations, serving the same stats listener (:9903 proxies /stats/prometheus
+# from a localhost-only admin — deploy/helm/edge-proxy/templates/configmap.yaml).
+# The routes are static here instead of xDS, so no control plane is needed: one
+# route, Host tenant-a.local, to a backend in its own pod (cluster tenant-a).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: edge
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenant-a
+  namespace: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: tenant-a}
+  template:
+    metadata:
+      labels: {app: tenant-a}
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.4@sha256:1699d99cb4b9acc17f74ca670b3d8d0b7ba27c948b3445f0593b58ebece92f04
+          args: ["--port", "8080"]
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenant-a
+  namespace: edge
+spec:
+  selector: {app: tenant-a}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-proxy-bootstrap
+  namespace: edge
+data:
+  bootstrap.yaml: |
+    node:
+      id: observability-drill
+      cluster: edge-proxy
+    admin:
+      address:
+        socket_address: {address: 127.0.0.1, port_value: 9901}
+    static_resources:
+      listeners:
+        - name: ingress
+          address:
+            socket_address: {address: 0.0.0.0, port_value: 8443}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: ingress
+                    route_config:
+                      name: ingress
+                      virtual_hosts:
+                        - name: tenant-a
+                          domains: ["tenant-a.local"]
+                          routes:
+                            - match: {prefix: "/"}
+                              route: {cluster: tenant-a}
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        # edge-proxy's stats listener, as the chart renders it.
+        - name: stats
+          address:
+            socket_address: {address: 0.0.0.0, port_value: 9903}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: stats
+                    route_config:
+                      name: stats
+                      virtual_hosts:
+                        - name: stats
+                          domains: ["*"]
+                          routes:
+                            - match: {path: "/stats/prometheus"}
+                              route: {cluster: admin_stats}
+                            - match: {prefix: "/"}
+                              direct_response: {status: 404}
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: tenant-a
+          connect_timeout: 2s
+          type: STRICT_DNS
+          load_assignment:
+            cluster_name: tenant-a
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: {address: tenant-a.edge.svc.cluster.local, port_value: 8080}
+        - name: admin_stats
+          connect_timeout: 1s
+          type: STATIC
+          load_assignment:
+            cluster_name: admin_stats
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: {address: 127.0.0.1, port_value: 9901}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-proxy
+  namespace: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: edge-proxy}
+  template:
+    metadata:
+      labels: {app: edge-proxy}
+      # deploy/helm/edge-proxy/values.yaml podAnnotations, verbatim.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9903"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.39.2@sha256:460f8c329f24b2e1c7c5af64cb314a6f351ad1c262ba77b135ac46b35ebd5f85
+          args: ["-c", "/etc/envoy/bootstrap.yaml", "--log-level", "warn"]
+          ports:
+            - {name: http, containerPort: 8443}
+            - {name: stats, containerPort: 9903}
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: bootstrap, mountPath: /etc/envoy}
+      volumes:
+        - name: bootstrap
+          configMap: {name: edge-proxy-bootstrap}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-proxy
+  namespace: edge
+spec:
+  selector: {app: edge-proxy}
+  ports:
+    - {name: http, port: 8443, targetPort: http}

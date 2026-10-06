@@ -1,0 +1,46 @@
+{{- if .Values.prometheusOperator.enabled }}
+{{- range .Values.prometheusOperator.podMonitors }}
+# Scrapes every pod labelled app: {{ .name }}, in any namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-observability.labels" (dict "ctx" $ "component" "prometheus-operator") | nindent 4 }}
+    {{- with $.Values.prometheusOperator.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app: {{ .name }}
+  podMetricsEndpoints:
+    - port: {{ .port }}
+      path: {{ .path }}
+      interval: {{ $.Values.prometheus.scrapeInterval }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: app
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+---
+{{- end }}
+{{- range $path, $_ := .Files.Glob "rules/*.yaml" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: edge-observability-{{ base $path | trimSuffix ".yaml" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "edge-observability.labels" (dict "ctx" $ "component" "prometheus-operator") | nindent 4 }}
+    {{- with $.Values.prometheusOperator.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- $.Files.Get $path | fromYaml | toYaml | nindent 2 }}
+---
+{{- end }}
+{{- end }}

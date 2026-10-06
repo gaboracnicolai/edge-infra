@@ -1,0 +1,125 @@
+# The edge-observability chart loads this file into Prometheus (and into a
+# PrometheusRule with prometheusOperator.enabled). Started as a copy of
+# observability/prometheus/alerts/control-plane.yaml.
+#
+# RESTORED here (emitters landed in the same change): ControlPlaneReconcileStalled
+# (edge_cp_last_reconcile_timestamp_seconds) and ControlPlaneHighReconcileDuration
+# (edge_cp_reconcile_duration_seconds), plus the NEW ControlPlaneConfigDivergence
+# (edge_cp_nodes_behind). The control-plane /metrics endpoint (internal/xds/metrics.go)
+# now exposes xds_snapshots_blocked_total, xds_snapshots_published_degraded_total, and
+# edge_cp_{last_reconcile_timestamp_seconds,reconcile_duration_seconds,grpc_streams_active,nodes_behind}.
+#
+# STILL REMOVED (no reachable emitter — do NOT re-add without one):
+#  - ControlPlaneSnapshotVersionLag: its edge_cp_snapshot_version was a numeric per-node
+#    version; since the version is now a content HASH (#47), a max-min "spread" is
+#    meaningless. ControlPlaneConfigDivergence (edge_cp_nodes_behind) is its successor.
+#  - ControlPlaneDBConnectionsExhausted: the control-plane store's pgxpool DOES expose
+#    Stat(), but the store hides it behind the pgxDB/Store interfaces; emitting
+#    edge_cp_db_pool_idle/_waiting needs an internal/store change (out of scope here).
+#    Re-add in the same commit as that emitter.
+groups:
+  - name: edge-control-plane
+    interval: 30s
+    rules:
+      # Fail-static / fail-closed guard (landed cf5c079). The reconciler withheld
+      # a new xDS snapshot and kept last-good config — reason is one of: empty
+      # (empty-collapse guard), inconsistent (dangling route/cluster reference),
+      # auth_wanted_extauthz_off (a route wants auth but ext_authz is off),
+      # listener_collision (two gateways one node receives share a port). The
+      # gateway is serving STALE config while its source config is broken → page.
+      # Every `reason` series exists from t=0 by design (internal/xds/metrics.go),
+      # so this binds immediately rather than waiting for the first trip.
+      - alert: ControlPlaneSnapshotWithheld
+        expr: increase(xds_snapshots_blocked_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "Control plane withheld an xDS snapshot (reason: {{ $labels.reason }})"
+          description: >
+            The xDS reconciler blocked {{ $value | humanize }} snapshot(s) in the
+            last 10m for reason "{{ $labels.reason }}" and is serving the last-good
+            config to the Envoy fleet. New or changed routes are NOT reaching the
+            proxies until the underlying config problem is resolved.
+          runbook: https://runbooks.internal/edge/snapshot-withheld
+
+      # First-boot degraded PUBLISH — the OTHER side of the guards. On first boot (no
+      # last-good to keep) the empty-collapse and consistency guards are EXEMPT and the
+      # bad config IS published so a fresh edge can boot: the one path where bad config
+      # actually reaches Envoy. A SEPARATE metric on purpose — nothing was blocked, so
+      # it must NOT ride xds_snapshots_blocked_total (that would mis-fire the alert
+      # above). reason is empty_first_boot (every listener/cluster absent) or
+      # inconsistent_first_boot (a dangling route/cluster that blackholes). Both series
+      # exist from t=0 (internal/xds/metrics.go). severity: warning — a fresh edge with
+      # no routes seeded yet can legitimately come up empty; investigate rather than
+      # page, and treat inconsistent_first_boot as the more serious reason.
+      - alert: ControlPlaneDegradedPublish
+        expr: increase(xds_snapshots_published_degraded_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "Control plane published a degraded first-boot snapshot (reason: {{ $labels.reason }})"
+          description: >
+            The xDS reconciler published {{ $value | humanize }} degraded snapshot(s)
+            in the last 10m for reason "{{ $labels.reason }}": on first boot the guard is
+            exempt and the bad config reached the Envoy fleet (empty_first_boot = all
+            listeners/clusters absent; inconsistent_first_boot = a dangling route/cluster
+            blackholes traffic). Confirm the edge booted on the intended config.
+          runbook: https://runbooks.internal/edge/degraded-publish
+
+      # Reconcile loop liveness (RESTORED; emitter edge_cp_last_reconcile_timestamp_seconds).
+      # The loop has not completed a cycle in over a minute — wedged or crashed, so config
+      # changes are not reaching the fleet. A guard-block still counts as a completed
+      # reconcile, so this is loop-death, not config-health (that is the alerts above).
+      - alert: ControlPlaneReconcileStalled
+        expr: time() - edge_cp_last_reconcile_timestamp_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "Control-plane reconcile loop stalled"
+          description: >
+            No successful reconcile in {{ $value | humanizeDuration }} — config changes
+            are not being pushed to the Envoy fleet.
+          runbook: https://runbooks.internal/edge/reconcile-stalled
+
+      # Reconcile latency (RESTORED; emitter edge_cp_reconcile_duration_seconds, a
+      # last-value gauge — so the original broken `rate(..._bucket[5m])` expr is replaced
+      # with a direct threshold). Seconds-long reconciles point at DB slowness or an
+      # oversized snapshot.
+      - alert: ControlPlaneHighReconcileDuration
+        expr: edge_cp_reconcile_duration_seconds > 2
+        for: 10m
+        labels:
+          severity: warning
+          team: edge
+        annotations:
+          summary: "Control-plane reconcile is slow"
+          description: >
+            The last reconcile took {{ $value | humanizeDuration }} (> 2s) for 10m —
+            check DB latency and snapshot size.
+          runbook: https://runbooks.internal/edge/reconcile-slow
+
+      # Delivery divergence (NEW) — the regression tripwire for the #47 version-collision
+      # class. edge_cp_nodes_behind counts connected proxies whose last-ACKed xDS version
+      # is not the current published one. xds_snapshots_blocked_total is BLIND to this:
+      # the control-plane publishes successfully; only DELIVERY to the node is withheld.
+      # `for: 2m` is the in-flight-vs-stuck threshold — a proxy briefly behind just after
+      # a config change is normal; behind for 2m (many reconcile intervals) is the bug.
+      - alert: ControlPlaneConfigDivergence
+        expr: edge_cp_nodes_behind > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: edge
+        annotations:
+          summary: "Envoy proxies have not acknowledged the published config"
+          description: >
+            {{ $value }} connected proxy/proxies have not ACKed the current published
+            xDS version for 2m — the control-plane published but delivery is withheld
+            (cf. the #47 version-collision class). New/changed routes are not live there.
+          runbook: https://runbooks.internal/edge/config-divergence

@@ -70,6 +70,7 @@ first. Several things that look ready are not.
 | Per-agent rate limits on `edge-egress` | Built. **Off** by default (`egress.agentRequestsPerMinute: 0`); Phase 31 sets 5 a minute and shows one agent refused with 429 while another is served. [docs/agent-egress.md](docs/agent-egress.md#rate-limits-per-agent) |
 | `edge-egress` decision log | Built and **on** by default (`egress.decisionLog`): every decision in a hash chain, exported by the admin API as NDJSON and checked by `scripts/verify-decisions.sh` (Phase 31). |
 | No internet at run time | Built. Every service boots and serves with no route out; `auth-service` can read an outside IdP's keys from a Secret (`jwksFiles`). Phase 32 restarts the stack cold with every public address unreachable from every node and CoreDNS offline, and finds 0 DNS queries for a name outside the cluster. [docs/no-internet-at-run-time.md](docs/no-internet-at-run-time.md) |
+| Observability | Built. The `edge-observability` chart installs Prometheus, Loki, Tempo, an OTel collector and Grafana (with the gateway's dashboards and alert rules) into `monitoring`, or PodMonitors and PrometheusRules for your own Prometheus Operator. `make kind-observability` shows Grafana's Request Traffic dashboard reading Envoy's request rate. [docs/observability.md](docs/observability.md) |
 | Consuming UI | None. The suite's `/admin` area was **deleted** (`AdminRemoved.test.tsx` pins that it stays gone) because it rendered invented node identities, IPs, cert fingerprints and an issuer string for a service that is not deployed. |
 
 ---
@@ -170,7 +171,7 @@ manifests, Kubernetes API deprecations, dependency CVEs).
 | `test.yaml` | `go test ./...`, Rust `cargo test --locked`, real-Envoy xDS TLS integration |
 | `osb-test.yaml` | OSB Python suite; DB-backed cross-language E2E, secrets custodian, admin read API, migration-safety, co-location |
 | `issuer-test.yaml` | issuer suite against a real DB |
-| `deploy-test.yaml` | Helm lint + xDS mTLS render proof for base and every overlay |
+| `deploy-test.yaml` | Helm lint + xDS mTLS render proof for base and every overlay; `promtool check rules` on edge-observability's rules |
 | `policy-test.yaml` | Kyverno policy tests |
 
 ### Integration tests are opted into CI by name — and that is guarded now
