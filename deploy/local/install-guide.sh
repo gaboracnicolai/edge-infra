@@ -133,14 +133,13 @@ ok "nodes are in $NODE_CIDR"
 # ---- what the reader brings: the release --------------------------------------
 section "the images, built from the working tree"
 bash "$LOCAL_DIR/up.sh" build_local_images
-# Public images the install pulls, preloaded so a Docker Hub rate limit cannot
-# fail the run. Best-effort: a node pulls whatever is missing itself.
-chart_image() { echo "$1:$(sed -n 's/^  tag: "\(.*\)"$/\1/p' "$REPO_ROOT/deploy/helm/edge-datastores/charts/$1/values.yaml")"; }
-for img in "$ENVOY_IMAGE" "$BUSYBOX_IMAGE" "$TEST_IMAGE" "$ECHO_IMAGE" \
-           "$(chart_image postgres)" "$(chart_image redis)" "$(chart_image nats)"; do
-  { docker pull "$img" >/dev/null && kind load docker-image --name "$CLUSTER_NAME" "$img" >/dev/null; } \
-    || warn "could not preload $img — a node will pull it"
-done
+# The one public image the guide names by tag alone, preloaded so a Docker Hub
+# rate limit cannot fail the run. The digest-pinned ones (envoy, busybox, curl,
+# the datastores) are left to the nodes: `kind load` of an image@digest leaves an
+# `import-…` record in the node's containerd that the container then fails to
+# start from ("failed to check if this is a checkpoint image").
+{ docker pull "$ECHO_IMAGE" >/dev/null && kind load docker-image --name "$CLUSTER_NAME" "$ECHO_IMAGE" >/dev/null; } \
+  || warn "could not preload $ECHO_IMAGE — a node will pull it"
 ok "images loaded"
 
 section "the release $EDGE_VERSION, served in place of $CLONE_URL"
