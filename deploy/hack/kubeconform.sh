@@ -2,8 +2,8 @@
 # kubeconform.sh — everything the charts can render is a valid Kubernetes object
 # for the version kind runs (B28.236).
 #
-# Renders every chart in deploy/helm for its base values, every env overlay that
-# exists for it, the kind overlays (the dev overlay then deploy/local/values, as
+# Renders every chart in deploy/helm for its base values, each customer profile
+# in deploy/profiles (lite, ha, airgap), the kind values (deploy/local/values, as
 # up.sh layers them), and once with every optional resource switched on — the
 # NetworkPolicies, the HorizontalPodAutoscalers, the optional images and the
 # Prometheus Operator objects. Then validates the lot with kubeconform -strict:
@@ -83,16 +83,13 @@ for dir in "$REPO"/deploy/helm/*/; do
 	render "$chart" base $(switches "$chart")
 	# shellcheck disable=SC2046
 	render "$chart" everything $(switches "$chart") $(everything "$chart")
-	for overlay in "$REPO"/deploy/envs/*/values-"$suffix".yaml "$REPO"/deploy/envs/*/*/values-"$suffix".yaml; do
-		[ -f "$overlay" ] || continue
-		label="$(echo "${overlay#"$REPO"/deploy/envs/}" | tr / _ | sed 's/\.yaml$//')"
+	for profile in "$REPO"/deploy/profiles/*/"$chart".yaml; do
+		[ -f "$profile" ] || continue
 		# shellcheck disable=SC2046
-		render "$chart" "$label" --values "$overlay" $(switches "$chart")
+		render "$chart" "profile-$(basename "$(dirname "$profile")")" --values "$profile" $(switches "$chart")
 	done
 	if [ -f "$REPO/deploy/local/values/values-$suffix.yaml" ]; then
-		set --
-		[ -f "$REPO/deploy/envs/dev/values-$suffix.yaml" ] && set -- --values "$REPO/deploy/envs/dev/values-$suffix.yaml"
-		render "$chart" kind "$@" --values "$REPO/deploy/local/values/values-$suffix.yaml"
+		render "$chart" kind --values "$REPO/deploy/local/values/values-$suffix.yaml"
 	fi
 done
 
@@ -108,6 +105,6 @@ echo
 if [ "$fail" -eq 0 ]; then
 	echo "OK: every render is valid Kubernetes $KUBERNETES_VERSION."
 else
-	echo "INVALID: fix the chart above (or the overlay that feeds it)."
+	echo "INVALID: fix the chart above (or the profile that feeds it)."
 	exit 1
 fi

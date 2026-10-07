@@ -14,7 +14,7 @@ spec:
     helm:
       valueFiles:
         - values.yaml
-        - ../../../envs/prod/eu-west-1/values-proxy.yaml
+        - ../../profiles/ha/edge-proxy.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: edge

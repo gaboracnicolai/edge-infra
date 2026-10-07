@@ -1,4 +1,5 @@
 # Local overlay for edge-issuer (the migrate Job reuses the same image).
+replicaCount: 1
 image:
   repository: edge-issuer
   tag: local

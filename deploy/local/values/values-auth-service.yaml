@@ -1,4 +1,5 @@
 # Local overlay for auth-service (image). Extended in Phase 7.
+replicaCount: 1
 image:
   repository: auth-service
   tag: local

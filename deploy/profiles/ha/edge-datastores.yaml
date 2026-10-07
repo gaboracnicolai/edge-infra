@@ -1,0 +1,5 @@
+# ha profile: copies spread across nodes and zones; two or more workers.
+# The bundled Postgres, Redis and NATS run one copy each. For a highly
+# available install, run your own replicated ones and switch these off:
+# docs/install.md, "Your own datastores".
+{}

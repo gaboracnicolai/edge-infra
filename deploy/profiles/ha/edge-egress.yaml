@@ -1,0 +1,20 @@
+# ha profile: copies spread across nodes and zones; two or more workers.
+replicaCount: 2
+topologySpreadConstraints:
+  # No node holds more than one copy more than another, so losing a node loses
+  # at most one copy. Nodes with a taint these pods do not tolerate (a control
+  # plane, a cordoned node) are left out of the count.
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor
+    labelSelector:
+      matchLabels: { app: edge-egress }
+    matchLabelKeys: [pod-template-hash]
+  # Across zones too, where the nodes carry a zone label.
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels: { app: edge-egress }
+    matchLabelKeys: [pod-template-hash]

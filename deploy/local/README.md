@@ -17,7 +17,7 @@ deploy/local/down.sh      # tear the cluster down
 
 `make kind-e2e` (`deploy/local/e2e.sh`) creates its own cluster (`edge-e2e`), runs all of
 `up.sh`, and deletes the cluster whether the run passed or failed (`KEEP_CLUSTER=1` keeps it
-for debugging). CI runs it on every change to a chart, the dev overlays, `k8s/` or this
+for debugging). CI runs it on every change to a chart, `k8s/` or this
 directory (`.github/workflows/kind-e2e.yaml`). Which self-host page claim each phase proves:
 [docs/self-host-claims.md](../../docs/self-host-claims.md).
 

@@ -73,6 +73,11 @@ resources:
 
 podAnnotations: {}
 
+# Spread the copies across nodes and zones: Kubernetes topologySpreadConstraints,
+# as written, each with a labelSelector on app: edge-issuer. Empty = the
+# scheduler decides; deploy/profiles/ha sets it.
+topologySpreadConstraints: []
+
 # PodDisruptionBudget: a voluntary disruption (a node drain, a cluster upgrade)
 # evicts at most maxUnavailable of these pods at once. Set minAvailable to keep a
 # floor instead; when it is set it is used in place of maxUnavailable.
@@ -105,7 +110,7 @@ fullnameOverride: ""
 # only the flows in templates/networkpolicy.yaml. Enforced by Calico (or any
 # CNI that enforces NetworkPolicy). OFF in the base values, like extAuthz:
 # ArgoCD syncs base values, and switching it on without the right gatewayCIDRs
-# cuts the gateway off. Switch it on in an env overlay, with that cluster's CIDRs.
+# cuts the gateway off. Switch it on per install, with that cluster's CIDRs.
 networkPolicy:
   enabled: false
   # CIDR(s) of the nodes running edge-proxy. Envoy runs hostNetwork, so its

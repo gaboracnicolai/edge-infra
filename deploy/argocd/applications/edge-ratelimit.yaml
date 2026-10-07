@@ -14,7 +14,7 @@ spec:
     helm:
       valueFiles:
         - values.yaml
-        - ../../../envs/prod/eu-west-1/values-ratelimit.yaml
+        - ../../profiles/ha/edge-ratelimit.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: infra

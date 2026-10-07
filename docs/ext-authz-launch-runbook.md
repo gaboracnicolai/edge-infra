@@ -32,9 +32,10 @@ the window between step 1 and step 4, in which provisioning must stay frozen.
 **These preconditions assume a first install.** Talyvor Edge runs only on kind and nothing is deployed
 (see the root README). If you find an existing fleet, this runbook was not rehearsed against it. Stop.
 
-1. **Use the prod overlay that ArgoCD reads.** The Applications in `deploy/argocd/applications/` read
-   `deploy/envs/prod/eu-west-1/`, and they self-heal. A `kubectl scale` or `helm --set` is reverted
-   within minutes, so **every change below is a PR to that overlay.**
+1. **Use the profile that ArgoCD reads.** The Applications in `deploy/argocd/applications/` read
+   the profile `make argocd-apply PROFILE=<profile>` registered them with (`deploy/profiles/ha/` by
+   default), and they self-heal. A `kubectl scale` or `helm --set` is reverted within minutes, so
+   **every change below is a PR to that profile.**
 2. **Choose `<SHA>`.** Use a main commit with a green "Build and push images" run (`images.yaml` pushes
    `ghcr.io/gaboracnicolai/<image>:<sha>` on every main push). Confirm that its code is the code the
    rehearsal passed on:

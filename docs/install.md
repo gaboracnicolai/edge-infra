@@ -20,11 +20,26 @@ The other customer pages:
 | [Threat model](threat-model.md) | what Edge defends, against whom, and what it does not |
 | [Data flow](data-flow.md) | where every request, key and answer goes, the answer pool included |
 
+## Choose a profile
+
+A profile is one values file per chart, in `deploy/profiles/<profile>/`, that sizes Edge for the
+cluster you run it on. Every `helm` command below takes the profile's file for its chart.
+
+| Profile | For | What it sets |
+|---|---|---|
+| `lite` | one node, to try Edge or for a small team | one copy of each service |
+| `ha` | production, on two or more workers | two or three copies of each service, spread so that no node holds more than one copy more than any other, and across zones where your nodes carry a zone label |
+| `airgap` | production with no route to the internet | the `ha` settings, with every image pulled from your own registry: see [Air-gapped install](air-gap.md) first |
+
+The test below installs `ha`. [Sizing and high availability](sizing-and-ha.md) has what each
+part needs and what keeps serving when one fails.
+
 ## What you need
 
 **A Kubernetes cluster** (the test runs Kubernetes 1.35, on kind) with:
 
-- **Two or more worker nodes.** The gateway runs on every worker, and each service runs two copies.
+- **Two or more worker nodes** for `ha` and `airgap`; one node for `lite`. The gateway runs on every
+  worker.
 - **A network plugin that enforces NetworkPolicy.** Calico is the one tested. Without enforcement
   the charts' NetworkPolicies are accepted and do nothing.
 - **A default StorageClass**, for the bundled Postgres, Redis and NATS. To use your own instead,
@@ -37,10 +52,11 @@ The other customer pages:
 **On your machine:** `kubectl` pointed at the cluster, `helm` (3.14 or later, or 4), `git`,
 `openssl` 3, `jq` and `curl`.
 
-Set three things in your shell before you start:
+Set four things in your shell before you start:
 
 | Variable | What it is | Example |
 |---|---|---|
+| `PROFILE` | the profile you install: `lite`, `ha` or `airgap` | `export PROFILE=ha` |
 | `EDGE_VERSION` | the release you install, from the [releases page](https://github.com/gaboracnicolai/edge-infra/releases) | `export EDGE_VERSION=1.0.0` |
 | `NODE_CIDR` | the network your nodes' InternalIPs are in. The gateway runs on the node's own network, so this is where its requests to the services come from | `export NODE_CIDR=10.0.0.0/16` |
 | `GATEWAY` | an address that reaches port 80 on a worker: a node IP, or your load balancer in front of the nodes | `export GATEWAY=10.0.1.20` |
@@ -48,6 +64,7 @@ Set three things in your shell before you start:
 This checks them, and shows the nodes and their InternalIPs:
 
 ```sh
+: "${PROFILE:?set PROFILE to lite, ha or airgap}"
 : "${EDGE_VERSION:?set EDGE_VERSION to the release you install}"
 : "${NODE_CIDR:?set NODE_CIDR to the network your nodes are in}"
 : "${GATEWAY:?set GATEWAY to an address that reaches port 80 on a worker}"
@@ -56,14 +73,16 @@ kubectl get nodes -o wide
 
 ## 1. Get the release
 
-The charts come from the release's git tag. `release-pin.sh` points every chart at that release's
-images, and `--list` prints the eight first-party images it will run.
+The charts and the profiles come from the release's git tag. `release-pin.sh` points every chart
+at that release's images, and `--list` prints the eight first-party images it will run. The last
+line shows your profile's files.
 
 ```sh
 git clone --quiet --depth 1 --branch "v$EDGE_VERSION" https://github.com/gaboracnicolai/edge-infra.git
 cd edge-infra
 bash deploy/hack/release-pin.sh "$EDGE_VERSION"
 bash deploy/hack/release-pin.sh --list
+ls "deploy/profiles/$PROFILE"
 ```
 
 Before you install them, you can check that every image is signed and carries its SBOM and
@@ -88,7 +107,8 @@ and `edge-spiffe`, for [agent certificates](agent-certificates.md).
 ```sh
 kubectl create namespace infra
 kubectl create namespace edge
-helm upgrade --install edge-pki deploy/helm/edge-pki -n cert-manager --wait --timeout 5m
+helm upgrade --install edge-pki deploy/helm/edge-pki -n cert-manager \
+  -f "deploy/profiles/$PROFILE/edge-pki.yaml" --wait --timeout 5m
 kubectl wait --for=condition=Ready clusterissuer/edge-internal-ca clusterissuer/edge-spiffe --timeout=120s
 ```
 
@@ -99,7 +119,8 @@ schema, and writes every connection address and password into one Secret, `edge-
 passwords are generated on first install and kept across upgrades.
 
 ```sh
-helm upgrade --install edge-datastores deploy/helm/edge-datastores -n infra --wait --timeout 10m
+helm upgrade --install edge-datastores deploy/helm/edge-datastores -n infra \
+  -f "deploy/profiles/$PROFILE/edge-datastores.yaml" --wait --timeout 10m
 kubectl -n infra get statefulset,pvc
 ```
 
@@ -110,7 +131,7 @@ Secret and the schema work the same way. For example, with your own Postgres (tw
 and `issuer`):
 
 ```yaml
-# values-datastores.yaml — pass with -f values-datastores.yaml in step 4
+# values-datastores.yaml — pass with -f values-datastores.yaml in step 4, after the profile's file
 postgres: { enabled: false }
 external:
   postgres:
@@ -211,38 +232,44 @@ a ServiceAccount from the same install, and neither needs any Kubernetes permiss
 
 ```sh
 helm upgrade --install edge-control-plane deploy/helm/edge-control-plane -n infra \
+  -f "deploy/profiles/$PROFILE/edge-control-plane.yaml" \
   --set serviceAccount.create=false \
   --set networkPolicy.enabled=true --set "networkPolicy.gatewayCIDRs={$NODE_CIDR}" \
   --wait --timeout 10m
 
 helm upgrade --install edge-issuer deploy/helm/edge-issuer -n infra \
+  -f "deploy/profiles/$PROFILE/edge-issuer.yaml" \
   --set config.activeKid=k1 \
   --set serviceAccount.create=false \
   --set networkPolicy.enabled=true --set "networkPolicy.gatewayCIDRs={$NODE_CIDR}" \
   --wait --timeout 10m
 
 helm upgrade --install auth-service deploy/helm/auth-service -n infra \
+  -f "deploy/profiles/$PROFILE/auth-service.yaml" \
   --set networkPolicy.enabled=true --set "networkPolicy.gatewayCIDRs={$NODE_CIDR}" \
   --wait --timeout 10m
 
 helm upgrade --install edge-osb deploy/helm/edge-osb -n infra \
-  --set tls=null --set worker.replicaCount=1 \
+  -f "deploy/profiles/$PROFILE/edge-osb.yaml" \
+  --set tls=null \
   --set networkPolicy.enabled=true --set "networkPolicy.gatewayCIDRs={$NODE_CIDR}" \
   --wait --timeout 10m
 
 helm upgrade --install edge-secrets deploy/helm/edge-secrets -n infra \
+  -f "deploy/profiles/$PROFILE/edge-secrets.yaml" \
   --set networkPolicy.enabled=true \
   --wait --timeout 10m
 
-helm upgrade --install edge-proxy deploy/helm/edge-proxy -n edge --wait --timeout 10m
+helm upgrade --install edge-proxy deploy/helm/edge-proxy -n edge \
+  -f "deploy/profiles/$PROFILE/edge-proxy.yaml" --wait --timeout 10m
 
 kubectl -n infra get pods
 kubectl -n edge get pods -o wide
 ```
 
-`tls=null` is for the bundled datastores, which do not use TLS inside the cluster. The broker runs
-**one worker**: a second worker cannot yet share the queue with the first, and restarts until it is
-removed. The broker's API still runs two copies. The gateway's
+`tls=null` is for the bundled datastores, which do not use TLS inside the cluster. Every profile
+runs **one broker worker**: a second worker cannot yet share the queue with the first, and restarts
+until it is removed. The broker's API runs as many copies as the profile sets. The gateway's
 default certificate for HTTPS services is issued for `*.edge.io`; set yours with
 `--set 'certificate.serving.dnsNames={*.example.com}'` on `edge-proxy`, or give each service its own
 ([§ per-route certificates](self-host-network-and-identity.md)).

@@ -2,7 +2,7 @@ name: Deploy Test
 
 # Lints every Helm chart, validates everything the charts render with kubeconform
 # (B28.236), and proves the edge-proxy xDS mTLS invariant (SNI + SAN peer
-# pinning) renders for base and every env overlay — offline, no cluster. Closes the gap where deploy/** changes ran no CI, so a revert of
+# pinning) renders for base and every profile in deploy/profiles — offline, no cluster. Closes the gap where deploy/** changes ran no CI, so a revert of
 # xds.tls.enabled back to plaintext would otherwise pass CI silently.
 on:
   # Nightly on main too: what drifts without a commit (a base image, a fetched
@@ -86,6 +86,14 @@ jobs:
             exit 1
           fi
           echo "verify-image-registry refused images not from the override registry"
+      - name: The airgap profile check can fail
+        run: |
+          set -uo pipefail
+          if bash deploy/hack/verify-image-pins.sh --set global.imageRegistry= >/dev/null; then
+            echo "verify-image-pins passed the airgap profile rendered without its registry"
+            exit 1
+          fi
+          echo "verify-image-pins refused the airgap profile pulling from outside its registry"
       - name: A release tag is the packaged chart version
         run: make release-version-test
       - name: Install promtool (pinned + checksum-verified)

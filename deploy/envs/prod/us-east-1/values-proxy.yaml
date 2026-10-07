@@ -1,3 +1,0 @@
-# DaemonSet — replica count scales with node count, not config.
-# Keep base values; per-region tuning lands here when needed.
-{}

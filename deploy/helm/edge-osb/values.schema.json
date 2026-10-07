@@ -40,6 +40,12 @@
         "port": {
           "type": "integer"
         },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
         "autoscaling": {
           "type": "object",
           "additionalProperties": false,

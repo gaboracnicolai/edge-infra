@@ -69,6 +69,11 @@ podAnnotations:
   prometheus.io/port: "9903"
   prometheus.io/path: "/stats/prometheus"
 
+# Spread the copies across nodes and zones: Kubernetes topologySpreadConstraints,
+# as written, each with a labelSelector on app: edge-egress. Empty = the
+# scheduler decides; deploy/profiles/ha sets it.
+topologySpreadConstraints: []
+
 # PodDisruptionBudget: a voluntary disruption (a node drain, a cluster upgrade)
 # evicts at most maxUnavailable of these pods at once. Set minAvailable to keep a
 # floor instead; when it is set it is used in place of maxUnavailable.
@@ -97,7 +102,7 @@ tests:
 # NetworkPolicy: default-deny ingress to edge-egress, allowing only the agents'
 # namespaces (to the proxy port) and this chart's own `helm test` pod. Enforced by
 # Calico (or any CNI that enforces NetworkPolicy). OFF in the base values, like
-# every chart's: switch it on in an env overlay naming that cluster's agents.
+# every chart's: switch it on per install, naming that cluster's agents.
 networkPolicy:
   enabled: false
   # Namespaces whose pods may use the proxy, as namespace label selectors. The

@@ -60,7 +60,6 @@ cp_release() {  # <image-tag> <extAuthz.enabled> [extra helm args...]
   local tag="$1" ea="$2"; shift 2
   h upgrade --install edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
     --reset-values \
-    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
     -f "$LOCAL_DIR/values/values-control-plane.yaml" \
     --set image.tag="$tag" \
     --set adminApi.existingSecret="$ADMIN_SECRET" \
@@ -69,7 +68,6 @@ cp_release() {  # <image-tag> <extAuthz.enabled> [extra helm args...]
 proxy_release() {  # <extAuthz.clientTLS.enabled>
   h upgrade --install edge-proxy "$REPO_ROOT/deploy/helm/edge-proxy" -n edge --create-namespace \
     --reset-values \
-    -f "$REPO_ROOT/deploy/envs/dev/values-proxy.yaml" \
     --set extAuthz.clientTLS.enabled="$1" --wait --timeout 300s
 }
 

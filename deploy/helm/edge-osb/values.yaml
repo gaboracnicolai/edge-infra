@@ -5,6 +5,11 @@ api:
     tag: "447ceb18980fc02fdc7e28db16354c62e3018850"  # pin to the SHA you pushed
     pullPolicy: IfNotPresent
   port: 8080
+  # Spread the API's copies across nodes and zones: Kubernetes
+  # topologySpreadConstraints, as written, each with its own labelSelector
+  # (app: edge-osb, component: api). Empty = the scheduler decides.
+  # deploy/profiles/ha sets it.
+  topologySpreadConstraints: []
   # HorizontalPodAutoscaler (autoscaling/v2) on CPU for the api, off by default.
   # While it is on it owns api.replicaCount, and it needs the cluster's metrics
   # API (metrics-server). There is no default ceiling: set maxReplicas when you
@@ -152,7 +157,7 @@ fullnameOverride: ""
 # only the flows in templates/networkpolicy.yaml. Enforced by Calico (or any
 # CNI that enforces NetworkPolicy). OFF in the base values, like extAuthz:
 # ArgoCD syncs base values, and switching it on without the right gatewayCIDRs
-# cuts the gateway off. Switch it on in an env overlay, with that cluster's CIDRs.
+# cuts the gateway off. Switch it on per install, with that cluster's CIDRs.
 networkPolicy:
   enabled: false
   # CIDR(s) of the nodes running edge-proxy. Envoy runs hostNetwork, so its
