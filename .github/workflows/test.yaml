@@ -91,3 +91,24 @@ jobs:
             grep -- '--- SKIP' /tmp/xds.log
             exit 1
           fi
+
+  # Supply-chain gate: govulncheck against the Go vulnerability DB, so a
+  # reachable advisory in a dependency or the stdlib fails the build. It is
+  # reachability-aware: a vuln in a required module the code never calls does
+  # not fail. Go comes from go.mod, which matches the golang builder image in
+  # Dockerfile.control-plane, so stdlib advisories are graded against the
+  # runtime that ships. The tool is pinned (same version as talyvor-lens); the
+  # DB is fetched fresh at scan time, and the nightly schedule above re-runs it
+  # so a new advisory turns this red without a commit.
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
