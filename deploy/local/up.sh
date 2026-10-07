@@ -3674,8 +3674,15 @@ phase36_sa_token_gateway() {
   k -n "$INFRA_NS" rollout restart deploy/auth-service >/dev/null
   k -n "$INFRA_NS" rollout status deploy/auth-service --timeout=180s >/dev/null \
     || { k -n "$INFRA_NS" logs deploy/auth-service --tail=30 || true; die "PHASE36 FAIL: auth-service could not load $iss's keys with its own token"; }
-  out="$(k -n "$INFRA_NS" logs deploy/auth-service --tail=-1 2>/dev/null | grep '"trusting issuer"' || true)"
-  has "$out" "\"issuer\":\"$iss\"" || { printf '%s\n' "$out"; die "PHASE36 FAIL: the restarted auth-service does not trust $iss"; }
+  # logs deploy/ may read a pod of the old ReplicaSet until it has terminated.
+  i=0
+  while :; do
+    out="$(k -n "$INFRA_NS" logs deploy/auth-service --tail=-1 2>/dev/null | grep '"trusting issuer"' || true)"
+    has "$out" "\"issuer\":\"$iss\"" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out"; die "PHASE36 FAIL: the restarted auth-service does not trust $iss"; }
+    sleep 2
+  done
   ok "auth-service restarted and loaded $iss's keys from an API server that refuses anonymous callers"
 
   section "agent-sa in $SA_AGENT_NS: tokens projected for $aud and for billing.internal, nothing else"
