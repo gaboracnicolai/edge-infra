@@ -57,6 +57,9 @@
 #  34  `helm test` passes for every release this run installed — each chart's
 #      own test pod reaches its service through the Service and the chart's
 #      NetworkPolicy (runs before 32, which cuts the image registry off)
+#  36  an agent's own ServiceAccount token, projected for the gateway's
+#      audience, gets 200 from an OSB service and its token for another audience
+#      401; auth-service fetches the API server's keys with its own token
 #  35  offline licence: a valid licence reads edge_licence_valid 1; replaced by an
 #      expired one it reads 0 and the control plane warns, and both tenants still
 #      return 200, through a cold restart and a fresh Envoy (runs last)
@@ -3617,6 +3620,124 @@ phase35_licence() {
   ok "PHASE 35 — with an expired licence edge_licence_valid is 0 and the control plane warns, and both tenants return 200, through a cold restart and a fresh Envoy"
 }
 
+# ---- Phase 36 — an agent's own ServiceAccount token passes the gateway (B28.443)
+# An agent calls an OSB service with nothing but a ServiceAccount token the
+# kubelet projected for the gateway's audience. auth-service reads the cluster's
+# signing keys from the API server itself: its JWT_ISSUERS entry names the API
+# server's CA (ca_file) and the pod's own token (token_file), so the keys need no
+# anonymous access — Phase 30's grant of them to system:unauthenticated is
+# removed first. The same agent's token for another audience gets 401.
+SA_AGENT_NS="agents-sa"
+OSB_SA_SERVICE="e2e-sa"
+
+# sa_agent_curl <gateway|other> <host> <node-ip> — from agent-sa, a request to
+# <host> on that node's gateway :80 with the token projected under
+# /var/run/secrets/talyvor/<gateway|other> as its bearer. Echoes the body, then
+# the HTTP code on its own line.
+sa_agent_curl() {
+  k -n "$SA_AGENT_NS" exec agent-sa -- sh -c 'curl -s --max-time 6 -w "\n%{http_code}" -H "Host: $2" \
+    -H "Authorization: Bearer $(cat "/var/run/secrets/talyvor/$1/token")" "http://$3:80/"' \
+    _ "$1" "$2" "$3" 2>/dev/null || true
+}
+
+phase36_sa_token_gateway() {
+  section "PHASE 36 — an agent's own ServiceAccount token passes the gateway; its token for another audience does not"
+  local aud iss api code issuers out claims sip node gwip r i
+
+  aud="$(k -n "$INFRA_NS" get secret auth-service-secrets -o jsonpath='{.data.JWT_AUDIENCE}' | openssl base64 -d -A)"
+  iss="$(k get --raw /.well-known/openid-configuration | jq -r .issuer)"
+  [ -n "$aud" ] && [ -n "$iss" ] && [ "$iss" != null ] \
+    || die "PHASE36: no JWT_AUDIENCE, or the API server publishes no ServiceAccount issuer"
+
+  section "CONTROL — the API server's keys closed to anonymous callers (Phase 30 opened them)"
+  k delete clusterrolebinding edge-sa-issuer-discovery --ignore-not-found >/dev/null
+  api="$(k config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  i=0
+  while :; do
+    code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 6 "$api/openid/v1/jwks" || true)"
+    [ "$code" = 401 ] || [ "$code" = 403 ] && break
+    i=$((i + 1))
+    [ "$i" -lt 15 ] || die "PHASE36: an anonymous GET $api/openid/v1/jwks still gets $code, so a fetch without a token would pass too"
+    sleep 2
+  done
+  ok "anonymous GET /openid/v1/jwks -> $code"
+
+  section "auth-service trusts $iss for audience $aud, fetching its keys with its own ServiceAccount token"
+  issuers="$(k -n "$INFRA_NS" get secret auth-service-secrets -o jsonpath='{.data.JWT_ISSUERS}' | openssl base64 -d -A 2>/dev/null || true)"
+  issuers="$(printf '%s' "${issuers:-[]}" | jq -c --arg iss "$iss" --arg aud "$aud" \
+    '[.[] | select(.issuer != $iss)] + [{issuer: $iss, audience: $aud,
+      jwks_url: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks",
+      ca_file: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+      token_file: "/var/run/secrets/kubernetes.io/serviceaccount/token"}]')"
+  k -n "$INFRA_NS" patch secret auth-service-secrets --type merge \
+    -p "$(jq -cn --arg v "$issuers" '{stringData: {JWT_ISSUERS: $v}}')" >/dev/null
+  k -n "$INFRA_NS" rollout restart deploy/auth-service >/dev/null
+  k -n "$INFRA_NS" rollout status deploy/auth-service --timeout=180s >/dev/null \
+    || { k -n "$INFRA_NS" logs deploy/auth-service --tail=30 || true; die "PHASE36 FAIL: auth-service could not load $iss's keys with its own token"; }
+  # logs deploy/ may read a pod of the old ReplicaSet until it has terminated.
+  i=0
+  while :; do
+    out="$(k -n "$INFRA_NS" logs deploy/auth-service --tail=-1 2>/dev/null | grep '"trusting issuer"' || true)"
+    has "$out" "\"issuer\":\"$iss\"" && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out"; die "PHASE36 FAIL: the restarted auth-service does not trust $iss"; }
+    sleep 2
+  done
+  ok "auth-service restarted and loaded $iss's keys from an API server that refuses anonymous callers"
+
+  section "agent-sa in $SA_AGENT_NS: tokens projected for $aud and for billing.internal, nothing else"
+  k delete namespace "$SA_AGENT_NS" --ignore-not-found --wait=true >/dev/null
+  sed -e "s|__CURL__|$ATTACKER_IMAGE|" -e "s|__AUD__|$aud|" "$LOCAL_DIR/manifests/agent-sa-token.yaml" | k apply -f - >/dev/null
+  k -n "$SA_AGENT_NS" wait --for=condition=Ready pod/agent-sa --timeout=180s >/dev/null \
+    || die "PHASE36: agent-sa did not become Ready"
+  out="$(k -n "$SA_AGENT_NS" exec agent-sa -- cat /var/run/secrets/talyvor/gateway/token)"
+  claims="$(b64url_d "$(printf '%s' "$out" | cut -d. -f2)")"
+  printf '%s' "$claims" | jq -e --arg iss "$iss" --arg aud "$aud" --arg sub "system:serviceaccount:$SA_AGENT_NS:agent-sa" \
+    '.iss == $iss and .sub == $sub and ([.aud] | flatten | any(. == $aud))' >/dev/null \
+    || die "PHASE36: agent-sa's projected token is not the kubelet's token for $aud: $claims"
+  echo "  agent-sa's gateway token: $(printf '%s' "$claims" | jq -c '{iss,sub,aud,ttl:(.exp-.iat)}')"
+
+  section "the OSB broker provisions '$OSB_SA_SERVICE' (jwt by default)"
+  osb_register_tenant
+  k apply -f "$LOCAL_DIR/manifests/osb-stub.yaml" >/dev/null
+  wait_rollout deploy/echo osb-stub 120s >/dev/null
+  sip="$(k -n osb-stub get svc echo -o jsonpath='{.spec.clusterIP}')"
+  [ -n "$sip" ] || die "PHASE36: osb-stub echo ClusterIP unresolved"
+  r="$(osb_call DELETE "/v1/services/$OSB_SA_SERVICE")"
+  if [ "${r%% *}" = 202 ]; then osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"; fi
+  r="$(osb_call POST /v1/services \
+    "{\"name\":\"$OSB_SA_SERVICE\",\"team\":\"$OSB_TEAM\",\"host\":\"$sip\",\"port\":5678,\"protocol\":\"HTTP\"}")"
+  [ "${r%% *}" = 202 ] || die "PHASE36 FAIL: provision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  node="$(k -n edge get pod -l app.kubernetes.io/name=edge-proxy -o jsonpath='{.items[0].spec.nodeName}')"
+  gwip="$(k get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  [ -n "$gwip" ] || die "PHASE36: no edge-proxy node IP"
+
+  section "GREEN — agent-sa -> $sip through the gateway ($node, $gwip:80) with its $aud token: 200"
+  i=0
+  while :; do
+    out="$(sa_agent_curl gateway "$sip" "$gwip")"
+    [ "${out##*$'\n'}" = 200 ] && has "$out" OSB-PROVISIONED-BACKEND && break
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || { printf '%s\n' "$out" | tail -5; die "PHASE36 FAIL: agent-sa's own ServiceAccount token never got through the gateway (last: HTTP ${out##*$'\n'})"; }
+    sleep 2
+  done
+  ok "HTTP 200 $(printf '%s\n' "$out" | head -1) — served on the agent's own ServiceAccount token"
+
+  section "RED — the same agent's token for billing.internal: 401"
+  out="$(sa_agent_curl other "$sip" "$gwip")"
+  [ "${out##*$'\n'}" = 401 ] && ! has "$out" OSB-PROVISIONED-BACKEND \
+    || die "PHASE36 FAIL: agent-sa's token for billing.internal got HTTP ${out##*$'\n'}, want 401"
+  ok "HTTP 401 — a token projected for an audience the gateway does not list is refused"
+
+  section "deprovision '$OSB_SA_SERVICE', remove $SA_AGENT_NS"
+  r="$(osb_call DELETE "/v1/services/$OSB_SA_SERVICE")"
+  [ "${r%% *}" = 202 ] || die "PHASE36: deprovision not accepted (got: $r)"
+  osb_wait_completed "$(printf '%s' "${r#* }" | jq -r '.request_id')"
+  k delete namespace "$SA_AGENT_NS" --ignore-not-found --wait=false >/dev/null
+  ok "PHASE 36 — an agent's ServiceAccount token projected for $aud got 200 from an OSB service through the gateway, its token for billing.internal 401, and auth-service fetched the API server's keys with its own token, the keys closed to anonymous callers"
+}
+
 main() {
   phase1_cluster
   verify_phase1
@@ -3660,8 +3781,9 @@ main() {
   phase34_helm_test         # before 32: the test pods pull their image
   phase32_no_internet
   phase33_kek_rotation
+  phase36_sa_token_gateway
   phase35_licence
-  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS + every release passing its own helm test + an expired licence warned about with edge_licence_valid 0 and both tenants still served."
+  section "up.sh: FULL STANDUP COMPLETE — routable + SEC-3 + ext_authz LIVE + R8 fail-static inconsistent guard + fail-static metrics + OSB broker + per-node SDS + chart NetworkPolicies + SCIM/OIDC sign-in + attested confidential workload + per-route SNI certs + OSB HTTPS public host over a DNS upstream + a colliding :443 gateway refused + forged identity headers stripped and a path traversal refused + every listener's access log and trace in the OTel collector + an unsigned image refused at admission + an agent pod without an SVID refused at the TLS handshake + an agent reaching a TLS provider only through edge-egress + agent namespaces locked to edge-egress by Kyverno + a key planted in a keyless agent never reaching the provider + a burst from one agent refused with 429 while another is served, in a decision log whose exported hash chain verifies + the whole stack restarted and serving with no internet, and not one DNS query for a name outside the cluster + the secrets KEK rotated with every key re-sealed and the same cert still served over SDS + every release passing its own helm test + an agent's own ServiceAccount token served through the gateway and its token for another audience refused + an expired licence warned about with edge_licence_valid 0 and both tenants still served."
 }
 
 # Entry: no args -> full standup; args -> run the named phase function(s) in order

@@ -1,0 +1,42 @@
+# Phase 36 — an agent that calls the gateway with its own ServiceAccount token
+# (B28.443). Two tokens are projected for it: one for the gateway's audience
+# (__AUD__, substituted by up.sh with auth-service's JWT_AUDIENCE) and one for
+# another service's, which the gateway must refuse. No other credential, and no
+# API server token: automountServiceAccountToken is off.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents-sa
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-sa
+  namespace: agents-sa
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-sa
+  namespace: agents-sa
+  labels: {app: agent}
+spec:
+  serviceAccountName: agent-sa
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+  containers:
+    - name: agent
+      image: __CURL__
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - {name: gateway-token, mountPath: /var/run/secrets/talyvor/gateway, readOnly: true}
+        - {name: other-token, mountPath: /var/run/secrets/talyvor/other, readOnly: true}
+  volumes:
+    - name: gateway-token
+      projected:
+        sources:
+          - serviceAccountToken: {audience: __AUD__, expirationSeconds: 600, path: token}
+    - name: other-token
+      projected:
+        sources:
+          - serviceAccountToken: {audience: billing.internal, expirationSeconds: 600, path: token}

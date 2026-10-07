@@ -38,22 +38,30 @@ impl std::fmt::Display for JwksSource {
 pub struct JwksCache {
     inner: ArcSwap<JwkSet>,
     client: reqwest::Client,
+    /// Bearer token file sent with every URL fetch, re-read each time.
+    token_file: Option<String>,
 }
 
 impl JwksCache {
     /// Fetch the JWKS once and build a cache. Fails fast if the upstream is unreachable.
     pub async fn new(url: &str, ca_file: Option<&str>) -> Result<Arc<Self>, AppError> {
-        Self::load(&JwksSource::Url(url.to_string()), ca_file).await
+        Self::load(&JwksSource::Url(url.to_string()), ca_file, None).await
     }
 
     /// Load the JWKS once from `source` and build a cache. Fails fast if the
-    /// upstream is unreachable or the file is missing or unparseable.
-    pub async fn load(source: &JwksSource, ca_file: Option<&str>) -> Result<Arc<Self>, AppError> {
+    /// upstream is unreachable or the file is missing or unparseable. A URL
+    /// fetch sends the token in `token_file` as `Authorization: Bearer`.
+    pub async fn load(
+        source: &JwksSource,
+        ca_file: Option<&str>,
+        token_file: Option<&str>,
+    ) -> Result<Arc<Self>, AppError> {
         let client = build_client(ca_file)?;
-        let set = read_jwks(&client, source).await?;
+        let set = read_jwks(&client, source, token_file).await?;
         Ok(Arc::new(Self {
             inner: ArcSwap::new(Arc::new(set)),
             client,
+            token_file: token_file.map(str::to_string),
         }))
     }
 
@@ -62,6 +70,7 @@ impl JwksCache {
         Arc::new(Self {
             inner: ArcSwap::new(Arc::new(set)),
             client: reqwest::Client::new(),
+            token_file: None,
         })
     }
 
@@ -86,7 +95,7 @@ impl JwksCache {
     }
 
     async fn refresh_once(&self, source: &JwksSource, metrics: &Metrics) {
-        match read_jwks(&self.client, source).await {
+        match read_jwks(&self.client, source, self.token_file.as_deref()).await {
             Ok(new_set) => {
                 self.inner.store(Arc::new(new_set));
                 metrics.jwks_refresh.with_label_values(&["success"]).inc();
@@ -113,9 +122,23 @@ impl JwksCache {
     }
 }
 
-async fn read_jwks(client: &reqwest::Client, source: &JwksSource) -> Result<JwkSet, AppError> {
+async fn read_jwks(
+    client: &reqwest::Client,
+    source: &JwksSource,
+    token_file: Option<&str>,
+) -> Result<JwkSet, AppError> {
     let body = match source {
-        JwksSource::Url(url) => client.get(url).send().await?.error_for_status()?.text().await?,
+        JwksSource::Url(url) => {
+            let mut req = client.get(url);
+            // Re-read on every fetch: a projected ServiceAccount token rotates.
+            if let Some(path) = token_file {
+                let token = tokio::fs::read_to_string(path)
+                    .await
+                    .map_err(|e| AppError::Config(format!("read token_file {path}: {e}")))?;
+                req = req.bearer_auth(token.trim());
+            }
+            req.send().await?.error_for_status()?.text().await?
+        }
         JwksSource::File(path) => tokio::fs::read_to_string(path)
             .await
             .map_err(|e| AppError::Config(format!("read jwks_file {path}: {e}")))?,
@@ -171,7 +194,7 @@ mod tests {
         let path = std::env::temp_dir().join("auth_jwks_file_source.json");
         std::fs::write(&path, KEYS_A).unwrap();
         let source = JwksSource::File(path.to_str().unwrap().to_string());
-        let cache = JwksCache::load(&source, None).await.unwrap();
+        let cache = JwksCache::load(&source, None, None).await.unwrap();
         assert!(cache.get_key("a").is_some());
         assert!(cache.get_key("b").is_none());
 
@@ -191,9 +214,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_url_fetch_sends_the_token_file_reread_each_time() {
+        use axum::http::{HeaderMap, StatusCode};
+        use std::sync::Mutex;
+
+        // A JWKS endpoint that, like the API server, answers only a bearer.
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/openid/v1/jwks",
+            axum::routing::get(move |h: HeaderMap| async move {
+                let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+                log.lock().unwrap().push(auth.to_string());
+                if auth.starts_with("Bearer ") {
+                    (StatusCode::OK, KEYS_A)
+                } else {
+                    (StatusCode::UNAUTHORIZED, "")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/openid/v1/jwks", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = JwksSource::Url(url);
+
+        let err = JwksCache::load(&source, None, None).await.unwrap_err();
+        assert!(err.to_string().contains("401"), "error was: {err}");
+
+        let token = std::env::temp_dir().join("auth_jwks_token_file");
+        std::fs::write(&token, "sa-token-1\n").unwrap();
+        let cache = JwksCache::load(&source, None, Some(token.to_str().unwrap())).await.unwrap();
+        assert!(cache.get_key("a").is_some());
+
+        // The kubelet rotates the projected token: the next refresh sends the new one.
+        std::fs::write(&token, "sa-token-2\n").unwrap();
+        cache.refresh_once(&source, &Metrics::new().unwrap()).await;
+        let _ = std::fs::remove_file(&token);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["", "Bearer sa-token-1", "Bearer sa-token-2"]
+        );
+    }
+
+    #[tokio::test]
     async fn test_missing_jwks_file_fails_fast() {
         let source = JwksSource::File("/nonexistent/jwks.json".to_string());
-        let err = JwksCache::load(&source, None).await.unwrap_err();
+        let err = JwksCache::load(&source, None, None).await.unwrap_err();
         assert!(err.to_string().contains("jwks_file"), "error was: {err}");
     }
 
