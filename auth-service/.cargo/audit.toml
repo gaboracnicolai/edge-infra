@@ -1,0 +1,10 @@
+# cargo-audit config for auth-service (B28.261). The Test workflow's
+# rust-audit job fails on any RustSec vulnerability in Cargo.lock.
+[advisories]
+ignore = [
+  # rsa: Marvin timing side channel; no fixed release exists. rsa is a
+  # [dev-dependencies] entry only — tests/integration_test.rs mints throwaway
+  # RSA keys with it — so it is not in the shipped binary. Cargo.lock does not
+  # record dependency kinds, so cargo-audit cannot tell that for itself.
+  "RUSTSEC-2023-0071",
+]
