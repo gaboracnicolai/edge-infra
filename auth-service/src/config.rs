@@ -30,6 +30,13 @@ pub struct IssuerConfig {
     /// server's CA (/var/run/secrets/kubernetes.io/serviceaccount/ca.crt).
     #[serde(default)]
     pub ca_file: Option<String>,
+    /// A bearer token file sent with every `jwks_url` fetch, re-read each time
+    /// so a rotated token is picked up. The in-cluster API server serves its
+    /// JWKS only to an authenticated caller unless RBAC opens it to everyone:
+    /// name the pod's own token,
+    /// /var/run/secrets/kubernetes.io/serviceaccount/token.
+    #[serde(default)]
+    pub token_file: Option<String>,
 }
 
 /// Runtime configuration sourced from environment variables.
@@ -154,6 +161,12 @@ impl Config {
                         idp.issuer
                     )));
                 }
+                Some(_) if idp.token_file.is_some() => {
+                    return Err(AppError::Config(format!(
+                        "token_file for {} is sent with a jwks_url fetch; a jwks_file needs none",
+                        idp.issuer
+                    )));
+                }
                 Some(_) => {}
                 None if !idp.jwks_url.starts_with("https://") => {
                     return Err(AppError::Config(format!(
@@ -162,6 +175,12 @@ impl Config {
                     )));
                 }
                 None => {}
+            }
+            if let Some(path) = idp.token_file.as_deref().filter(|p| !p.starts_with('/')) {
+                return Err(AppError::Config(format!(
+                    "token_file for {} must be an absolute path, got: {path:?}",
+                    idp.issuer
+                )));
             }
             if !seen.insert(idp.issuer.clone()) {
                 return Err(AppError::Config(format!(
@@ -182,6 +201,7 @@ impl Config {
             jwks_file: None,
             audience: None,
             ca_file: None,
+            token_file: None,
         };
         std::iter::once(primary)
             .chain(self.extra_issuers.iter().cloned())
@@ -318,6 +338,37 @@ mod tests {
                 "absolute path",
             ),
             (r#"[{"issuer":"https://idp.corp.example"}]"#, "https://"),
+        ] {
+            std::env::set_var("JWT_ISSUERS", raw);
+            let err = Config::from_env().unwrap_err();
+            std::env::remove_var("JWT_ISSUERS");
+            assert!(err.to_string().contains(want), "{raw}: error was: {err}");
+        }
+    }
+
+    #[test]
+    fn test_jwt_issuers_token_file_only_with_a_jwks_url() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        base_env();
+        let sa = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+        std::env::set_var(
+            "JWT_ISSUERS",
+            format!(r#"[{{"issuer":"https://kubernetes.default.svc.cluster.local","jwks_url":"https://kubernetes.default.svc.cluster.local/openid/v1/jwks","token_file":"{sa}"}}]"#),
+        );
+        let issuers = Config::from_env().unwrap().issuers();
+        std::env::remove_var("JWT_ISSUERS");
+        assert_eq!(issuers[0].token_file, None);
+        assert_eq!(issuers[1].token_file.as_deref(), Some(sa));
+
+        for (raw, want) in [
+            (
+                r#"[{"issuer":"https://idp.corp.example","jwks_file":"/etc/auth-service/jwks/corp.json","token_file":"/var/run/secrets/kubernetes.io/serviceaccount/token"}]"#,
+                "needs none",
+            ),
+            (
+                r#"[{"issuer":"https://idp.corp.example","jwks_url":"https://idp.corp.example/keys","token_file":"token"}]"#,
+                "absolute path",
+            ),
         ] {
             std::env::set_var("JWT_ISSUERS", raw);
             let err = Config::from_env().unwrap_err();

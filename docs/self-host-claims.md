@@ -118,6 +118,16 @@ the `edge-observability` one (every component answers on its Service). `make
 kubeconform` validates everything the charts render, for every overlay, against
 the Kubernetes version kind runs.
 
+Phase 36 lets an agent call the gateway with its own ServiceAccount token. The
+API server's signing keys are first closed to anonymous callers, so an
+anonymous `GET /openid/v1/jwks` gets 403. auth-service is told to trust the
+cluster's ServiceAccount issuer for the gateway's audience, with the API
+server's CA as `ca_file` and its own pod's token as `token_file`, and it
+restarts and loads the keys. An agent pod with two projected tokens and no other
+credential calls a service the OSB broker provisioned with the default jwt
+auth: its token for the gateway's audience gets 200 from the service, and its
+token for `billing.internal` gets 401.
+
 Phase 35 installs a Talyvor Edge licence ([licence.md](licence.md)), signed by a
 key made for the run and trusted through `licence.publicKeys`. Valid for a day,
 it reads `edge_licence_valid 1`. Replaced in its Secret by one that expired

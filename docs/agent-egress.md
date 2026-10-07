@@ -174,13 +174,20 @@ Add the cluster's ServiceAccount issuer to `JWT_ISSUERS` in the
 ```
 
 `issuer` must be what `kubectl get --raw /.well-known/openid-configuration`
-reports. The API server serves its keys only to callers allowed to read them;
-let anyone read them, as with any OIDC provider:
+reports. The API server serves its keys only to callers allowed to read them.
+Either have auth-service fetch them as itself — add
+`"token_file": "/var/run/secrets/kubernetes.io/serviceaccount/token"`, the
+pod's own token, re-read on every fetch; Kubernetes lets every ServiceAccount
+read the keys — or let anyone read them, as with any OIDC provider:
 
 ```bash
 kubectl create clusterrolebinding edge-sa-issuer-discovery \
   --clusterrole=system:service-account-issuer-discovery --group=system:unauthenticated
 ```
+
+The same entry with `"audience": "edge-gateway"` (the gateway's
+`JWT_AUDIENCE`) lets an agent call a jwt route on the gateway with a token
+projected for that audience; `make kind-e2e` runs it as Phase 36.
 
 `edge-egress` calls the auth-service with the same client certificate
 `edge-proxy` uses (`envoy-authz-client-tls-secret`, mounted at

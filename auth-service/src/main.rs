@@ -46,7 +46,7 @@ async fn main() -> Result<(), AppError> {
     let mut issuers = HashMap::new();
     for idp in cfg.issuers() {
         let source = idp.jwks_source();
-        let jwks = JwksCache::load(&source, idp.ca_file.as_deref()).await?;
+        let jwks = JwksCache::load(&source, idp.ca_file.as_deref(), idp.token_file.as_deref()).await?;
         Arc::clone(&jwks).start_refresh(source.clone(), cfg.jwks_refresh_s, Arc::clone(&metrics));
         // issuers() always resolves the audience.
         let audience = idp.audience.unwrap_or_default();
