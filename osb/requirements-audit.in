@@ -1,0 +1,3 @@
+# CI-only: the scanner the OSB Test pip-audit job runs (B28.261). Locked
+# with hashes into requirements-audit.lock by `make -f osb/Makefile lock`.
+pip-audit==2.10.1

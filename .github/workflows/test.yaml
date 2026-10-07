@@ -112,3 +112,46 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # The same gate for auth-service (B28.261): cargo-audit checks Cargo.lock
+  # against the RustSec advisory DB and fails on any vulnerability. The binary
+  # is the upstream release, pinned by version and sha256; the DB is fetched
+  # fresh at scan time, so the nightly schedule turns this red on a new
+  # advisory. Each ignored advisory carries its reason in
+  # auth-service/.cargo/audit.toml.
+  rust-audit:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_AUDIT_VERSION: '0.22.2'
+      CARGO_AUDIT_SHA256: ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install cargo-audit (pinned release, checksum-verified)
+        run: |
+          name="cargo-audit-x86_64-unknown-linux-gnu-v${CARGO_AUDIT_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/$name.tgz" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/$name.tgz"
+          echo "${CARGO_AUDIT_SHA256}  $RUNNER_TEMP/$name.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tgz" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-audit" "$RUNNER_TEMP/bin/cargo-audit"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # A scanner that cannot fail proves nothing, so first show it fails on a
+      # lockfile with a published advisory: smallvec 1.6.0 (RUSTSEC-2021-0003).
+      - name: cargo-audit fails on a known advisory
+        run: |
+          mkdir -p "$RUNNER_TEMP/known"
+          printf '%s\n' 'version = 3' '' '[[package]]' 'name = "smallvec"' 'version = "1.6.0"' \
+            'source = "registry+https://github.com/rust-lang/crates.io-index"' > "$RUNNER_TEMP/known/Cargo.lock"
+          set +e
+          cargo-audit audit --file "$RUNNER_TEMP/known/Cargo.lock" > "$RUNNER_TEMP/known.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/known.log"
+          if [ "$rc" -eq 0 ] || ! grep -q 'RUSTSEC-2021-0003' "$RUNNER_TEMP/known.log"; then
+            echo "::error::cargo-audit did not fail on smallvec 1.6.0 — this gate cannot go red"
+            exit 1
+          fi
+      - name: cargo audit (auth-service/Cargo.lock)
+        working-directory: auth-service
+        run: cargo-audit audit

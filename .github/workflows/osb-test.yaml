@@ -57,6 +57,40 @@ jobs:
         run: pytest -q
         working-directory: osb
 
+  # Supply-chain gate (B28.261): pip-audit checks requirements.lock (what the
+  # image installs) and requirements-dev.lock (what CI installs) against the
+  # PyPI advisory data and fails on any known vulnerability. --disable-pip
+  # audits the hash-locked pins as written rather than re-resolving them, and
+  # --strict fails if a pin cannot be audited at all. The scanner is itself
+  # hash-locked; the advisory data is fetched at scan time, so the nightly
+  # schedule above turns this red when a new advisory lands.
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Install pip-audit (hash-locked)
+        run: pip install --require-hashes -r osb/requirements-audit.lock
+      # A scanner that cannot fail proves nothing, so first show it fails on a
+      # pin with a published advisory: requests 2.19.1 (PYSEC-2018-28).
+      - name: pip-audit fails on a known advisory
+        run: |
+          printf 'requests==2.19.1\n' > "$RUNNER_TEMP/known-advisory.pins"
+          set +e
+          pip-audit --disable-pip --no-deps --progress-spinner off \
+            -r "$RUNNER_TEMP/known-advisory.pins" > "$RUNNER_TEMP/known.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/known.log"
+          if [ "$rc" -eq 0 ] || ! grep -q 'PYSEC-2018-28' "$RUNNER_TEMP/known.log"; then
+            echo "::error::pip-audit did not fail on requests 2.19.1 — this gate cannot go red"
+            exit 1
+          fi
+      - name: pip-audit (osb/requirements.lock + osb/requirements-dev.lock)
+        run: make -f osb/Makefile audit
+
   integration:
     runs-on: ubuntu-latest
     services:
