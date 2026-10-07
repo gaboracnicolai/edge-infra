@@ -132,7 +132,7 @@ script's warning.
 The ArgoCD `edge-policies` Application syncs **only** the cluster admission policy
 and explicitly excludes the NetworkPolicy template
 (`deploy/argocd/applications/edge-policies.yaml`: `exclude:
-backend-network-policies.yaml`, mirrored in `applications-dev/`). Leave it that
+backend-network-policies.yaml`). Leave it that
 way. SEC-3 must not be added to GitOps sync for a target cluster until
 `scripts/sec3-preflight.sh` returns **PASS** there — otherwise ArgoCD would
 faithfully roll out a policy that drops the gateway.

@@ -76,7 +76,7 @@ first. Several things that look ready are not.
 |---|---|
 | Deployed | **Only on kind**, in a cluster `make kind-e2e` creates and deletes. No real cluster, no ArgoCD instance in the serving path. |
 | `ext_authz` (gateway authentication) | Built. **On by default** in the `edge-control-plane` chart, so in base and all four overlays, and in the kind run from install (Phase 25 proves a default `jwt` OSB service answers 401 / 200; Phase 12 switches it off and on live). |
-| Identity-keyed rate limiting (RLS) | Built. **Off** everywhere — though the `edge-ratelimit` chart *would* deploy (2 replicas + Redis in prod overlays), the control plane never routes to it. |
+| Identity-keyed rate limiting (RLS) | Built. **Off** everywhere — though the `edge-ratelimit` chart *would* deploy (2 replicas + Redis in the `ha` profile), the control plane never routes to it. |
 | Admin READ API | Built. **Off everywhere** — `adminApi.existingSecret` is unset in dev, staging, and both prod regions, so the listener never starts and the Service exposes no port. |
 | Local rate limiting | Built and **on** by default. |
 | Per-agent rate limits on `edge-egress` | Built. **Off** by default (`egress.agentRequestsPerMinute: 0`); Phase 31 sets 5 a minute and shows one agent refused with 429 while another is served. [docs/agent-egress.md](docs/agent-egress.md#rate-limits-per-agent) |
@@ -222,7 +222,7 @@ by CI; `osb-test.yaml` covers the same ground.
 | `osb/` | Open Service Broker: provisioning API, worker, translator |
 | `internal/xds` | reconciler, snapshot versioning, fail-static guards, builders |
 | `internal/store`, `internal/migrate`, `migrations/` | Postgres store, migration runner, schemas |
-| `deploy/helm`, `deploy/envs`, `deploy/argocd` | charts, per-environment overlays, GitOps applications |
+| `deploy/helm`, `deploy/profiles`, `deploy/argocd` | charts, the `lite`, `ha` and `airgap` customer profiles, GitOps applications |
 | `deploy/local` | scripted kind standup (9 phases) and the security proofs |
 | `k8s/policies` | Kyverno policies (GitOps-managed) |
 | `deploy/helm/edge-pki` | the cert-manager CAs; every other chart issues its own certificate from them (`certificate.*`) |

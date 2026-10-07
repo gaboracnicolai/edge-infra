@@ -2,7 +2,8 @@
 
 Talyvor Edge installs and runs in a cluster with no route to the internet. You carry three things
 across the gap — the release, its images and cert-manager — and then follow
-[the install guide](install.md) with one change: every chart pulls from your own registry.
+[the install guide](install.md) with the `airgap` profile: the `ha` settings, with every chart
+pulling from your own registry.
 
 Once installed, nothing in Edge reaches outside your cluster: no call to Talyvor, no licence
 server, no telemetry. [No internet at run time](no-internet-at-run-time.md) lists what each service
@@ -23,6 +24,16 @@ export REGISTRY=registry.internal:5000
 git clone --depth 1 --branch "v$EDGE_VERSION" https://github.com/gaboracnicolai/edge-infra.git
 cd edge-infra
 bash deploy/hack/release-pin.sh "$EDGE_VERSION"
+```
+
+Point the `airgap` profile at your registry. Its files name `registry.internal:5000`; this
+writes yours in their place, and shows what every chart will now pull from:
+
+```sh
+for f in deploy/profiles/airgap/*.yaml; do
+  sed "s#registry.internal:5000#$REGISTRY#" "$f" > "$f.new" && mv "$f.new" "$f"
+done
+grep -h 'imageRegistry:' deploy/profiles/airgap/*.yaml | sort -u
 ```
 
 Check every first-party image's signature, SBOM and provenance now, while you can reach the
@@ -87,18 +98,21 @@ Then carry the `edge-infra` directory, with `cert-manager.yaml` in it, across th
 
 ## In the air-gapped network
 
-Follow [the install guide](install.md) from the `edge-infra` directory you carried, with three
-changes:
+Follow [the install guide](install.md) from the `edge-infra` directory you carried, with
+`PROFILE=airgap` and two changes:
 
-1. **Skip step 1.** The directory is the release, already pinned.
+1. **Skip step 1.** The directory is the release, already pinned and pointed at your registry.
 2. **Step 2:** `kubectl apply -f cert-manager.yaml`, the copy you rewrote, instead of the URL.
-3. **Every `helm upgrade --install`** (steps 3, 4 and 8) takes one more flag:
-   `--set global.imageRegistry=$REGISTRY`. It reaches every image the chart runs, init containers,
-   the schema Jobs and `helm test` included. Check what a chart will pull before you install it:
 
-   ```sh
-   helm template edge-osb deploy/helm/edge-osb --set global.imageRegistry="$REGISTRY" | grep 'image:'
-   ```
+The profile's registry reaches every image a chart runs, init containers, the schema Jobs and
+`helm test` included. Check what a chart will pull before you install it:
+
+```
+helm template edge-osb deploy/helm/edge-osb -f deploy/profiles/airgap/edge-osb.yaml | grep 'image:'
+```
+
+For a one-node air-gapped install, use `PROFILE=lite` instead and add
+`--set global.imageRegistry=$REGISTRY` to every `helm upgrade --install`.
 
 If your registry needs credentials, create a pull Secret in `infra` and `edge` and add
 `--set 'imagePullSecrets[0].name=<secret>'` to the same commands (`global.imagePullSecrets[0].name`

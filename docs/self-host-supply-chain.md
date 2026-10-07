@@ -198,7 +198,7 @@ helm template x deploy/helm/edge-osb --set global.imageRegistry=registry.interna
 ```
 
 `make verify-image-registry` renders every chart, for its defaults and every
-env overlay, and fails if any image is not from the override; CI runs it.
+profile, and fails if any image is not from the override; CI runs it.
 
 ## What this does not cover yet
 

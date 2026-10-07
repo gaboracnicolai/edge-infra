@@ -1,35 +1,40 @@
 # Sizing and high availability
 
 What each part of Talyvor Edge asks the cluster for, and what keeps serving when a part fails. The
-figures are the charts' defaults (`values.yaml`); every one is a value you can change.
+copies are the profile's ([install § Choose a profile](install.md#choose-a-profile)); the rest are
+the charts' defaults (`values.yaml`). Every one is a value you can change.
 
 ## What it needs
 
-An install as [the install guide](install.md) makes it, on a cluster with two workers:
+An install as [the install guide](install.md) makes it, `lite` on one node and `ha` on two workers
+(`airgap` is the same as `ha`):
 
-| Part | Copies | CPU request (limit) each | Memory request (limit) each | Storage |
-|---|---|---|---|---|
-| `edge-proxy` — the gateway | one per worker | 500m (2) | 256Mi (1Gi) | |
-| `edge-control-plane` | 2 | 200m (1) | 128Mi (512Mi) | |
-| `auth-service` | 2 | 200m (1) | 64Mi (256Mi) | |
-| `edge-issuer` | 2 | 100m (500m) | 64Mi (256Mi) | |
-| `edge-osb` broker | 2 API + 1 worker | 100m (500m) | 128Mi (256Mi) | |
-| `edge-secrets` | 2 | 50m (250m) | 32Mi (128Mi) | |
-| Postgres (bundled) | 1 | 100m | 256Mi (1Gi) | 8Gi |
-| Redis (bundled) | 1 | 50m | 64Mi (512Mi) | 1Gi |
-| NATS (bundled) | 1 | 50m | 64Mi (512Mi) | 1Gi |
-| **Total, two workers** | | **2.6 CPU** | **about 2 GiB** | **10Gi** |
+| Part | Copies, `lite` | Copies, `ha` | CPU request (limit) each | Memory request (limit) each | Storage |
+|---|---|---|---|---|---|
+| `edge-proxy` — the gateway | one per node | one per worker | 500m (2) | 256Mi (1Gi) | |
+| `edge-control-plane` | 1 | 3 | 200m (1) | 128Mi (512Mi) | |
+| `auth-service` | 1 | 3 | 200m (1) | 64Mi (256Mi) | |
+| `edge-issuer` | 1 | 2 | 100m (500m) | 64Mi (256Mi) | |
+| `edge-osb` broker | 1 API + 1 worker | 3 API + 1 worker | 100m (500m) | 128Mi (256Mi) | |
+| `edge-secrets` | 1 | 2 | 50m (250m) | 32Mi (128Mi) | |
+| Postgres (bundled) | 1 | 1 | 100m | 256Mi (1Gi) | 8Gi |
+| Redis (bundled) | 1 | 1 | 50m | 64Mi (512Mi) | 1Gi |
+| NATS (bundled) | 1 | 1 | 50m | 64Mi (512Mi) | 1Gi |
+| **Total** | **1.5 CPU, about 1.2 GiB** | **3.1 CPU, about 2.1 GiB** | | | **10Gi** |
+
+Each worker you add to an `ha` install adds one gateway.
 
 Add cert-manager's own three pods, and a short-lived Job for each schema step at install and
 upgrade. The optional parts, when you turn them on:
 
 | Part | Copies | CPU request each | Memory request each |
 |---|---|---|---|
-| `edge-egress` — the gateway agents call out through | 2 | 100m | 128Mi |
-| `edge-ratelimit` | 2 | 100m | 64Mi |
+| `edge-egress` — the gateway agents call out through | 2 (1 in `lite`) | 100m | 128Mi |
+| `edge-ratelimit` | 2 (1 in `lite`) | 100m | 64Mi |
 | `edge-observability` (Prometheus, Loki, Tempo, collector, Grafana) | 1 each | see its `values.yaml` | |
 
-`make kind-install-guide` runs the whole install on one machine with 6 to 8 GiB given to Docker.
+`make kind-install-guide` runs the whole install, `ha` profile, on one machine with 6 to 8 GiB
+given to Docker.
 
 ### What grows with traffic
 
@@ -62,14 +67,22 @@ the last good one instead. `make kind-e2e` shows the last two on a live gateway 
 
 ## High availability
 
-**As shipped:**
+**With the `ha` profile** (and `airgap`):
 
-- Every service runs **two copies** with a PodDisruptionBudget of one, so a node drain or upgrade
-  takes at most one copy away at a time. The exception is the broker's worker, which runs one copy
-  for now: a second cannot share its queue. While it is down, changes wait in NATS and are applied
-  when it is back.
+- The control plane, `auth-service` and the broker's API run **three copies**; the issuer,
+  `edge-secrets`, the egress gateway and the rate limiter **two**. Each has a PodDisruptionBudget of
+  one, so a node drain or upgrade takes at most one copy away at a time. The exception is the
+  broker's worker, which runs one copy for now: a second cannot share its queue. While it is down,
+  changes wait in NATS and are applied when it is back.
+- **The copies are spread.** No node holds more than one copy of a service more than any other, so
+  losing a node loses at most one copy of each. A copy that cannot be placed without breaking that
+  waits, Pending, rather than doubling up. Where your nodes carry a `topology.kubernetes.io/zone`
+  label, the copies spread across zones as well, as far as the nodes allow.
+- The rate limiter's copies share their counts through the `edge-datastores` Redis.
 - The **gateway runs on every worker**, and rolls 10% of the nodes at a time.
-- The **control plane** asks to run its copies on different nodes.
+
+**With `lite`,** every service runs one copy: a restart or a node drain takes it away until it is
+back, and the table above applies meanwhile.
 
 **What you add for more:**
 
@@ -81,7 +94,6 @@ the last good one instead. `make kind-e2e` shows the last two on a live gateway 
 - **More copies** of `auth-service` first, then the others: `replicaCount`, or autoscaling as above.
 - **A load balancer** across the workers' ports 80 and 443, health-checking `:9902/ready`.
 
-**Not yet in the charts:** apart from the control plane, the charts do not take an `affinity` or
-topology spread value, so the scheduler decides where the two copies of each service go. Most
-schedulers spread copies of one Deployment across nodes when they can, but nothing in the charts
-requires it, and nothing spreads them across zones.
+**Your own spread:** every chart with a Deployment takes `topologySpreadConstraints` (the
+broker's under `api`), written as Kubernetes takes them; `deploy/profiles/ha` shows how. The
+control plane also takes `affinity`.

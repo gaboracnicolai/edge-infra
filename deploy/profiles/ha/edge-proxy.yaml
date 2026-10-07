@@ -1,0 +1,3 @@
+# ha profile: copies spread across nodes and zones; two or more workers.
+# The gateway already runs on every worker.
+{}

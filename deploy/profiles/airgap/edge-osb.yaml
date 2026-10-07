@@ -1,0 +1,28 @@
+# airgap profile: the ha profile, with every image pulled from your own registry.
+# docs/air-gap.md writes your registry in place of the one below before you
+# carry the release across.
+api:
+  replicaCount: 3
+  topologySpreadConstraints:
+    # No node holds more than one copy more than another, so losing a node loses
+    # at most one copy. Nodes with a taint these pods do not tolerate (a control
+    # plane, a cordoned node) are left out of the count.
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      nodeTaintsPolicy: Honor
+      labelSelector:
+        matchLabels: { app: edge-osb, component: api }
+      matchLabelKeys: [pod-template-hash]
+    # Across zones too, where the nodes carry a zone label.
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels: { app: edge-osb, component: api }
+      matchLabelKeys: [pod-template-hash]
+# A second worker cannot share the queue with the first.
+worker:
+  replicaCount: 1
+global:
+  imageRegistry: registry.internal:5000

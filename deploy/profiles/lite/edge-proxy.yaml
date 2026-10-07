@@ -1,0 +1,3 @@
+# lite profile: one node, one copy of each service.
+# The gateway runs on every node: on one node, one copy.
+{}

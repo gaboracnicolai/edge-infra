@@ -14,17 +14,20 @@ finished, it upgrades that install to a second release with these commands and c
 3. **Verify the new images:** `make verify-images TAG=<new release>`
    ([Verifying the images](self-host-supply-chain.md)).
 
-Set `NEW_VERSION` to the release you are moving to (for example `export NEW_VERSION=1.1.0`), and
-start in the `edge-infra` directory you installed from:
+Set `NEW_VERSION` to the release you are moving to (for example `export NEW_VERSION=1.1.0`) and
+`PROFILE` to the profile you installed (`lite`, `ha` or `airgap`), and start in the `edge-infra`
+directory you installed from:
 
 ```sh
 : "${NEW_VERSION:?set NEW_VERSION to the release you are moving to}"
+: "${PROFILE:?set PROFILE to the profile you installed: lite, ha or airgap}"
 helm list -A
 ```
 
 ## Upgrade
 
-Get the new release and pin its charts, as in step 1 of the install guide:
+Get the new release and pin its charts, as in step 1 of the install guide. For `airgap`, prepare
+it on the connected side first, as [Air-gapped install](air-gap.md) says.
 
 ```sh
 git clone --quiet --depth 1 --branch "v$NEW_VERSION" https://github.com/gaboracnicolai/edge-infra.git "../edge-infra-$NEW_VERSION"
@@ -33,16 +36,21 @@ bash deploy/hack/release-pin.sh "$NEW_VERSION"
 ```
 
 Upgrade every release **in the install order**. `--reset-then-reuse-values` takes the new chart's
-defaults — its new image tags among them — and keeps every `--set` you installed with. (Plain
-`--reuse-values` would keep the *old* chart's defaults, and so the old images.)
+defaults — its new image tags among them — and keeps every `--set` you installed with; the new
+release's profile file goes on top. (Plain `--reuse-values` would keep the *old* chart's defaults,
+and so the old images.)
 
 ```sh
-helm upgrade edge-pki deploy/helm/edge-pki -n cert-manager --reset-then-reuse-values --wait --timeout 5m
-helm upgrade edge-datastores deploy/helm/edge-datastores -n infra --reset-then-reuse-values --wait --timeout 10m
+helm upgrade edge-pki deploy/helm/edge-pki -n cert-manager --reset-then-reuse-values \
+  -f "deploy/profiles/$PROFILE/edge-pki.yaml" --wait --timeout 5m
+helm upgrade edge-datastores deploy/helm/edge-datastores -n infra --reset-then-reuse-values \
+  -f "deploy/profiles/$PROFILE/edge-datastores.yaml" --wait --timeout 10m
 for release in edge-control-plane edge-issuer auth-service edge-osb edge-secrets; do
-  helm upgrade "$release" "deploy/helm/$release" -n infra --reset-then-reuse-values --wait --timeout 10m
+  helm upgrade "$release" "deploy/helm/$release" -n infra --reset-then-reuse-values \
+    -f "deploy/profiles/$PROFILE/$release.yaml" --wait --timeout 10m
 done
-helm upgrade edge-proxy deploy/helm/edge-proxy -n edge --reset-then-reuse-values --wait --timeout 10m
+helm upgrade edge-proxy deploy/helm/edge-proxy -n edge --reset-then-reuse-values \
+  -f "deploy/profiles/$PROFILE/edge-proxy.yaml" --wait --timeout 10m
 ```
 
 What happens on the way:

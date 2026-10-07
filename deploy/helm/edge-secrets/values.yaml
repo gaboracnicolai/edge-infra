@@ -45,6 +45,11 @@ resources:
 
 podAnnotations: {}
 
+# Spread the copies across nodes and zones: Kubernetes topologySpreadConstraints,
+# as written, each with a labelSelector on app: edge-secrets. Empty = the
+# scheduler decides; deploy/profiles/ha sets it.
+topologySpreadConstraints: []
+
 # PodDisruptionBudget: a voluntary disruption (a node drain, a cluster upgrade)
 # evicts at most maxUnavailable of these pods at once. Set minAvailable to keep a
 # floor instead; when it is set it is used in place of maxUnavailable.

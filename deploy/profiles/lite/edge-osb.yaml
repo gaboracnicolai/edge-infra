@@ -1,0 +1,6 @@
+# lite profile: one node, one copy of each service.
+api:
+  replicaCount: 1
+# A second worker cannot share the queue with the first.
+worker:
+  replicaCount: 1

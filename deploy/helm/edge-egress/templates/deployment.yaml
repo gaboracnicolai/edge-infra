@@ -22,6 +22,10 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "edge-egress.serviceAccountName" . }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       terminationGracePeriodSeconds: 30
       # Envoy as the image's own envoy user (101), the uid its entrypoint would
       # otherwise su-exec to from root — so the same process, never started as

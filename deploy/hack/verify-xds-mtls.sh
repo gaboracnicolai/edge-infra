@@ -2,8 +2,8 @@
 # verify-xds-mtls.sh — INVARIANT LOCK for R1 (xDS mTLS asymmetry fix).
 #
 # Asserts the edge-proxy bootstrap renders MUTUAL TLS to the control plane WITH
-# peer-identity pinning (SNI + SAN match) for base defaults and every env
-# overlay. Fails (exit 1) if anyone reverts xDS to plaintext or drops the SAN
+# peer-identity pinning (SNI + SAN match) for base defaults and every profile in
+# deploy/profiles. Fails (exit 1) if anyone reverts xDS to plaintext or drops the SAN
 # pin — the guard that stops the mTLS asymmetry from silently returning.
 #
 # The control-plane server requires client mTLS unconditionally; this proves the
@@ -47,14 +47,15 @@ check() { # label  overlay-relpath(optional)
 }
 
 check "base" ""
-check "staging" "deploy/envs/staging/values-proxy.yaml"
-check "prod/eu-west-1" "deploy/envs/prod/eu-west-1/values-proxy.yaml"
-check "prod/us-east-1" "deploy/envs/prod/us-east-1/values-proxy.yaml"
+for profile in "$REPO"/deploy/profiles/*/edge-proxy.yaml; do
+	rel="${profile#"$REPO"/}"
+	check "profile $(basename "$(dirname "$profile")")" "$rel"
+done
 
 echo
 if [ "$fail" -eq 0 ]; then
-	echo "OK: xDS mutual TLS + peer pinning (SNI + SAN==$HOST) asserted for all envs."
+	echo "OK: xDS mutual TLS + peer pinning (SNI + SAN==$HOST) asserted for base and every profile."
 else
-	echo "INVARIANT VIOLATED: xDS mTLS/peer-pinning missing in one or more envs (see FAILs above)."
+	echo "INVARIANT VIOLATED: xDS mTLS/peer-pinning missing in one or more profiles (see FAILs above)."
 	exit 1
 fi

@@ -19,12 +19,18 @@
 #     from a local copy of HEAD tagged v$EDGE_VERSION (git url.insteadOf), so it
 #     clones the commit under test. Local runs test the COMMITTED HEAD: commit
 #     before you run it;
-#   - the three variables: EDGE_VERSION, NODE_CIDR (kind's docker network) and
-#     GATEWAY (127.0.0.1 — the worker kind-config.yaml publishes :80 from).
+#   - the four variables: PROFILE (ha — deploy/profiles/ha), EDGE_VERSION,
+#     NODE_CIDR (kind's docker network) and GATEWAY (127.0.0.1 — the worker
+#     kind-config.yaml publishes :80 from).
+#
+# Then the ha profile is checked to be what runs: every service at the copies the
+# profile gives it, each copy Ready, spread over both workers with no node
+# holding more than one copy more than the other.
 #
 # docs/upgrade.md then runs the same way, from the directory the guide installed
 # from, to a second release NEW_VERSION: the same images under a second tag and a
 # second git tag, so its commands must roll every first-party image to that tag.
+# The ha check runs again after it.
 #
 # Then the cluster is deleted, whether the run passed or failed.
 set -euo pipefail
@@ -33,6 +39,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 require_toolchain docker kind kubectl helm jq openssl curl git
 
+PROFILE=ha
 EDGE_VERSION="${EDGE_VERSION:-0.0.0-install-guide}"
 NEW_VERSION="${NEW_VERSION:-0.0.1-install-guide}"
 CLONE_URL=https://github.com/gaboracnicolai/edge-infra.git
@@ -122,6 +129,36 @@ release() {
   ok "release $1: eight images on the nodes, git tag v$1 = $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 }
 
+# ha_running — each service the guide installs runs the copies the ha profile
+# gives it (read back from the release's own values, so a guide that dropped the
+# profile fails here), every copy Ready, on two or more nodes, with no node
+# holding more than one copy more than another.
+ha_running() {
+  local rel want sel got
+  for rel in edge-control-plane edge-issuer auth-service edge-osb edge-secrets; do
+    if [ "$rel" = edge-osb ]; then
+      want="$(h get values "$rel" -n infra -o json | jq -r '.api.replicaCount // empty')"
+      sel="app=edge-osb,component=api"
+    else
+      want="$(h get values "$rel" -n infra -o json | jq -r '.replicaCount // empty')"
+      sel="app=$rel"
+    fi
+    [ -n "$want" ] && [ "$want" -ge 2 ] \
+      || die "$rel was not installed with the $PROFILE profile (replicaCount '${want}')"
+    # "<copies Ready> <nodes> <most on one node> <fewest on one node>"
+    got="$(k -n infra get pods -l "$sel" -o json | jq -r '
+      [.items[] | select(.metadata.deletionTimestamp == null)
+                | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+                | .spec.nodeName]
+      | group_by(.) | map(length) | "\(add // 0) \(length) \(max // 0) \(min // 0)"')"
+    set -- $got
+    [ "$1" = "$want" ] || die "$rel: $1 of its $want copies Ready"
+    [ "$2" -ge 2 ] || die "$rel: all $want copies on one node"
+    [ $(($3 - $4)) -le 1 ] || die "$rel: $3 copies on one node and $4 on another"
+    ok "$rel: $want copies Ready, over $2 nodes ($3 and $4)"
+  done
+}
+
 # ---- what the reader brings: the cluster --------------------------------------
 section "the cluster: kind '$CLUSTER_NAME' with Calico (up.sh Phase 1)"
 bash "$LOCAL_DIR/up.sh" phase1_cluster
@@ -151,9 +188,15 @@ release "$EDGE_VERSION"
 # ---- the pages -------------------------------------------------------------------
 mkdir "$WORK/reader"
 run_doc install.md "$GUIDE_BLOCKS" "$WORK/install.sh" "$WORK/reader" \
-  EDGE_VERSION="$EDGE_VERSION" NODE_CIDR="$NODE_CIDR" GATEWAY=127.0.0.1
+  PROFILE="$PROFILE" EDGE_VERSION="$EDGE_VERSION" NODE_CIDR="$NODE_CIDR" GATEWAY=127.0.0.1
+
+section "the $PROFILE profile is what runs"
+ha_running
 
 section "the release $NEW_VERSION, to upgrade to"
 release "$NEW_VERSION"
 run_doc upgrade.md "$UPGRADE_BLOCKS" "$WORK/upgrade.sh" "$WORK/reader/edge-infra" \
-  NEW_VERSION="$NEW_VERSION"
+  PROFILE="$PROFILE" NEW_VERSION="$NEW_VERSION"
+
+section "the $PROFILE profile still runs after the upgrade"
+ha_running

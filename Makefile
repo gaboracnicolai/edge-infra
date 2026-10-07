@@ -1,3 +1,5 @@
+PROFILE ?= ha
+
 .PHONY: observe observe-down helm-lint helm-template-dry-run verify-xds-mtls verify-image-pins verify-image-registry verify-images scan-images release-version-test test-integration argocd-apply argocd-diff docker-build-local kind-e2e release-e2e kind-cutover kind-rollback kind-datastores kind-backup kind-install-guide kind-observability observability-rules kubeconform
 
 # Apply the unified observability stack to the active kubeconfig context.
@@ -36,35 +38,37 @@ helm-lint:
 	helm lint --strict deploy/helm/edge-ratelimit
 	helm lint --strict deploy/helm/edge-datastores
 
-# Render each chart with its staging values to verify templates produce valid YAML.
+# Render each chart with one profile from deploy/profiles (PROFILE=lite, ha or
+# airgap; ha by default) to verify templates produce valid YAML.
 helm-template-dry-run:
+	@test -d deploy/profiles/$(PROFILE) || { echo "no profile deploy/profiles/$(PROFILE)"; exit 2; }
 	helm template edge-control-plane deploy/helm/edge-control-plane \
-	  --values deploy/envs/staging/values-control-plane.yaml
+	  --values deploy/profiles/$(PROFILE)/edge-control-plane.yaml
 	helm template edge-proxy deploy/helm/edge-proxy \
-	  --values deploy/envs/staging/values-proxy.yaml
+	  --values deploy/profiles/$(PROFILE)/edge-proxy.yaml
 	helm template edge-osb deploy/helm/edge-osb \
-	  --values deploy/envs/staging/values-osb.yaml
+	  --values deploy/profiles/$(PROFILE)/edge-osb.yaml
 	helm template auth-service deploy/helm/auth-service \
-	  --values deploy/envs/staging/values-auth-service.yaml
-	helm template edge-issuer deploy/helm/edge-issuer \
-	  --values deploy/envs/staging/values-issuer.yaml
+	  --values deploy/profiles/$(PROFILE)/auth-service.yaml
+	helm template edge-issuer deploy/helm/edge-issuer --set config.activeKid=k1 \
+	  --values deploy/profiles/$(PROFILE)/edge-issuer.yaml
 	helm template edge-ratelimit deploy/helm/edge-ratelimit \
-	  --values deploy/envs/staging/values-ratelimit.yaml
+	  --values deploy/profiles/$(PROFILE)/edge-ratelimit.yaml
 
-# Every chart rendered for base, every env overlay, the kind overlays and with
-# every optional resource on, validated by kubeconform -strict against the
+# Every chart rendered for base, every profile in deploy/profiles, the kind values
+# and with every optional resource on, validated by kubeconform -strict against the
 # Kubernetes version kind runs (B28.236). Needs helm and kubeconform.
 kubeconform:
 	bash deploy/hack/kubeconform.sh
 
 # Invariant lock: assert the edge-proxy bootstrap renders xDS mutual TLS with
-# peer pinning (SNI + SAN==controlPlaneHost) for base + every env overlay.
+# peer pinning (SNI + SAN==controlPlaneHost) for base + every profile.
 # Fails if anyone reverts xDS to plaintext or drops the SAN pin.
 verify-xds-mtls:
 	bash deploy/hack/verify-xds-mtls.sh
 
-# Render every chart for base + every env overlay and fail if any image runs on
-# :latest or no tag. Pin images to the SHA you pushed, as the server does.
+# Render every chart for base + every profile and fail if any image runs on
+# :latest or no tag, or if the airgap profile pulls one from outside its registry. Pin images to the SHA you pushed, as the server does.
 verify-image-pins:
 	bash deploy/hack/verify-image-pins.sh
 
@@ -170,11 +174,15 @@ kind-observability:
 observability-rules:
 	promtool check rules deploy/helm/edge-observability/rules/*.yaml
 
-# Install Argo CD itself, then register the AppProject and all Applications.
+# Register the AppProject and every Application with the Argo CD you already run,
+# each chart on one profile: make argocd-apply PROFILE=lite (or ha, the default,
+# or airgap).
 argocd-apply:
-	kubectl apply -n argocd -f deploy/argocd/install/argocd-install.yaml
+	@test -d deploy/profiles/$(PROFILE) || { echo "no profile deploy/profiles/$(PROFILE)"; exit 2; }
 	kubectl apply -f deploy/argocd/projects/
-	kubectl apply -f deploy/argocd/applications/
+	for app in deploy/argocd/applications/*.yaml; do \
+	  sed 's#/profiles/ha/#/profiles/$(PROFILE)/#' "$$app" | kubectl apply -f - || exit 1; \
+	done
 
 # Build all three custom images locally for smoke testing.
 docker-build-local:

@@ -14,7 +14,12 @@ spec:
     helm:
       valueFiles:
         - values.yaml
-        - ../../../envs/prod/eu-west-1/values-issuer.yaml
+        - ../../profiles/ha/edge-issuer.yaml
+      parameters:
+        # The kid of the signing key in the issuer-signing-keys Secret
+        # (docs/auth-front-deploy.md).
+        - name: config.activeKid
+          value: "2026-06"
   destination:
     server: https://kubernetes.default.svc
     namespace: infra

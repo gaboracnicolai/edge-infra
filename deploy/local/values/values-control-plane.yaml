@@ -1,5 +1,7 @@
-# Local overlay for edge-control-plane. Layered on the chart values.yaml and
-# deploy/envs/dev/values-control-plane.yaml.
+# Local overlay for edge-control-plane. Layered on the chart values.yaml.
+# One copy, no pod anti-affinity: the kind lane runs one of each service.
+replicaCount: 1
+affinity: {}
 image:
   repository: edge-control-plane
   tag: local

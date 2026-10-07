@@ -1,0 +1,6 @@
+# airgap profile: the ha profile, with every image pulled from your own registry.
+# docs/air-gap.md writes your registry in place of the one below before you
+# carry the release across.
+# The gateway already runs on every worker.
+global:
+  imageRegistry: registry.internal:5000

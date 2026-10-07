@@ -1,6 +1,5 @@
 # Local overlay for edge-osb. The chart reads api.image / worker.image (NOT a
-# top-level image.*), and api.replicaCount / worker.replicaCount (the dev
-# overlay's top-level replicaCount is a no-op).
+# top-level image.*), and api.replicaCount / worker.replicaCount.
 api:
   image:
     repository: edge-osb

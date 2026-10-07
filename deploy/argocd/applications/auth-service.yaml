@@ -14,7 +14,7 @@ spec:
     helm:
       valueFiles:
         - values.yaml
-        - ../../../envs/prod/eu-west-1/values-auth-service.yaml
+        - ../../profiles/ha/auth-service.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: infra

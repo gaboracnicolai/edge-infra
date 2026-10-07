@@ -18,7 +18,7 @@
 #   4  data-plane PKI (the edge-pki chart: the CAs; each chart issues its own certificate)
 #   5  admin PKI (bootstrap-pki.sh) + app secrets
 #   6  migrate the shared DB (control-plane + OSB schemas)
-#   7  deploy all charts with dev overlays, extAuthz at its chart default (ON)
+#   7  deploy all charts with the local overlays, extAuthz at its chart default (ON)
 #   8  seed two tenant backends + a gateway/route per tenant
 #   9  prove routable: a request per tenant through the node :443 hostPort
 #  25  fresh install: an OSB service with the default jwt auth answers 401
@@ -426,13 +426,12 @@ verify_phase6() {
 
 # ---- Phase 7 — deploy all charts (extAuthz ON, the chart default) -----------
 # helm_install <release> <namespace> — chart default values.yaml is implicit;
-# layer the dev overlay then the local overlay (each if present). --wait blocks
-# until Ready so the next chart's dependency is satisfied.
+# layer the local overlay (if present). --wait blocks until Ready so the next
+# chart's dependency is satisfied.
 helm_install() {
   local rel="$1" ns="$2" suffix
   suffix="${rel#edge-}"
   local chart="$REPO_ROOT/deploy/helm/$rel"
-  local dev="$REPO_ROOT/deploy/envs/dev/values-${suffix}.yaml"
   local loc="$LOCAL_DIR/values/values-${suffix}.yaml"
   section "helm upgrade --install $rel -> ns/$ns"
   # Clear a prior stuck/failed release (e.g. a hook that timed out) so a re-run
@@ -446,7 +445,6 @@ helm_install() {
       k -n "$ns" delete job "${rel}-migrate" --ignore-not-found >/dev/null 2>&1 || true ;;
   esac
   set -- upgrade --install "$rel" "$chart" -n "$ns" --create-namespace
-  if [ -f "$dev" ]; then set -- "$@" -f "$dev"; fi
   if [ -f "$loc" ]; then set -- "$@" -f "$loc"; fi
   set -- "$@" --wait --timeout "${HELM_TIMEOUT:-300s}"
   h "$@"
@@ -461,7 +459,7 @@ diag_fail() {  # <release> <ns> — dump why a chart didn't come up, then stop.
 }
 
 phase7_deploy() {
-  section "PHASE 7 — deploy charts (dev overlays, extAuthz ON — the chart default)"
+  section "PHASE 7 — deploy charts (local overlays, extAuthz ON — the chart default)"
   # The local overlays switch the charts' NetworkPolicies on with the gateway
   # (hostNetwork edge-proxy) allowed from 172.16.0.0/12. A node outside it
   # would be cut off from the control-plane, so stop here rather than later.
@@ -835,7 +833,6 @@ NP
 helm_set_extauthz() {
   section "helm: ext_authz enabled=$1 (LIVE --set flip)"
   h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
-    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
     -f "$LOCAL_DIR/values/values-control-plane.yaml" \
     --set extAuthz.enabled="$1" --wait --timeout 200s
   # The control-plane's snapshot version counter is per-process (non-HA), so it
@@ -1650,7 +1647,7 @@ CC_ATTESTER="http://mock-attester.edge-attest.svc.cluster.local:8006/aa/evidence
 cc_install() {
   local rel="$1" key="$2" url="$3"; shift 3
   h upgrade --install "$rel" "$REPO_ROOT/deploy/helm/auth-service" -n "$INFRA_NS" \
-    -f "$REPO_ROOT/deploy/envs/dev/values-auth-service.yaml" -f "$LOCAL_DIR/values/values-auth-service.yaml" \
+    -f "$LOCAL_DIR/values/values-auth-service.yaml" \
     --set certificate.create=false \
     --set confidential.enabled=true --set confidential.runtimeClassName=confidential-mock \
     --set confidential.attestation.image.repository=edge-attest --set "confidential.attestation.image.tag=$IMAGE_TAG" \
@@ -2063,7 +2060,6 @@ ON CONFLICT (name) DO UPDATE SET gateway_id=EXCLUDED.gateway_id,hosts=EXCLUDED.h
 helm_set_otel() {
   section "helm: telemetry.otel enabled=$1 (LIVE --set flip; ext_authz stays on)"
   h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
-    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
     -f "$LOCAL_DIR/values/values-control-plane.yaml" \
     --set extAuthz.enabled=true --set telemetry.otel.enabled="$1" --wait --timeout 200s >/dev/null
   k -n edge rollout restart ds/edge-proxy >/dev/null
@@ -3565,7 +3561,6 @@ phase35_licence() {
   apply_secret "$INFRA_NS" generic edge-licence \
     --from-literal=licence="$(mint_licence "$tdir/licence.pem" lic_kind_valid $((now + 86400)))" >/dev/null
   h upgrade edge-control-plane "$REPO_ROOT/deploy/helm/edge-control-plane" -n "$INFRA_NS" \
-    -f "$REPO_ROOT/deploy/envs/dev/values-control-plane.yaml" \
     -f "$LOCAL_DIR/values/values-control-plane.yaml" \
     --set licence.existingSecret=edge-licence --set "licence.publicKeys[0]=$pub" \
     --wait --timeout 200s >/dev/null || die "PHASE35: the control plane did not upgrade with the licence"

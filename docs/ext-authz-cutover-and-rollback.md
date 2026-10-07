@@ -21,7 +21,7 @@ fleet on last-good, so provisioning stays frozen from the bump until the enable.
 
 `deploy/helm/edge-control-plane/values.yaml:5` pins the control-plane image to
 `447ceb18980fc02fdc7e28db16354c62e3018850` — a **2026-05-20** build, **120 commits behind `main`**.
-No environment overlay overrides it (`deploy/envs/**` pins no tag), and nothing automates the bump:
+No profile overrides it (`deploy/profiles/**` pins no tag), and nothing automates the bump:
 `images.yaml` pushes SHA-tagged images but never writes back to `values.yaml`.
 
 That commit's `internal/config/config.go` contains **no `ExtAuthz` fields at all** — it predates

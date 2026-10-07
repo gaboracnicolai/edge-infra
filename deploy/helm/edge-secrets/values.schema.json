@@ -110,6 +110,12 @@
     "podAnnotations": {
       "type": "object"
     },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
     "podDisruptionBudget": {
       "type": "object",
       "additionalProperties": false,

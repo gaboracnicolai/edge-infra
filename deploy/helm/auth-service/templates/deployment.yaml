@@ -22,6 +22,10 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "auth-service.serviceAccountName" . }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.confidential }}
       {{- if .enabled }}
       {{- if not .nodeSelector }}

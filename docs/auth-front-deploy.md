@@ -7,8 +7,8 @@ runbook to do so.
 
 ## Prerequisites
 
-- A cluster, with argocd installed (`make argocd-apply`) and the AppProject +
-  Applications registered.
+- A cluster running Argo CD, with the AppProject and Applications registered
+  (`make argocd-apply PROFILE=ha`).
 - **Kyverno installed** (the admission controller). Without it the
   `disallow-public-backend-services` ClusterPolicy is inert — the ClusterIP
   guarantee is **not enforced** until Kyverno is running and the `edge-policies`
@@ -80,7 +80,7 @@ kubectl -n infra create secret generic issuer-secrets \
   --from-literal=ISSUER_DATABASE_URL='postgres://issuer:<pw>@<host>:5432/issuer?sslmode=require'
 
 # Signing key(s): one <kid>.pem per data entry. The kid here ("2026-06") must
-# match config.activeKid in deploy/envs/.../values-issuer.yaml.
+# match the config.activeKid parameter in deploy/argocd/applications/edge-issuer.yaml.
 openssl genrsa -out 2026-06.pem 2048
 kubectl -n infra create secret generic issuer-signing-keys --from-file=2026-06.pem
 
