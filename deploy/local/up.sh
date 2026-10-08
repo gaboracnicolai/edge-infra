@@ -2703,16 +2703,23 @@ KEYLESS_AUD="edge-egress"
 # keyless_curl <with-token|no-token> [curl args...] — curl from agent-keyless with
 # the key planted in it ($OPENAI_API_KEY, read in the pod) as Authorization,
 # x-api-key and api-key. with-token adds its workload token as
-# Proxy-Authorization. Echoes curl's verbose output and "curl-exit=<rc>".
+# Proxy-Authorization. Echoes curl's verbose output, then the response body,
+# then "curl-exit=<rc>". The body is held until curl exits and everything leaves
+# the pod on one stream: a body on a second stream once landed inside one of
+# curl's verbose lines ("{ [983 bytes dName: mock-llm"), and provider_echo then
+# dropped the provider's first line with curl's.
 keyless_curl() {
   local out rc=0
   out="$(k -n "$LOCKED_NS" exec agent-keyless -- sh -c '
+    exec 2>&1
     mode=$1; shift
     if [ "$mode" = with-token ]; then
       set -- --proxy-header "Proxy-Authorization: Bearer $(cat /var/run/secrets/talyvor/token)" "$@"
     fi
-    exec curl -sv --max-time 8 -H "Authorization: Bearer $OPENAI_API_KEY" \
-      -H "x-api-key: $OPENAI_API_KEY" -H "api-key: $OPENAI_API_KEY" "$@"' _ "$@" 2>&1)" || rc=$?
+    body="$(curl -sv --max-time 8 -H "Authorization: Bearer $OPENAI_API_KEY" \
+      -H "x-api-key: $OPENAI_API_KEY" -H "api-key: $OPENAI_API_KEY" "$@")"; rc=$?
+    printf "%s\n" "$body"
+    exit "$rc"' _ "$@" 2>&1)" || rc=$?
   printf '%s\ncurl-exit=%s\n' "$out" "$rc"
 }
 
